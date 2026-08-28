@@ -29,9 +29,9 @@ classifiers = [
 dependencies = ["torch>=2.0"]
 
 [project.urls]
-Homepage = "https://github.com/torchburn/torchburn"
-Repository = "https://github.com/torchburn/torchburn"
-Issues = "https://github.com/torchburn/torchburn/issues"
+Homepage = "https://github.com/kuntal-devrat/torchburn"
+Repository = "https://github.com/kuntal-devrat/torchburn"
+Issues = "https://github.com/kuntal-devrat/torchburn/issues"
 
 [project.optional-dependencies]
 dev = ["pytest", "numpy"]

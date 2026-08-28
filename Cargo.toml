@@ -6,6 +6,8 @@ description = "Hardware-agnostic PyTorch compilation backend: PyO3 + DLPack zero
 license = "Apache-2.0"
 keywords = ["pytorch", "dlpack", "burn", "compile", "ffi"]
 categories = ["api-bindings", "compilers"]
+repository = "https://github.com/kuntal-devrat/torchburn"
+homepage = "https://github.com/kuntal-devrat/torchburn"
 
 [lib]
 name = "_torchburn"

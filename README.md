@@ -10,10 +10,10 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/torchburn/torchburn/actions"><img src="https://img.shields.io/github/actions/workflow/status/torchburn/torchburn/ci.yml?branch=main&style=for-the-badge&logo=github&color=FF5722" alt="CI"></a>
+  <a href="https://github.com/kuntal-devrat/torchburn/actions"><img src="https://img.shields.io/github/actions/workflow/status/kuntal-devrat/torchburn/ci.yml?branch=main&style=for-the-badge&logo=github&color=FF5722" alt="CI"></a>
   <a href="https://pypi.org/project/torchburn/"><img src="https://img.shields.io/pypi/v/torchburn.svg?style=for-the-badge&logo=pypi&color=FF9800" alt="PyPI"></a>
   <a href="https://pypi.org/project/torchburn/"><img src="https://img.shields.io/pypi/pyversions/torchburn.svg?style=for-the-badge&logo=python&color=FFC107" alt="Python"></a>
-  <a href="https://github.com/torchburn/torchburn/blob/main/LICENSE"><img src="https://img.shields.io/badge/License-Apache_2.0-blue.svg?style=for-the-badge&color=2196F3" alt="License"></a>
+  <a href="https://github.com/kuntal-devrat/torchburn/blob/main/LICENSE"><img src="https://img.shields.io/badge/License-Apache_2.0-blue.svg?style=for-the-badge&color=2196F3" alt="License"></a>
   <img src="https://img.shields.io/badge/GPU-Vulkan%20%7C%20DX12%20%7C%20Metal-success?style=for-the-badge&color=4CAF50" alt="GPU Support">
   <img src="https://img.shields.io/badge/CUDA-Zero%20Dependencies-black?style=for-the-badge" alt="Zero CUDA">
 </p>
@@ -95,7 +95,7 @@ pip install torchburn
 
 ```bash
 # Clone the repository
-git clone https://github.com/torchburn/torchburn.git
+git clone https://github.com/kuntal-devrat/torchburn.git
 cd torchburn
 
 # Build and install optimized release wheel
