@@ -84,6 +84,7 @@ mod attention;
 mod fusion;
 mod ops_phase7;
 mod extra_ops;
+mod extra_ops2;
 mod pool;
 pub mod autograd;
 
@@ -282,7 +283,7 @@ fn autograd_backward(
     };
 
     let mut leaf_grads = std::collections::HashMap::new();
-    crate::autograd::backward(&upstream, &mut leaf_grads);
+    py.allow_threads(|| crate::autograd::backward(&upstream, &mut leaf_grads));
 
     // Convert leaf grads to DLPack capsules (zero-copy move).
     let mut result = Vec::new();
