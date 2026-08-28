@@ -33,16 +33,28 @@ thread_local! {
 /// The returned `Vec<u64>` has length `words` and is zeroed.
 pub fn take_buffer(dtype: DType, words: usize) -> Vec<u64> {
     GLOBAL_ALLOC_COUNT.fetch_add(1, Ordering::Relaxed);
+    // Avoid pooling extremely large buffers (>80MB) to prevent memory bloat
+    if words > 10_000_000 {
+        return vec![0u64; words];
+    }
     POOL.with(|pool| {
         let mut pool = pool.borrow_mut();
-        for i in 0..pool.len() {
-            if pool[i].0 == dtype && pool[i].1 >= words {
-                GLOBAL_HIT_COUNT.fetch_add(1, Ordering::Relaxed);
-                let mut buf = pool.remove(i).2;
-                buf.resize(words, 0u64);
-                buf.fill(0u64);
-                return buf;
+        // Best-fit search: smallest buffer that fits to reduce fragmentation
+        let mut best_idx: Option<usize> = None;
+        let mut best_cap = usize::MAX;
+        for (i, (d, cap, _)) in pool.iter().enumerate() {
+            if *d == dtype && *cap >= words && *cap < best_cap {
+                best_cap = *cap;
+                best_idx = Some(i);
             }
+        }
+        if let Some(idx) = best_idx {
+            GLOBAL_HIT_COUNT.fetch_add(1, Ordering::Relaxed);
+            let mut buf = pool.remove(idx).2;
+            // Reuse allocation: clear logical length, then resize to needed words (zeroed)
+            buf.clear();
+            buf.resize(words, 0u64);
+            return buf;
         }
         vec![0u64; words]
     })
@@ -51,10 +63,15 @@ pub fn take_buffer(dtype: DType, words: usize) -> Vec<u64> {
 /// Return a buffer to the pool for reuse.
 pub fn give_buffer(dtype: DType, capacity: usize, mut buf: Vec<u64>) {
     GLOBAL_RECYCLE_COUNT.fetch_add(1, Ordering::Relaxed);
+    // Don't pool huge buffers
+    if capacity > 10_000_000 {
+        return;
+    }
     POOL.with(|pool| {
         let mut pool = pool.borrow_mut();
         if pool.len() < MAX_FREE {
             buf.clear();
+            // Ensure capacity is preserved for next reuse; don't shrink
             pool.push((dtype, capacity, buf));
         }
     })

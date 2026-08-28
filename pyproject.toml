@@ -34,7 +34,9 @@ Repository = "https://github.com/kuntal-devrat/torchburn"
 Issues = "https://github.com/kuntal-devrat/torchburn/issues"
 
 [project.optional-dependencies]
-dev = ["pytest", "numpy"]
+dev = ["pytest", "pytest-timeout", "numpy"]
+gpu = []
+all = ["torchburn[gpu]"]
 
 [tool.maturin]
 python-source = "python"

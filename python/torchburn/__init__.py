@@ -39,6 +39,21 @@ if sys.platform == "win32" and hasattr(os, "add_dll_directory"):
         except Exception:
             pass
 
+import logging
+
+# Structured logging via TORCHBURN_LOG env (debug/info/warning/error)
+_log_level = os.getenv("TORCHBURN_LOG", "").strip().lower()
+if _log_level in ("debug", "info", "warning", "error", "critical"):
+    _lvl = getattr(logging, _log_level.upper(), logging.INFO)
+    _handler = logging.StreamHandler()
+    _handler.setFormatter(logging.Formatter("[torchburn:%(levelname)s] %(message)s"))
+    _log = logging.getLogger("torchburn")
+    _log.setLevel(_lvl)
+    _log.addHandler(_handler)
+    _log.propagate = False
+    # Also set root for Rust side via env
+    os.environ.setdefault("RUST_LOG", _log_level)
+
 import torch
 
 from ._backend import register, torchburn_backend
@@ -55,9 +70,18 @@ from .profiler import (
     active_engine,
     memory_pool_stats,
     clear_memory_pool,
+    trace,
+    op_coverage,
 )
 
-__version__ = "0.1.0"
+try:
+    __version__ = _native.__version__  # from Cargo.toml
+except AttributeError:
+    try:
+        from importlib.metadata import version as _pkg_version
+        __version__ = _pkg_version("torchburn")
+    except Exception:
+        __version__ = "0.1.0"
 
 
 def gpu_info():
@@ -104,12 +128,51 @@ __all__ = [
     "active_engine",
     "memory_pool_stats",
     "clear_memory_pool",
+    "trace",
+    "op_coverage",
 ]
 
 
 def compile(model, **kwargs):
     """Convenience wrapper: ``torchburn.compile(model)`` == ``torch.compile(model, backend="torchburn")``."""
     return torch.compile(model, backend="torchburn", **kwargs)
+
+
+def export(model, args=None, kwargs=None, dynamic_shapes=None, **compile_kwargs):
+    """Export a model via ``torch.export`` and compile with TorchBurn.
+
+    This is a thin wrapper that first tries ``torch.export.export`` (available
+    in torch>=2.1) to capture the graph, then compiles the resulting
+    ``ExportedProgram`` with the TorchBurn backend. On older torch or on
+    failure it falls back to ``torch.compile``.
+
+    Args:
+        model: nn.Module to export.
+        args: tuple of example inputs.
+        kwargs: dict of keyword inputs.
+        dynamic_shapes: dynamic shape spec for ``torch.export``.
+        **compile_kwargs: extra kwargs forwarded to ``torch.compile``.
+    """
+    args = args or ()
+    kwargs = kwargs or {}
+    # Try torch.export path first
+    try:
+        from torch.export import export as torch_export
+        # torch.export.export expects args as tuple
+        ep = torch_export(model, args=args, kwargs=kwargs, dynamic_shapes=dynamic_shapes)
+        # ExportedProgram has a `module` method that returns GraphModule
+        if hasattr(ep, "module"):
+            try:
+                gm = ep.module()
+                return torch.compile(gm, backend="torchburn", **compile_kwargs)
+            except Exception:
+                pass
+        # Fallback: return the ExportedProgram itself compiled via torch.compile on its run
+        return torch.compile(model, backend="torchburn", **compile_kwargs)
+    except (ImportError, AttributeError, Exception) as e:
+        import warnings
+        warnings.warn(f"torchburn.export: torch.export not available or failed ({e}); falling back to torch.compile")
+        return torch.compile(model, backend="torchburn", **compile_kwargs)
 
 
 register()

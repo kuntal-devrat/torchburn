@@ -239,8 +239,28 @@ impl BorrowedTensor {
             if data.is_null() {
                 return Err(PyValueError::new_err("null data pointer in DLPack tensor"));
             }
+            if dl.byte_offset > 1_000_000_000 {
+                return Err(PyValueError::new_err(format!(
+                    "byte_offset too large: {}",
+                    dl.byte_offset
+                )));
+            }
+            let data = match (data as usize).checked_add(dl.byte_offset as usize) {
+                Some(addr) => addr as *const u8,
+                None => return Err(PyValueError::new_err("byte_offset overflow")),
+            };
+            // Validate that byte_offset is element-aligned
+            let elem_size = dtype.elem_size();
+            if (dl.byte_offset as usize) % elem_size != 0 {
+                return Err(PyValueError::new_err(format!(
+                    "byte_offset {} not aligned to dtype {} ({} bytes)",
+                    dl.byte_offset,
+                    dtype.name(),
+                    elem_size
+                )));
+            }
             Ok(BorrowedTensor {
-                data: data.add(dl.byte_offset as usize),
+                data,
                 shape,
                 strides,
                 dtype,

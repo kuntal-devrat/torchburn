@@ -27,6 +27,7 @@ from ._parser import payload_json, parse_graph
 
 _WARNED: set[tuple[str, str]] = set()
 _WARN_LOCK = threading.Lock()
+_MAX_WARN_ENTRIES = 128
 
 _F32_F64 = (torch.float32, torch.float64)
 _INT_BOOL = (torch.int64, torch.int32, torch.bool)
@@ -38,6 +39,10 @@ def _warn_fallback(target: str, reason: str = "") -> None:
     with _WARN_LOCK:
         if key in _WARNED:
             return
+        # Bound growth to prevent memory leak in long-running serving
+        if len(_WARNED) >= _MAX_WARN_ENTRIES:
+            # Evict an arbitrary entry (set pop) to make room
+            _WARNED.pop()
         _WARNED.add(key)
     detail = f" ({reason})" if reason else ""
     warnings.warn(
@@ -207,6 +212,21 @@ class _BaseInterpreter:
     def _interpret(self, env: dict[int, Any]) -> Any:
         if not self._phases:
             return None
+        # Populate profiler if active
+        try:
+            from .profiler import _get_current_profile
+            prof = _get_current_profile()
+            if prof is not None:
+                total = len([n for n in self.plan["nodes"] if n["op"] in ("supported", "unsupported")])
+                supported = len([n for n in self.plan["nodes"] if n["op"] == "supported"])
+                unsupported = len([n for n in self.plan["nodes"] if n["op"] == "unsupported"])
+                prof.num_nodes = total
+                prof.num_supported = supported
+                prof.num_unsupported = unsupported
+                prof.num_fallbacks = unsupported
+                prof.graph_signature = getattr(self, "signature", "")
+        except Exception:
+            pass
         has_eager = any(p["kind"] == "eager" for p in self._phases)
         if not has_eager:
             native_nodes = [n for p in self._phases if p["kind"] == "native" for n in p["nodes"]]
@@ -270,11 +290,14 @@ class _BaseInterpreter:
             if capsule is not None:
                 t = torch.from_dlpack(capsule)
                 if cast_map and t.dtype == torch.float32:
-                    dtype_counts: dict[torch.dtype, int] = {}
-                    for dt in cast_map.values():
-                        dtype_counts[dt] = dtype_counts.get(dt, 0) + 1
-                    if dtype_counts:
-                        t = t.to(max(dtype_counts, key=dtype_counts.get))
+                    # Preserve original mixed precision dtype: use first encountered
+                    # mixed dtype instead of majority vote to avoid incorrect casting
+                    # when inputs have heterogeneous f16/bf16.
+                    first_dtype = next(iter(cast_map.values()))
+                    # Only cast if all mixed inputs share the same dtype; otherwise
+                    # keep f32 to avoid precision loss.
+                    if all(dt == first_dtype for dt in cast_map.values()):
+                        t = t.to(first_dtype)
                 env[node_id] = t
 
     def _exec_phases_sequentially(self, env: dict[int, Any]) -> None:
@@ -373,12 +396,10 @@ class _BaseInterpreter:
             capsule = by_id.get(node["id"])
             if capsule is not None:
                 t = torch.from_dlpack(capsule)
-                if cast_map:
-                    dtype_counts2: dict[torch.dtype, int] = {}
-                    for dt in cast_map.values():
-                        dtype_counts2[dt] = dtype_counts2.get(dt, 0) + 1
-                    if dtype_counts2 and t.dtype == torch.float32:
-                        t = t.to(max(dtype_counts2, key=dtype_counts2.get))
+                if cast_map and t.dtype == torch.float32:
+                    first_dtype = next(iter(cast_map.values()))
+                    if all(dt == first_dtype for dt in cast_map.values()):
+                        t = t.to(first_dtype)
                 env[node["id"]] = t
 
     # -------------------------------------------------------- output helpers

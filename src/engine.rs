@@ -1770,7 +1770,7 @@ pub fn engine_name() -> &'static str {
                     return if crate::wgpu_backend::gpu_available() {
                         "burn_wgpu"
                     } else {
-                        "burn_ndarray (wgpu unavailable)"
+                        "burn_ndarray"
                     };
                 }
                 _ => return "burn_ndarray",
@@ -1820,17 +1820,33 @@ pub fn dict_to_payload(dict: &Bound<'_, PyDict>) -> PyResult<Payload> {
     // --- inputs ---
     let inputs: Vec<InputSpec> = match dict.get_item("inputs")? {
         Some(obj) => {
-            let list: &Bound<'_, PyList> = obj.downcast()?;
+            let list: &Bound<'_, PyList> = obj.downcast().map_err(|_| {
+                pyo3::exceptions::PyValueError::new_err("payload 'inputs' must be a list")
+            })?;
             let mut v = Vec::with_capacity(list.len());
             for item in list.iter() {
-                let d: &Bound<'_, PyDict> = item.downcast()?;
-                let shape: Vec<i64> = d.get_item("shape")?.map(|o| {
-                    let l: &Bound<'_, PyList> = o.downcast().unwrap();
-                    l.iter().map(|x| x.extract::<i64>().unwrap_or(0)).collect()
-                }).unwrap_or_default();
-                let dtype: String = d.get_item("dtype")?.map(|o| {
-                    o.extract::<String>().unwrap_or_else(|_| "f32".to_string())
-                }).unwrap_or_else(|| "f32".to_string());
+                let d: &Bound<'_, PyDict> = item.downcast().map_err(|_| {
+                    pyo3::exceptions::PyValueError::new_err("input spec must be a dict")
+                })?;
+                let shape: Vec<i64> = match d.get_item("shape")? {
+                    Some(o) => {
+                        let l: &Bound<'_, PyList> = o.downcast().map_err(|_| {
+                            pyo3::exceptions::PyValueError::new_err("input 'shape' must be a list")
+                        })?;
+                        l.iter().map(|x| x.extract::<i64>().unwrap_or(0)).collect()
+                    }
+                    None => vec![],
+                };
+                let dtype: String = match d.get_item("dtype")? {
+                    Some(o) => o.extract::<String>().unwrap_or_else(|_| "f32".to_string()),
+                    None => "f32".to_string(),
+                };
+                if shape.iter().any(|&d| d < 0) {
+                    return Err(pyo3::exceptions::PyValueError::new_err("input shape contains negative dim"));
+                }
+                if dtype_from_spec(&dtype).is_none() {
+                    return Err(pyo3::exceptions::PyValueError::new_err(format!("unknown dtype '{dtype}'")));
+                }
                 v.push(InputSpec { shape, dtype });
             }
             v
@@ -1841,19 +1857,28 @@ pub fn dict_to_payload(dict: &Bound<'_, PyDict>) -> PyResult<Payload> {
     // --- nodes ---
     let nodes: Vec<Node> = match dict.get_item("nodes")? {
         Some(obj) => {
-            let list: &Bound<'_, PyList> = obj.downcast()?;
+            let list: &Bound<'_, PyList> = obj.downcast().map_err(|_| {
+                pyo3::exceptions::PyValueError::new_err("payload 'nodes' must be a list")
+            })?;
             let mut v = Vec::with_capacity(list.len());
             for item in list.iter() {
-                let d: &Bound<'_, PyDict> = item.downcast()?;
+                let d: &Bound<'_, PyDict> = item.downcast().map_err(|_| {
+                    pyo3::exceptions::PyValueError::new_err("node must be a dict")
+                })?;
                 let id: u32 = d.get_item("id")?.map(|o| o.extract().unwrap_or(0)).unwrap_or(0);
                 let target: String = d.get_item("target")?.map(|o| {
                     o.extract::<String>().unwrap_or_default()
                 }).unwrap_or_default();
+                if target.is_empty() {
+                    return Err(pyo3::exceptions::PyValueError::new_err(format!("node {id} missing target")));
+                }
 
                 // Parse args: list of dicts with optional index/value
                 let args: Vec<ArgRef> = match d.get_item("args")? {
                     Some(ao) => {
-                        let al: &Bound<'_, PyList> = ao.downcast()?;
+                        let al: &Bound<'_, PyList> = ao.downcast().map_err(|_| {
+                            pyo3::exceptions::PyValueError::new_err("node 'args' must be a list")
+                        })?;
                         al.iter().map(|a| {
                             if let Ok(ad) = a.downcast::<PyDict>() {
                                 let index: Option<usize> = ad.get_item("index")?.and_then(|o| o.extract().ok());
@@ -1872,7 +1897,9 @@ pub fn dict_to_payload(dict: &Bound<'_, PyDict>) -> PyResult<Payload> {
                 // Parse kwargs: dict of string -> JSON value
                 let kwargs: HashMap<String, serde_json::Value> = match d.get_item("kwargs")? {
                     Some(ko) => {
-                        let kd: &Bound<'_, PyDict> = ko.downcast()?;
+                        let kd: &Bound<'_, PyDict> = ko.downcast().map_err(|_| {
+                            pyo3::exceptions::PyValueError::new_err("node 'kwargs' must be a dict")
+                        })?;
                         let mut m = HashMap::new();
                         for (k, v) in kd.iter() {
                             if let (Ok(ks), Some(jv)) = (k.extract::<String>(), py_to_json(&v).ok()) {
@@ -1894,11 +1921,16 @@ pub fn dict_to_payload(dict: &Bound<'_, PyDict>) -> PyResult<Payload> {
     // --- outputs ---
     let outputs: Vec<u32> = match dict.get_item("outputs")? {
         Some(obj) => {
-            let list: &Bound<'_, PyList> = obj.downcast()?;
+            let list: &Bound<'_, PyList> = obj.downcast().map_err(|_| {
+                pyo3::exceptions::PyValueError::new_err("payload 'outputs' must be a list")
+            })?;
             list.iter().filter_map(|o| o.extract::<u32>().ok()).collect()
         }
         None => vec![],
     };
+    if nodes.is_empty() && !inputs.is_empty() {
+        return Err(pyo3::exceptions::PyValueError::new_err("payload has inputs but no nodes"));
+    }
 
     Ok(Payload { inputs, nodes, outputs })
 }

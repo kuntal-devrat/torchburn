@@ -93,6 +93,17 @@ class _Stats:
 
 _STATS = _Stats()
 
+# Thread-local current profile for _interpreter to populate
+_thread_local = threading.local()
+
+
+def _set_current_profile(result: ProfileResult | None) -> None:
+    _thread_local.current = result
+
+
+def _get_current_profile() -> ProfileResult | None:
+    return getattr(_thread_local, "current", None)
+
 
 @contextlib.contextmanager
 def profile() -> Generator[ProfileResult, None, None]:
@@ -108,11 +119,15 @@ def profile() -> Generator[ProfileResult, None, None]:
     """
     result = ProfileResult()
     result.engine = _native.active_engine()
+    _set_current_profile(result)
     start = time.perf_counter()
-    yield result
-    elapsed = time.perf_counter() - start
-    result.wall_time_ms = elapsed * 1000.0
-    _STATS.record(result)
+    try:
+        yield result
+    finally:
+        elapsed = time.perf_counter() - start
+        result.wall_time_ms = elapsed * 1000.0
+        _set_current_profile(None)
+        _STATS.record(result)
 
 
 def coverage_report() -> dict[str, Any]:
@@ -182,3 +197,103 @@ def clear_memory_pool() -> None:
         _native.clear_memory_pool()
     except AttributeError:
         pass
+
+
+def trace(model, example_inputs, **kwargs) -> dict[str, Any]:
+    """Generate a Chrome trace JSON for a model (stub for ROADMAP 15.5).
+
+    Returns a dict with `traceEvents` that can be loaded in `chrome://tracing`
+    or `perfetto`. Currently profiles the native execution via `profile()`.
+    """
+    import torch
+
+    if not isinstance(example_inputs, (list, tuple)):
+        example_inputs = [example_inputs]
+    # Compile and profile
+    compiled = torch.compile(model, backend="torchburn", **kwargs)
+    with profile() as result:
+        # Warmup + timed run
+        _ = compiled(*example_inputs)
+    # Build minimal Chrome trace format
+    return {
+        "traceEvents": [
+            {
+                "name": "torchburn::execute",
+                "cat": "torchburn",
+                "ph": "X",
+                "ts": 0,
+                "dur": result.wall_time_ms * 1000,
+                "pid": 1,
+                "tid": 1,
+                "args": {
+                    "engine": result.engine,
+                    "nodes": result.num_nodes,
+                    "native": result.num_supported,
+                    "fallback": result.num_unsupported,
+                },
+            }
+        ],
+        "displayTimeUnit": "ms",
+        "metadata": {
+            "engine": result.engine,
+            "wall_time_ms": result.wall_time_ms,
+        },
+    }
+
+
+def op_coverage(model, example_inputs, **kwargs) -> dict[str, Any]:
+    """Analyze operator coverage for a specific model without executing.
+
+    Returns:
+        total_nodes: total FX nodes
+        native_nodes: count of native ops
+        fallback_nodes: count of fallback ops
+        native_ratio: fraction native
+        unsupported_ops: list of fallback op targets
+        engine: active engine
+    """
+    import torch
+    from torch.fx.experimental.proxy_tensor import make_fx
+    from ._parser import parse_graph
+
+    if not isinstance(example_inputs, (list, tuple)):
+        example_inputs = [example_inputs]
+    # Try to get FX graph
+    try:
+        gm = make_fx(model)(*example_inputs)
+    except Exception:
+        # Fallback to torch.compile's dynamo capture via a dummy
+        gm = model
+        return {
+            "total_nodes": 0,
+            "native_nodes": 0,
+            "fallback_nodes": 0,
+            "native_ratio": 0.0,
+            "unsupported_ops": [],
+            "engine": active_engine(),
+            "error": "could not capture graph via make_fx; use torch.compile for full trace",
+        }
+    try:
+        plan, _ = parse_graph(gm, list(example_inputs))
+        total = len([n for n in plan["nodes"] if n["op"] in ("supported", "unsupported")])
+        native = len([n for n in plan["nodes"] if n["op"] == "supported"])
+        fallback = len([n for n in plan["nodes"] if n["op"] == "unsupported"])
+        unsupported = [n["fx_target"] for n in plan["nodes"] if n["op"] == "unsupported"]
+        return {
+            "total_nodes": total,
+            "native_nodes": native,
+            "fallback_nodes": fallback,
+            "native_ratio": native / total if total else 0.0,
+            "unsupported_ops": unsupported,
+            "engine": active_engine(),
+        }
+    except Exception as exc:
+        return {
+            "total_nodes": 0,
+            "native_nodes": 0,
+            "fallback_nodes": 0,
+            "native_ratio": 0.0,
+            "unsupported_ops": [],
+            "engine": active_engine(),
+            "error": str(exc),
+        }

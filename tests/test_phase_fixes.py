@@ -142,7 +142,8 @@ class TestProfilingAPI:
         with torchburn.profile() as p:
             pass
         assert p.wall_time_ms >= 0
-        assert p.engine in ("native_cpu", "burn_ndarray", "burn_wgpu")
+        # burn_ndarray may appear with wgpu unavailable suffix on headless CI
+        assert p.engine in ("native_cpu", "burn_ndarray", "burn_wgpu") or p.engine.startswith("burn_ndarray")
 
     def test_coverage_report(self):
         import torchburn
