@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "torchburn"
-version = "0.1.0"
+version = "0.2.0"
 description = "A hardware-agnostic, Rust-compiled PyTorch compilation backend. Zero-copy DLPack FFI, BLAKE3 structural graph caching, and safe eager fallback for unsupported operators."
 readme = "README.md"
 requires-python = ">=3.9"
@@ -12,7 +12,7 @@ license = { text = "Apache-2.0" }
 authors = [{ name = "TorchBurn contributors" }]
 keywords = ["pytorch", "compile", "dlpack", "rust", "burn", "gpu", "wgpu"]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 4 - Beta",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",

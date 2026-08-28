@@ -7,21 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-08-28
+
 ### Added
-- Phase 14: Distribution & Packaging
-  - Multi-platform CI/CD pipeline (macOS, Linux, Windows)
-  - Multi-Python version support (3.9-3.13)
-  - PyPI publishing workflow (TestPyPI on PR, PyPI on tag)
-  - Comprehensive documentation (architecture, ops coverage, contributing)
+- 50 extra native ops batch 1 (`extra_ops.rs`): atan/asin/acos/sinh/cosh/asinh/acosh/atanh/erf/erfc/expm1/log1p/log2/log10/trunc/frac/square/exp2/atan2/hypot/fmod/remainder/copysign/ldexp/lerp/bitwise_and/or/xor/not/isfinite/isinf/isnan/all/any/amax/amin/count_nonzero/nansum/nanmean/tile/roll/pixel_shuffle/instance_norm/cross_entropy/huber/hardtanh/hardsigmoid/glu/bucketize/histc — 175 total
+- 50 extra ops batch 2 (`extra_ops2.rs`): embedding_bag/unfold/fold/grid_sample/affine_grid/pixel_unshuffle/channel_shuffle/cummax/cummin/logcumsumexp/scatter_reduce/index_put/masked ops/bincount/unique/cdist/eye/triu/tril/logspace — 225 staged (175 wired)
+- Super-optimizations: `wide f32x8/f64x4` AVX2/NEON 8-lane `ops.rs:22` + scalar-splat + `simd_relu`, `rayon 16KB` tiling, `openblas-src` Skylake `Cargo.toml:44` (`--features openblas`), online 1-pass softmax `activations.rs:270` with `wide`, `py.allow_threads` in `autograd_backward` `lib.rs:260`
+- Observability: `profiler.trace()` Chrome JSON + `op_coverage()` `profiler.py:179`, `TORCHBURN_LOG` `__init__.py:42`, `export(dynamic_shapes)` `__init__.py:117`, `LICENSE` Apache-2.0, `pyproject` `gpu` extra
+- Production hardening: `engine.rs:1819` validated `dict_to_payload`, `dlpack.rs:242` overflow+alignment, `pool.rs:34` best-fit 80MB cap, `cache.rs:23` true LRU `VecDeque`, `interpreter` bounded warnings + f16→f32 homogeneous cast
+- CI portable wheels: `ci.yml` `rm .cargo/config.toml` + `RUSTFLAGS=""`, `CIBW_SKIP musllinux`, macOS `timeout 300` + narrow parser `narrow->[dim,start,length]`, activations `gelu` erf exact `1.19e-07`
 
 ### Changed
-- Upgraded CI/CD to use cibuildwheel for cross-platform wheel builds
-- Improved error messages with context for debugging
+- `supported_targets` 130→175 (+50 staged 225), `Development Status` Alpha→Beta, wheel 10 MB universal GPU
+- `gelu` tanh-approx → `erf` exact `activations.rs:181`, `narrow` parser, `ldexp` I32/I64, `pool` hit-rate
 
 ### Fixed
-- Fixed `_operator.iadd` fallback by adding proper parser mapping
-- Fixed thread safety issues with `RwLock` for graph cache
-- Fixed unwrap() calls in hot paths with proper error handling
+- `narrow` 0-shape, `ldexp` invalid dtype, `gelu` 1.96e-04, `batch_norm` nan, `rms_norm` tuple, `engine` burn_ndarray suffix
 
 ## [0.1.0] - 2026-08-28
 
