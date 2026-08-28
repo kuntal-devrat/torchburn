@@ -23,7 +23,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fixed thread safety issues with `RwLock` for graph cache
 - Fixed unwrap() calls in hot paths with proper error handling
 
-## [0.1.0-alpha] - 2024-XX-XX
+## [0.1.0] - 2026-08-28
 
 ### Added
 - Phase 1: DLPack FFI bridge + elementwise ops (add, sub, mul, div, relu)
