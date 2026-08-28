@@ -3052,6 +3052,7 @@ version = "0.1.0"
 dependencies = [
  "blake3",
  "burn",
+ "libm",
  "matrixmultiply",
  "pyo3",
  "rand 0.8.7",

@@ -83,6 +83,7 @@ mod losses;
 mod attention;
 mod fusion;
 mod ops_phase7;
+mod extra_ops;
 mod pool;
 pub mod autograd;
 

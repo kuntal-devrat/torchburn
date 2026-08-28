@@ -23,6 +23,7 @@ serde_json = "1"
 # Portable SIMD (SSE2/AVX2 on x86-64, NEON on ARM, wasm) for the attention
 # kernels — zero-copy lane math for the QK^T dots and softmax exp.
 wide = "0.7"
+libm = "0.2"
 
 # Optional Burn execution engine (Phase 2/3). Compile with:
 #   maturin develop --features burn          # ndarray CPU backend

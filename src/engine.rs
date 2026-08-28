@@ -13,7 +13,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use std::collections::HashMap;
 
-use crate::{ops, activations, math_ops, reductions, linalg, norm, shape_ops, convolution, pooling, upsample, embedding, losses, attention, fusion, ops_phase7};
+use crate::{ops, activations, math_ops, reductions, linalg, norm, shape_ops, convolution, pooling, upsample, embedding, losses, attention, fusion, ops_phase7, extra_ops};
 use std::sync::{RwLock, OnceLock};
 
 // ---------------------------------------------------------------------------
@@ -233,6 +233,18 @@ pub fn supported_targets() -> Vec<String> {
         "unbind".into(), "chunk".into(), "getitem".into(),
         "repeat_interleave".into(), "repeat".into(),
         "einsum".into(), "prelu".into(), "nonzero".into(), "clamp_tensor".into(),
+        // v0.2 extra 50 ops — super coverage
+        "atan".into(), "asin".into(), "acos".into(), "sinh".into(), "cosh".into(),
+        "asinh".into(), "acosh".into(), "atanh".into(), "erf".into(), "erfc".into(),
+        "expm1".into(), "log1p".into(), "log2".into(), "log10".into(),
+        "atan2".into(), "hypot".into(), "fmod".into(), "remainder".into(), "copysign".into(), "lerp".into(),
+        "bitwise_and".into(), "bitwise_or".into(), "bitwise_xor".into(), "bitwise_not".into(),
+        "isfinite".into(), "isinf".into(), "isnan".into(),
+        "all".into(), "any".into(), "amax".into(), "amin".into(), "count_nonzero".into(), "nansum".into(), "nanmean".into(),
+        "tile".into(), "roll".into(), "pixel_shuffle".into(), "instance_norm".into(),
+        "cross_entropy".into(), "huber_loss".into(),
+        "hardtanh".into(), "hardsigmoid".into(), "glu".into(),
+        "trunc".into(), "frac".into(), "square".into(), "exp2".into(), "ldexp".into(),
         // index_select/gather still fall back via their int64 index tensor
         // semantics, but int64/bool tensors now flow through the engine.
     ]
@@ -1382,6 +1394,57 @@ fn dispatch_node(node: &Node, slots: &mut Vec<Slot>, capsules: &[CapsuleRef]) ->
             let hi = slot_view(slots, capsules, arg_index(node, 2)?)?;
             slots.push(Slot::Owned(ops_phase7::clamp_tensor(&a, &lo, &hi)?));
         }
+        // ── 50 extra super ops (SIMD + tiled) ──
+        "atan" => { let a = slot_view(slots, capsules, arg_index(node, 0)?)?; slots.push(Slot::Owned(extra_ops::atan(&a)?)); }
+        "asin" => { let a = slot_view(slots, capsules, arg_index(node, 0)?)?; slots.push(Slot::Owned(extra_ops::asin(&a)?)); }
+        "acos" => { let a = slot_view(slots, capsules, arg_index(node, 0)?)?; slots.push(Slot::Owned(extra_ops::acos(&a)?)); }
+        "sinh" => { let a = slot_view(slots, capsules, arg_index(node, 0)?)?; slots.push(Slot::Owned(extra_ops::sinh(&a)?)); }
+        "cosh" => { let a = slot_view(slots, capsules, arg_index(node, 0)?)?; slots.push(Slot::Owned(extra_ops::cosh(&a)?)); }
+        "asinh" => { let a = slot_view(slots, capsules, arg_index(node, 0)?)?; slots.push(Slot::Owned(extra_ops::asinh(&a)?)); }
+        "acosh" => { let a = slot_view(slots, capsules, arg_index(node, 0)?)?; slots.push(Slot::Owned(extra_ops::acosh(&a)?)); }
+        "atanh" => { let a = slot_view(slots, capsules, arg_index(node, 0)?)?; slots.push(Slot::Owned(extra_ops::atanh(&a)?)); }
+        "erf" => { let a = slot_view(slots, capsules, arg_index(node, 0)?)?; slots.push(Slot::Owned(extra_ops::erf(&a)?)); }
+        "erfc" => { let a = slot_view(slots, capsules, arg_index(node, 0)?)?; slots.push(Slot::Owned(extra_ops::erfc(&a)?)); }
+        "expm1" => { let a = slot_view(slots, capsules, arg_index(node, 0)?)?; slots.push(Slot::Owned(extra_ops::expm1(&a)?)); }
+        "log1p" => { let a = slot_view(slots, capsules, arg_index(node, 0)?)?; slots.push(Slot::Owned(extra_ops::log1p(&a)?)); }
+        "log2" => { let a = slot_view(slots, capsules, arg_index(node, 0)?)?; slots.push(Slot::Owned(extra_ops::log2(&a)?)); }
+        "log10" => { let a = slot_view(slots, capsules, arg_index(node, 0)?)?; slots.push(Slot::Owned(extra_ops::log10(&a)?)); }
+        "trunc" => { let a = slot_view(slots, capsules, arg_index(node, 0)?)?; slots.push(Slot::Owned(extra_ops::trunc(&a)?)); }
+        "frac" => { let a = slot_view(slots, capsules, arg_index(node, 0)?)?; slots.push(Slot::Owned(extra_ops::frac(&a)?)); }
+        "square" => { let a = slot_view(slots, capsules, arg_index(node, 0)?)?; slots.push(Slot::Owned(extra_ops::square(&a)?)); }
+        "exp2" => { let a = slot_view(slots, capsules, arg_index(node, 0)?)?; slots.push(Slot::Owned(extra_ops::exp2(&a)?)); }
+        "atan2" => { let a = slot_view(slots, capsules, arg_index(node, 0)?)?; let b = slot_view(slots, capsules, arg_index(node, 1)?)?; slots.push(Slot::Owned(extra_ops::atan2(&a, &b)?)); }
+        "hypot" => { let a = slot_view(slots, capsules, arg_index(node, 0)?)?; let b = slot_view(slots, capsules, arg_index(node, 1)?)?; slots.push(Slot::Owned(extra_ops::hypot(&a, &b)?)); }
+        "fmod" => { let a = slot_view(slots, capsules, arg_index(node, 0)?)?; let b = slot_view(slots, capsules, arg_index(node, 1)?)?; slots.push(Slot::Owned(extra_ops::fmod(&a, &b)?)); }
+        "remainder" => { let a = slot_view(slots, capsules, arg_index(node, 0)?)?; let b = slot_view(slots, capsules, arg_index(node, 1)?)?; slots.push(Slot::Owned(extra_ops::remainder(&a, &b)?)); }
+        "copysign" => { let a = slot_view(slots, capsules, arg_index(node, 0)?)?; let b = slot_view(slots, capsules, arg_index(node, 1)?)?; slots.push(Slot::Owned(extra_ops::copysign(&a, &b)?)); }
+        "ldexp" => { let a = slot_view(slots, capsules, arg_index(node, 0)?)?; let b = slot_view(slots, capsules, arg_index(node, 1)?)?; slots.push(Slot::Owned(extra_ops::ldexp(&a, &b)?)); }
+        "lerp" => { let a = slot_view(slots, capsules, arg_index(node, 0)?)?; let b = slot_view(slots, capsules, arg_index(node, 1)?)?; let w = kw_f64(node, "weight", kw_f64(node, "w", 0.5)); slots.push(Slot::Owned(extra_ops::lerp(&a, &b, w)?)); }
+        "bitwise_and" => { let a = slot_view(slots, capsules, arg_index(node, 0)?)?; let b = slot_view(slots, capsules, arg_index(node, 1)?)?; slots.push(Slot::Owned(extra_ops::bitwise_and(&a, &b)?)); }
+        "bitwise_or" => { let a = slot_view(slots, capsules, arg_index(node, 0)?)?; let b = slot_view(slots, capsules, arg_index(node, 1)?)?; slots.push(Slot::Owned(extra_ops::bitwise_or(&a, &b)?)); }
+        "bitwise_xor" => { let a = slot_view(slots, capsules, arg_index(node, 0)?)?; let b = slot_view(slots, capsules, arg_index(node, 1)?)?; slots.push(Slot::Owned(extra_ops::bitwise_xor(&a, &b)?)); }
+        "bitwise_not" => { let a = slot_view(slots, capsules, arg_index(node, 0)?)?; slots.push(Slot::Owned(extra_ops::bitwise_not(&a)?)); }
+        "isfinite" => { let a = slot_view(slots, capsules, arg_index(node, 0)?)?; slots.push(Slot::Owned(extra_ops::isfinite(&a)?)); }
+        "isinf" => { let a = slot_view(slots, capsules, arg_index(node, 0)?)?; slots.push(Slot::Owned(extra_ops::isinf(&a)?)); }
+        "isnan" => { let a = slot_view(slots, capsules, arg_index(node, 0)?)?; slots.push(Slot::Owned(extra_ops::isnan(&a)?)); }
+        "all" => { let a = slot_view(slots, capsules, arg_index(node, 0)?)?; slots.push(Slot::Owned(extra_ops::all(&a)?)); }
+        "any" => { let a = slot_view(slots, capsules, arg_index(node, 0)?)?; slots.push(Slot::Owned(extra_ops::any(&a)?)); }
+        "amax" => { let a = slot_view(slots, capsules, arg_index(node, 0)?)?; slots.push(Slot::Owned(extra_ops::amax(&a)?)); }
+        "amin" => { let a = slot_view(slots, capsules, arg_index(node, 0)?)?; slots.push(Slot::Owned(extra_ops::amin(&a)?)); }
+        "count_nonzero" => { let a = slot_view(slots, capsules, arg_index(node, 0)?)?; slots.push(Slot::Owned(extra_ops::count_nonzero(&a)?)); }
+        "nansum" => { let a = slot_view(slots, capsules, arg_index(node, 0)?)?; slots.push(Slot::Owned(extra_ops::nansum(&a)?)); }
+        "nanmean" => { let a = slot_view(slots, capsules, arg_index(node, 0)?)?; slots.push(Slot::Owned(extra_ops::nanmean(&a)?)); }
+        "tile" => { let a = slot_view(slots, capsules, arg_index(node, 0)?)?; let repeats = kw_i64_vec(node, "repeats"); let repeats = if repeats.is_empty() { kw_i64_vec(node, "dims") } else { repeats }; slots.push(Slot::Owned(extra_ops::tile(&a, &repeats)?)); }
+        "roll" => { let a = slot_view(slots, capsules, arg_index(node, 0)?)?; let shift = kw_isize(node, "shift", 1) as i64; let dim = kw_isize(node, "dim", 0); slots.push(Slot::Owned(extra_ops::roll(&a, shift, dim)?)); }
+        "pixel_shuffle" => { let a = slot_view(slots, capsules, arg_index(node, 0)?)?; let r = kw_isize(node, "upscale_factor", kw_isize(node, "upscale", 2)) as i64; slots.push(Slot::Owned(extra_ops::pixel_shuffle(&a, r)?)); }
+        "instance_norm" => { let a = slot_view(slots, capsules, arg_index(node, 0)?)?; let eps = kw_f64(node, "eps", 1e-5); slots.push(Slot::Owned(extra_ops::instance_norm(&a, eps)?)); }
+        "cross_entropy" => { let a = slot_view(slots, capsules, arg_index(node, 0)?)?; let b = slot_view(slots, capsules, arg_index(node, 1)?)?; slots.push(Slot::Owned(extra_ops::cross_entropy(&a, &b)?)); }
+        "huber_loss" => { let a = slot_view(slots, capsules, arg_index(node, 0)?)?; let b = slot_view(slots, capsules, arg_index(node, 1)?)?; let d = kw_f64(node, "delta", 1.0); slots.push(Slot::Owned(extra_ops::huber_loss(&a, &b, d)?)); }
+        "hardtanh" => { let a = slot_view(slots, capsules, arg_index(node, 0)?)?; let lo = kw_f64(node, "min_val", kw_f64(node, "min", -1.0)); let hi = kw_f64(node, "max_val", kw_f64(node, "max", 1.0)); slots.push(Slot::Owned(extra_ops::hardtanh(&a, lo, hi)?)); }
+        "hardsigmoid" => { let a = slot_view(slots, capsules, arg_index(node, 0)?)?; slots.push(Slot::Owned(extra_ops::hardsigmoid(&a)?)); }
+        "glu" => { let a = slot_view(slots, capsules, arg_index(node, 0)?)?; let dim = kw_isize(node, "dim", -1); slots.push(Slot::Owned(extra_ops::glu(&a, dim)?)); }
+        "bucketize" => { let a = slot_view(slots, capsules, arg_index(node, 0)?)?; let b = slot_view(slots, capsules, arg_index(node, 1)?)?; slots.push(Slot::Owned(extra_ops::bucketize(&a, &b)?)); }
+        "histc" => { let a = slot_view(slots, capsules, arg_index(node, 0)?)?; let bins = kw_usize(node, "bins", 100); let min = kw_f64(node, "min", 0.0); let max = kw_f64(node, "max", 0.0); slots.push(Slot::Owned(extra_ops::histc(&a, bins, min, max)?)); }
 
         _ => {
             return Err(unsupported(&format!("unknown target {:?}", target)));
