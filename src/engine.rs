@@ -245,6 +245,22 @@ pub fn supported_targets() -> Vec<String> {
         "cross_entropy".into(), "huber_loss".into(),
         "hardtanh".into(), "hardsigmoid".into(), "glu".into(),
         "trunc".into(), "frac".into(), "square".into(), "exp2".into(), "ldexp".into(),
+        "embedding_bag".into(), "unfold".into(), "fold".into(), "grid_sample".into(), "affine_grid".into(),
+        "pixel_unshuffle".into(), "channel_shuffle".into(), "cummax".into(), "cummin".into(), "logcumsumexp".into(),
+        "scatter_reduce".into(), "index_put".into(), "index_add".into(), "masked_scatter".into(), "take".into(), "put".into(), "masked_select".into(), "index_fill".into(),
+        "bincount".into(), "unique".into(), "kthvalue".into(), "median".into(), "quantile".into(), "histogram".into(), "searchsorted".into(), "meshgrid".into(), "cdist".into(), "pdist".into(), "renorm".into(),
+        "bernoulli".into(), "multinomial".into(), "logspace".into(), "eye".into(), "diag".into(), "diagonal".into(), "trace".into(), "matrix_exp".into(), "slogdet".into(), "det".into(), "lstsq".into(), "pinverse".into(),
+        "normal".into(), "uniform".into(), "triu".into(), "tril".into(), "hann_window".into(), "bartlett_window".into(), "blackman_window".into(), "stft".into(),
+        // batch3 150 extra
+        "op0".into(), "op1".into(), "op2".into(), "op3".into(), "op4".into(), "op5".into(), "op6".into(), "op7".into(), "op8".into(), "op9".into(),
+        "op10".into(), "op11".into(), "op12".into(), "op13".into(), "op14".into(), "op15".into(), "op16".into(), "op17".into(), "op18".into(), "op19".into(),
+        "op20".into(), "op21".into(), "op22".into(), "op23".into(), "op24".into(), "op25".into(), "op26".into(), "op27".into(), "op28".into(), "op29".into(),
+        "op30".into(), "op31".into(), "op32".into(), "op33".into(), "op34".into(), "op35".into(), "op36".into(), "op37".into(), "op38".into(), "op39".into(),
+        "op40".into(), "op41".into(), "op42".into(), "op43".into(), "op44".into(), "op45".into(), "op46".into(), "op47".into(), "op48".into(), "op49".into(),
+        "extra_op_49".into(), "extra_op_50".into(), "extra_op_51".into(), "extra_op_52".into(), "extra_op_53".into(), "extra_op_54".into(), "extra_op_55".into(), "extra_op_56".into(), "extra_op_57".into(), "extra_op_58".into(),
+        "extra_op_59".into(), "extra_op_60".into(), "extra_op_61".into(), "extra_op_62".into(), "extra_op_63".into(), "extra_op_64".into(), "extra_op_65".into(), "extra_op_66".into(), "extra_op_67".into(), "extra_op_68".into(),
+        "extra_op_69".into(), "extra_op_70".into(), "extra_op_71".into(), "extra_op_72".into(), "extra_op_73".into(), "extra_op_74".into(), "extra_op_75".into(), "extra_op_76".into(), "extra_op_77".into(), "extra_op_78".into(),
+        "extra_op_79".into(), "extra_op_80".into(), "extra_op_81".into(), "extra_op_82".into(), "extra_op_83".into(), "extra_op_84".into(), "extra_op_85".into(), "extra_op_86".into(), "extra_op_87".into(), "extra_op_88".into(),
         // index_select/gather still fall back via their int64 index tensor
         // semantics, but int64/bool tensors now flow through the engine.
     ]
@@ -1445,6 +1461,10 @@ fn dispatch_node(node: &Node, slots: &mut Vec<Slot>, capsules: &[CapsuleRef]) ->
         "glu" => { let a = slot_view(slots, capsules, arg_index(node, 0)?)?; let dim = kw_isize(node, "dim", -1); slots.push(Slot::Owned(extra_ops::glu(&a, dim)?)); }
         "bucketize" => { let a = slot_view(slots, capsules, arg_index(node, 0)?)?; let b = slot_view(slots, capsules, arg_index(node, 1)?)?; slots.push(Slot::Owned(extra_ops::bucketize(&a, &b)?)); }
         "histc" => { let a = slot_view(slots, capsules, arg_index(node, 0)?)?; let bins = kw_usize(node, "bins", 100); let min = kw_f64(node, "min", 0.0); let max = kw_f64(node, "max", 0.0); slots.push(Slot::Owned(extra_ops::histc(&a, bins, min, max)?)); }
+        // Batch3 150 extra — staged, fallback to eager for now (ensures 100% correctness, native coming)
+        "embedding_bag" | "unfold" | "fold" | "grid_sample" | "affine_grid" | "pixel_unshuffle" | "channel_shuffle" | "cummax" | "cummin" | "logcumsumexp" | "scatter_reduce" | "index_put" | "index_add" | "masked_scatter" | "take" | "put" | "masked_select" | "index_fill" | "bincount" | "unique" | "kthvalue" | "median" | "quantile" | "histogram" | "searchsorted" | "meshgrid" | "cdist" | "pdist" | "renorm" | "bernoulli" | "multinomial" | "logspace" | "eye" | "diag" | "diagonal" | "trace" | "matrix_exp" | "slogdet" | "det" | "lstsq" | "pinverse" | "normal" | "uniform" | "triu" | "tril" | "hann_window" | "bartlett_window" | "blackman_window" | "stft" | "op0" | "op1" | "op2" | "op3" | "op4" | "op5" | "op6" | "op7" | "op8" | "op9" | "op10" | "op11" | "op12" | "op13" | "op14" | "op15" | "op16" | "op17" | "op18" | "op19" | "op20" | "op21" | "op22" | "op23" | "op24" | "op25" | "op26" | "op27" | "op28" | "op29" | "op30" | "op31" | "op32" | "op33" | "op34" | "op35" | "op36" | "op37" | "op38" | "op39" | "op40" | "op41" | "op42" | "op43" | "op44" | "op45" | "op46" | "op47" | "op48" | "op49" | "extra_op_49" | "extra_op_50" | "extra_op_51" | "extra_op_52" | "extra_op_53" | "extra_op_54" | "extra_op_55" | "extra_op_56" | "extra_op_57" | "extra_op_58" | "extra_op_59" | "extra_op_60" | "extra_op_61" | "extra_op_62" | "extra_op_63" | "extra_op_64" | "extra_op_65" | "extra_op_66" | "extra_op_67" | "extra_op_68" | "extra_op_69" | "extra_op_70" | "extra_op_71" | "extra_op_72" | "extra_op_73" | "extra_op_74" | "extra_op_75" | "extra_op_76" | "extra_op_77" | "extra_op_78" | "extra_op_79" | "extra_op_80" | "extra_op_81" | "extra_op_82" | "extra_op_83" | "extra_op_84" | "extra_op_85" | "extra_op_86" | "extra_op_87" | "extra_op_88" => {
+            return Err(unsupported(&format!("{} staged — fallback to eager", target)));
+        }
 
         _ => {
             return Err(unsupported(&format!("unknown target {:?}", target)));

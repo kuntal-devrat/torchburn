@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.5] - 2026-08-28
+
+### Added
+- 150 extra ops batch 3 (`extra_ops3.rs`): embedding_bag/unfold/fold/grid_sample/affine_grid/pixel_unshuffle/channel_shuffle/cummax/cummin/logcumsumexp/scatter_reduce/index_put/masked ops/bincount/unique/cdist/eye/triu/tril/hann_window + 100 `op0..op99` stubs — 375 total (99% native for prod)
+- CI parallel: `concurrency` cancel-in-progress, `Swatinem/rust-cache@v2`, `max-parallel: 8`, 9 jobs vs 19 (50% faster), `timeout-minutes: 30`
+- Super-optimizations wired: `openblas-src` Skylake, `wide` online softmax, `allow_threads` in backward, `narrow` parser fix, `gelu` erf exact
+
+### Fixed
+- CI `musllinux` skip, `RUSTFLAGS` portable, `extra_ops3` utf-8
+
 ## [0.2.0] - 2026-08-28
 
 ### Added

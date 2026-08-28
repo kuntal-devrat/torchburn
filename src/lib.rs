@@ -85,6 +85,7 @@ mod fusion;
 mod ops_phase7;
 mod extra_ops;
 mod extra_ops2;
+mod extra_ops3;
 mod pool;
 pub mod autograd;
 
