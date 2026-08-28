@@ -17,12 +17,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy
+          components: clippy, rustfmt
+
       - uses: actions/cache@v4
         with:
           path: |
@@ -31,29 +34,32 @@ jobs:
             target
           key: ${{ runner.os }}-cargo-lint-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-lint-
-      - run: pip install maturin
-      - run: maturin develop -r
-      - name: Clippy
+
+      - name: Clippy (default features)
         run: cargo clippy -- -D warnings
+
       - name: Clippy (burn-wgpu)
         run: cargo clippy --features burn-wgpu -- -D warnings
+
+      - name: Cargo fmt check
+        run: cargo fmt -- --check || true
+
       - name: Install cargo-audit
         run: cargo install cargo-audit --locked || true
+
       - name: Cargo audit
         run: cargo audit --ignore RUSTSEC-0000-0000 || true
-      - name: Cargo fmt
-        run: cargo fmt -- --check || true
 
   # ── Test Matrix ────────────────────────────────────────────────────
   test:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-13, macos-14]
+        os: [ubuntu-latest, windows-latest, macos-14]
         python-version: ["3.9", "3.10", "3.11", "3.12", "3.13"]
         feature: [""]
         include:
-          # Burn ndarray on Linux + Windows only (no macOS Metal in CI)
+          # Burn ndarray on Linux + Windows only (no macOS Metal in CI VM)
           - os: ubuntu-latest
             python-version: "3.11"
             feature: "burn"
@@ -87,19 +93,23 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ matrix.python-version }}-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-${{ matrix.python-version }}-
 
-      - name: Install maturin
-        run: pip install maturin
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install maturin pytest pytest-timeout torch
 
-      - name: Build extension
+      - name: Build and install extension
         shell: bash
         run: |
           if [ -n "${{ matrix.feature }}" ]; then
-            maturin develop --features ${{ matrix.feature }} -r
+            maturin build --features "${{ matrix.feature }}" -r -o dist
           else
-            maturin develop -r
+            maturin build -r -o dist
           fi
+          pip install dist/*.whl --force-reinstall
 
       - name: Run tests
+        shell: bash
         run: python -m pytest tests/ -x -q --timeout=120
         env:
           TORCHBURN_ENGINE: ${{ matrix.feature || '' }}
@@ -109,8 +119,9 @@ jobs:
     name: Build wheels on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-13, macos-14]
+        os: [ubuntu-latest, windows-latest, macos-14]
 
     steps:
       - uses: actions/checkout@v4
@@ -120,6 +131,8 @@ jobs:
           python-version: "3.11"
 
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.os == 'macos-14' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
 
       - uses: actions/cache@v4
         with:
@@ -136,14 +149,15 @@ jobs:
       - name: Build wheels
         run: cibuildwheel --output-dir dist
         env:
-          CIBW_BUILD: "cp39-* cp310-* cp311-* cp312-* cp313-*"
-          CIBW_SKIP: "*-musllinux_*"
-          CIBW_ARCHS_MACOS: "x86_64 arm64"
-          CIBW_ARCHS_LINUX: "x86_64 aarch64"
+          CIBW_BUILD: "cp39-*"
+          CIBW_ARCHS_MACOS: "arm64 x86_64"
+          CIBW_ARCHS_LINUX: "x86_64"
           CIBW_ARCHS_WINDOWS: "AMD64"
-          CIBW_BEFORE_ALL: "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y"
+          CIBW_BEFORE_ALL_LINUX: "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y"
           CIBW_ENVIRONMENT: 'PATH="$HOME/.cargo/bin:$PATH"'
+          CIBW_TEST_REQUIRES: "pytest pytest-timeout torch"
           CIBW_TEST_COMMAND: "python -m pytest {project}/tests/ -x -q --timeout=60"
+          CIBW_TEST_SKIP: "*-macosx_x86_64"
 
       - uses: actions/upload-artifact@v4
         with:

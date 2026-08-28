@@ -33,7 +33,7 @@ matrixmultiply = { version = "0.3.11", optional = true }
 wgpu = { version = "25.0", optional = true }
 
 [features]
-default = ["matrixmultiply", "burn-wgpu", "openblas"]
+default = ["matrixmultiply", "burn-wgpu"]
 burn = ["dep:burn"]
 # wgpu backend on top of the burn engine.  metal/vulkan are the graphics
 # APIs wgpu targets (AutoGraphicsApi picks Metal on macOS, Vulkan elsewhere;

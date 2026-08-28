@@ -42,12 +42,8 @@ fn main() {
             println!("cargo:rustc-link-search=native={}", lib_dir.display());
             println!("cargo:rustc-link-lib=openblas");
         } else {
-            panic!(
-                "No OpenBLAS library found. Build with:\n  \
-                 cd vendor/OpenBLAS_msvc && mkdir build_msvc && cd build_msvc &&\n  \
-                 cmake .. -G \"Visual Studio 17 2022\" -A x64 -DNOFORTRAN=1 -DNO_LAPACK=1 -DBUILD_SHARED_LIBS=OFF &&\n  \
-                 cmake --build . --config Release"
-            );
+            println!("cargo:warning=No vendor OpenBLAS found; attempting system openblas linkage");
+            println!("cargo:rustc-link-lib=openblas");
         }
 
         println!("cargo:rerun-if-changed={}", msvc_lib.display());
