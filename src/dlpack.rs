@@ -260,6 +260,26 @@ impl BorrowedTensor {
         }
     }
 
+    pub fn is_contiguous(&self) -> bool {
+        if self.shape.is_empty() {
+            return true;
+        }
+        let mut expected_stride: i64 = 1;
+        for (&dim, &stride) in self.shape.iter().zip(self.strides.iter()).rev() {
+            if dim == 0 {
+                return true;
+            }
+            if dim == 1 {
+                continue;
+            }
+            if stride != expected_stride {
+                return false;
+            }
+            expected_stride = expected_stride.saturating_mul(dim);
+        }
+        true
+    }
+
     #[allow(dead_code)]
     pub fn elem_count(&self) -> usize {
         elem_count(&self.shape)

@@ -23,7 +23,7 @@ unsafe fn typed_mut_slice<T>(t: &mut OwnedTensor) -> &mut [T] {
 }
 
 fn require_contiguous(t: &BorrowedTensor, what: &str) -> PyResult<()> {
-    if t.strides != contiguous_strides(&t.shape) {
+    if !t.is_contiguous() {
         return Err(unsupported(&format!("{what} must be contiguous for convolution")));
     }
     Ok(())

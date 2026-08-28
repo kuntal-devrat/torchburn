@@ -4,7 +4,7 @@
 //! `F.interpolate(x, size=...)` lowers to these ops in compiled graphs).
 //! All kernels support f32/f64 and require contiguous inputs.
 
-use crate::dlpack::{BorrowedTensor, DType, OwnedTensor, contiguous_strides, unsupported};
+use crate::dlpack::{BorrowedTensor, DType, OwnedTensor, unsupported};
 use pyo3::prelude::*;
 
 unsafe fn typed_slice<T>(t: &BorrowedTensor) -> &[T] {
@@ -16,7 +16,7 @@ unsafe fn typed_mut_slice<T>(t: &mut OwnedTensor) -> &mut [T] {
 }
 
 fn require_contiguous(t: &BorrowedTensor, what: &str) -> PyResult<()> {
-    if t.strides != contiguous_strides(&t.shape) {
+    if !t.is_contiguous() {
         return Err(unsupported(&format!("{what} must be contiguous for upsampling")));
     }
     Ok(())
