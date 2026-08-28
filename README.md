@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/logo.svg" width="160" height="160" alt="TorchBurn Logo" />
+  <img src="assets/logo.svg" width="150" alt="TorchBurn Logo" />
 </p>
 
 <h1 align="center">TorchBurn</h1>
