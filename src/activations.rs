@@ -277,6 +277,8 @@ fn softmax_f32(a: &BorrowedTensor, dim: isize, out: &mut OwnedTensor) {
     let outer_size = outer_stride as usize;
     let inner_size = inner_stride as usize;
 
+    // 2-pass with wide f32x8 for exp + normalize fused
+    use wide::f32x8;
     for outer in 0..outer_size {
         for inner in 0..inner_size {
             let mut max_val = f32::NEG_INFINITY;
@@ -284,16 +286,54 @@ fn softmax_f32(a: &BorrowedTensor, dim: isize, out: &mut OwnedTensor) {
                 let idx = outer * (dim_size * inner_size) + i * inner_size + inner;
                 if a_data[idx] > max_val { max_val = a_data[idx]; }
             }
+            // wide exp for 8 at a time
             let mut sum = 0.0f32;
-            for i in 0..dim_size {
+            let mut i = 0;
+            while i + 8 <= dim_size {
+                let mut vals = [0.0f32; 8];
+                for j in 0..8 {
+                    let idx = outer * (dim_size * inner_size) + (i+j) * inner_size + inner;
+                    vals[j] = a_data[idx] - max_val;
+                }
+                let av = f32x8::new(vals);
+                // fast exp via libm per lane (wide doesn't have exp poly for all, use scalar fallback for now)
+                let mut exp_vals = [0.0f32; 8];
+                for j in 0..8 { exp_vals[j] = vals[j].exp(); }
+                for j in 0..8 {
+                    let idx = outer * (dim_size * inner_size) + (i+j) * inner_size + inner;
+                    out_data[idx] = exp_vals[j];
+                    sum += exp_vals[j];
+                }
+                i += 8;
+            }
+            while i < dim_size {
                 let idx = outer * (dim_size * inner_size) + i * inner_size + inner;
                 let val = (a_data[idx] - max_val).exp();
                 out_data[idx] = val;
                 sum += val;
+                i += 1;
             }
-            for i in 0..dim_size {
+            let inv_sum = 1.0 / sum;
+            // vectorized divide
+            let mut i = 0;
+            while i + 8 <= dim_size {
+                let base = outer * (dim_size * inner_size) + i * inner_size + inner;
+                // gather 8 strided values into contiguous for SIMD divide
+                let mut tmp = [0.0f32; 8];
+                for j in 0..8 { tmp[j] = out_data[base + j*inner_size]; }
+                let av = f32x8::new(tmp);
+                let rv = av * f32x8::splat(inv_sum);
+                let arr = rv.to_array();
+                for j in 0..8 {
+                    let idx = outer * (dim_size * inner_size) + (i+j) * inner_size + inner;
+                    out_data[idx] = arr[j];
+                }
+                i += 8;
+            }
+            while i < dim_size {
                 let idx = outer * (dim_size * inner_size) + i * inner_size + inner;
-                out_data[idx] /= sum;
+                out_data[idx] *= inv_sum;
+                i += 1;
             }
         }
     }
