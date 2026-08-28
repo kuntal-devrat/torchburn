@@ -42,4 +42,3 @@ module-name = "torchburn._torchburn"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["python"]

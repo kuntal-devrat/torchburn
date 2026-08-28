@@ -38,7 +38,7 @@ burn = ["dep:burn"]
 # wgpu backend on top of the burn engine.  metal/vulkan are the graphics
 # APIs wgpu targets (AutoGraphicsApi picks Metal on macOS, Vulkan elsewhere;
 # DX12 is available through the same wgpu stack on Windows).
-burn-wgpu = ["dep:burn", "burn/wgpu", "burn/metal", "burn/vulkan", "dep:wgpu"]
+burn-wgpu = ["dep:burn", "burn/wgpu", "dep:wgpu"]
 # Link OpenBLAS for MKL-level matmul performance.
 # Downloads and builds from source via the openblas-src crate.
 openblas = []
