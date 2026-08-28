@@ -1,0 +1,42 @@
+[package]
+name = "torchburn"
+version = "0.1.0"
+edition = "2021"
+description = "Hardware-agnostic PyTorch compilation backend: PyO3 + DLPack zero-copy FFI bridge to a Rust execution engine with BLAKE3 structural graph caching"
+license = "Apache-2.0"
+keywords = ["pytorch", "dlpack", "burn", "compile", "ffi"]
+categories = ["api-bindings", "compilers"]
+
+[lib]
+name = "_torchburn"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.25", features = ["extension-module", "abi3-py39"] }
+blake3 = "1.5"
+rayon = "1.10"
+rand = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Portable SIMD (SSE2/AVX2 on x86-64, NEON on ARM, wasm) for the attention
+# kernels — zero-copy lane math for the QK^T dots and softmax exp.
+wide = "0.7"
+
+# Optional Burn execution engine (Phase 2/3). Compile with:
+#   maturin develop --features burn          # ndarray CPU backend
+#   maturin develop --features burn-wgpu     # GPU (Metal/Vulkan/DX12) + ndarray CPU fallback
+# The default build is the zero-copy native CPU engine.
+burn = { version = "0.18", optional = true, default-features = false, features = ["ndarray", "std"] }
+matrixmultiply = { version = "0.3.11", optional = true }
+wgpu = { version = "25.0", optional = true }
+
+[features]
+default = ["matrixmultiply", "burn-wgpu", "openblas"]
+burn = ["dep:burn"]
+# wgpu backend on top of the burn engine.  metal/vulkan are the graphics
+# APIs wgpu targets (AutoGraphicsApi picks Metal on macOS, Vulkan elsewhere;
+# DX12 is available through the same wgpu stack on Windows).
+burn-wgpu = ["dep:burn", "burn/wgpu", "burn/metal", "burn/vulkan", "dep:wgpu"]
+# Link OpenBLAS for MKL-level matmul performance.
+# Downloads and builds from source via the openblas-src crate.
+openblas = []

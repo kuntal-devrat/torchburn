@@ -1,0 +1,5 @@
+# Local development/benchmark builds target the host CPU (AVX2/AVX-512) so
+# the scalar elementwise kernels run at full speed. For portable PyPI wheels,
+# build without this file (or override RUSTFLAGS) to keep the baseline ISA.
+[build]
+rustflags = ["-C", "target-cpu=native"]

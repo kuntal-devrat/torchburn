@@ -1,0 +1,45 @@
+[build-system]
+requires = ["maturin>=1.7,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "torchburn"
+version = "0.1.0-alpha"
+description = "A hardware-agnostic, Rust-compiled PyTorch compilation backend. Zero-copy DLPack FFI, BLAKE3 structural graph caching, and safe eager fallback for unsupported operators."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "Apache-2.0" }
+authors = [{ name = "TorchBurn contributors" }]
+keywords = ["pytorch", "compile", "dlpack", "rust", "burn", "gpu", "wgpu"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Rust",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Operating System :: OS Independent",
+    "Typing :: Typed",
+]
+dependencies = ["torch>=2.0"]
+
+[project.urls]
+Homepage = "https://github.com/torchburn/torchburn"
+Repository = "https://github.com/torchburn/torchburn"
+Issues = "https://github.com/torchburn/torchburn/issues"
+
+[project.optional-dependencies]
+dev = ["pytest", "numpy"]
+
+[tool.maturin]
+python-source = "python"
+module-name = "torchburn._torchburn"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["python"]

@@ -1,0 +1,34 @@
+# Rust
+/target
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyd
+*.pdb
+*.so
+.pytest_cache/
+.venv/
+
+# Distribution
+dist/
+*.whl
+*.egg-info/
+
+# Editors / OS / IDE
+.idea/
+.vscode/
+.DS_Store
+.freebuff/
+
+# Internal PRDs, Roadmaps & Superplans (exclude all PRDs except README.md)
+ROADMAP_PRD.md
+ROADMAPv2.md
+superplan.md
+
+# Large Vendor Blobs & Prebuilt Binaries
+vendor/
+*.dll
+*.lib
+*.a
+*.zip

@@ -1,0 +1,213 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_HTTP_TIMEOUT: 900
+
+jobs:
+  # ── Lint & Type Check ──────────────────────────────────────────────
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-lint-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-lint-
+      - run: pip install maturin
+      - run: maturin develop -r
+      - name: Clippy
+        run: cargo clippy -- -D warnings
+      - name: Clippy (burn-wgpu)
+        run: cargo clippy --features burn-wgpu -- -D warnings
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked || true
+      - name: Cargo audit
+        run: cargo audit --ignore RUSTSEC-0000-0000 || true
+      - name: Cargo fmt
+        run: cargo fmt -- --check || true
+
+  # ── Test Matrix ────────────────────────────────────────────────────
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-13, macos-14]
+        python-version: ["3.9", "3.10", "3.11", "3.12", "3.13"]
+        feature: [""]
+        include:
+          # Burn ndarray on Linux + Windows only (no macOS Metal in CI)
+          - os: ubuntu-latest
+            python-version: "3.11"
+            feature: "burn"
+          - os: windows-latest
+            python-version: "3.11"
+            feature: "burn"
+          - os: ubuntu-latest
+            python-version: "3.11"
+            feature: "burn-wgpu"
+          - os: windows-latest
+            python-version: "3.11"
+            feature: "burn-wgpu"
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ matrix.python-version }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-${{ matrix.python-version }}-
+
+      - name: Install maturin
+        run: pip install maturin
+
+      - name: Build extension
+        shell: bash
+        run: |
+          if [ -n "${{ matrix.feature }}" ]; then
+            maturin develop --features ${{ matrix.feature }} -r
+          else
+            maturin develop -r
+          fi
+
+      - name: Run tests
+        run: python -m pytest tests/ -x -q --timeout=120
+        env:
+          TORCHBURN_ENGINE: ${{ matrix.feature || '' }}
+
+  # ── Build Wheels (all platforms) ───────────────────────────────────
+  build-wheels:
+    name: Build wheels on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-13, macos-14]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-wheels-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-wheels-
+
+      - name: Install cibuildwheel
+        run: pip install cibuildwheel
+
+      - name: Build wheels
+        run: cibuildwheel --output-dir dist
+        env:
+          CIBW_BUILD: "cp39-* cp310-* cp311-* cp312-* cp313-*"
+          CIBW_SKIP: "*-musllinux_*"
+          CIBW_ARCHS_MACOS: "x86_64 arm64"
+          CIBW_ARCHS_LINUX: "x86_64 aarch64"
+          CIBW_ARCHS_WINDOWS: "AMD64"
+          CIBW_BEFORE_ALL: "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y"
+          CIBW_ENVIRONMENT: 'PATH="$HOME/.cargo/bin:$PATH"'
+          CIBW_TEST_COMMAND: "python -m pytest {project}/tests/ -x -q --timeout=60"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.os }}
+          path: dist/*.whl
+
+  # ── Build sdist ────────────────────────────────────────────────────
+  build-sdist:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install maturin
+      - run: maturin sdist -o dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sdist
+          path: dist/*.tar.gz
+
+  # ── Publish to TestPyPI (on PR) ───────────────────────────────────
+  publish-testpypi:
+    needs: [lint, test, build-wheels, build-sdist]
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    permissions:
+      id-token: write
+    environment:
+      name: testpypi
+      url: https://test.pypi.org/p/torchburn
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: wheels-*
+          path: dist
+          merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with:
+          name: sdist
+          path: dist
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+          skip-existing: true
+
+  # ── Publish to PyPI (on tag) ──────────────────────────────────────
+  publish-pypi:
+    needs: [lint, test, build-wheels, build-sdist]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      id-token: write
+    environment:
+      name: pypi
+      url: https://pypi.org/p/torchburn
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: wheels-*
+          path: dist
+          merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with:
+          name: sdist
+          path: dist
+      - uses: pypa/gh-action-pypi-publish@release/v1
