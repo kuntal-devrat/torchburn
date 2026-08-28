@@ -767,11 +767,30 @@ pub fn ldexp(a: &BorrowedTensor, exp: &BorrowedTensor) -> PyResult<OwnedTensor> 
     match a.dtype {
         DType::F32 => {
             let ad = unsafe { typed_slice::<f32>(a) };
-            let ed = unsafe { typed_slice::<f32>(exp) };
             let od = unsafe { typed_mut_slice::<f32>(&mut out) };
-            for i in 0..od.len() {
-                let e = ed[i % ed.len()] as i32;
-                od[i] = ad[i % ad.len()] * (2.0f32).powi(e);
+            match exp.dtype {
+                DType::F32 => {
+                    let ed = unsafe { typed_slice::<f32>(exp) };
+                    for i in 0..od.len() {
+                        let e = ed[i % ed.len()] as i32;
+                        od[i] = ad[i % ad.len()] * (2.0f32).powi(e);
+                    }
+                }
+                DType::I32 => {
+                    let ed = unsafe { typed_slice::<i32>(exp) };
+                    for i in 0..od.len() {
+                        let e = ed[i % ed.len()];
+                        od[i] = ad[i % ad.len()] * (2.0f32).powi(e);
+                    }
+                }
+                DType::I64 => {
+                    let ed = unsafe { typed_slice::<i64>(exp) };
+                    for i in 0..od.len() {
+                        let e = ed[i % ed.len()] as i32;
+                        od[i] = ad[i % ad.len()] * (2.0f32).powi(e);
+                    }
+                }
+                _ => return Err(unsupported("ldexp exponent must be f32/i32/i64")),
             }
         }
         _ => return Err(unsupported("ldexp only supports f32")),

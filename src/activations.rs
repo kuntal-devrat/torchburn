@@ -179,17 +179,11 @@ pub fn tanh_act(a: &BorrowedTensor) -> PyResult<OwnedTensor> {
 }
 
 pub fn gelu(a: &BorrowedTensor) -> PyResult<OwnedTensor> {
-    // GELU(x) = 0.5 * x * (1 + tanh(sqrt(2/π) * (x + 0.044715 * x^3)))
+    // GELU(x) = 0.5 * x * (1 + erf(x / sqrt(2))) — exact, matches PyTorch
     apply_elementwise(
         a,
-        |x| {
-            let inner = 0.7978845608f32 * (x + 0.044715 * x * x * x);
-            0.5 * x * (1.0 + inner.tanh())
-        },
-        |x| {
-            let inner = 0.7978845608028654_f64 * (x + 0.044715 * x * x * x);
-            0.5 * x * (1.0 + inner.tanh())
-        },
+        |x| 0.5 * x * (1.0 + libm::erf((x as f64 / std::f64::consts::SQRT_2) as f32 as f64) as f32),
+        |x| 0.5 * x * (1.0 + libm::erf(x / std::f64::consts::SQRT_2)),
     )
 }
 

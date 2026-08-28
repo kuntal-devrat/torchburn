@@ -753,6 +753,13 @@ _TRANSPOSE_POSITIONAL_KWARGS: dict[str, list[str]] = {
     "transpose": ["d0", "d1"],
     "index_select": ["dim"],
     "gather": ["dim"],
+    "narrow": ["dim", "start", "length"],
+    "select": ["dim", "index"],
+    "roll": ["shift", "dim"],
+    "tile": ["repeats"],
+    "pixel_shuffle": ["upscale_factor"],
+    "instance_norm": ["eps"],
+    "ldexp": ["other"],
 }
 
 # Phase 4: SDPA positional consts.  Export graphs emit either
