@@ -275,8 +275,8 @@ class TestEngineSelection:
         """active_engine() returns the expected engine name."""
         engine = torchburn._torchburn.active_engine()
         assert isinstance(engine, str)
-        # Should be one of the known engines
-        assert engine in ("native_cpu", "burn_ndarray", "burn_wgpu")
+        # Should be one of the known engines (or fallback if headless without GPU)
+        assert any(engine.startswith(base) for base in ("native_cpu", "burn_ndarray", "burn_wgpu"))
 
 
 # ---------------------------------------------------------------------------

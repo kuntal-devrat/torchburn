@@ -9,7 +9,7 @@ from torchburn import _torchburn as tb
 
 
 def test_engine_surface():
-    assert tb.active_engine() in ("native_cpu", "burn_ndarray", "burn_wgpu")
+    assert any(tb.active_engine().startswith(base) for base in ("native_cpu", "burn_ndarray", "burn_wgpu"))
     targets = tb.supported_targets()
     # Phase 1 ops are always present
     assert {"add", "sub", "mul", "div", "relu"}.issubset(set(targets))

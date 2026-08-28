@@ -155,6 +155,7 @@ jobs:
           CIBW_ARCHS_WINDOWS: "AMD64"
           CIBW_BEFORE_ALL_LINUX: "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y"
           CIBW_ENVIRONMENT_LINUX: 'PATH="$HOME/.cargo/bin:$PATH"'
+          CIBW_ENVIRONMENT_MACOS: 'MACOSX_DEPLOYMENT_TARGET="11.0"'
           CIBW_TEST_REQUIRES: "pytest pytest-timeout numpy torch"
           CIBW_TEST_COMMAND: "python -m pytest {project}/tests/ -x -q --timeout=60"
           CIBW_TEST_SKIP: "*-macosx_x86_64"
