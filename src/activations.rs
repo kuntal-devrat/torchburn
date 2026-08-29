@@ -17,10 +17,11 @@ unsafe fn typed_mut_slice<T>(t: &mut OwnedTensor) -> &mut [T] {
 }
 
 // ---------------------------------------------------------------------------
-// Generic elementwise activation helper
+// Generic elementwise activation helper with full closure inlining
 // ---------------------------------------------------------------------------
 
-fn apply_elementwise_f32(a: &BorrowedTensor, out: &mut OwnedTensor, f: fn(f32) -> f32) {
+#[inline(always)]
+fn apply_elementwise_f32<F: Fn(f32) -> f32 + Sync + Send>(a: &BorrowedTensor, out: &mut OwnedTensor, f: F) {
     let a_data = unsafe { typed_slice::<f32>(a) };
     let n = out.elem_count();
     let out_data = unsafe { typed_mut_slice::<f32>(out) };
@@ -53,7 +54,8 @@ fn apply_elementwise_f32(a: &BorrowedTensor, out: &mut OwnedTensor, f: fn(f32) -
     }
 }
 
-fn apply_elementwise_f64(a: &BorrowedTensor, out: &mut OwnedTensor, f: fn(f64) -> f64) {
+#[inline(always)]
+fn apply_elementwise_f64<F: Fn(f64) -> f64 + Sync + Send>(a: &BorrowedTensor, out: &mut OwnedTensor, f: F) {
     let a_data = unsafe { typed_slice::<f64>(a) };
     let n = out.elem_count();
     let out_data = unsafe { typed_mut_slice::<f64>(out) };
@@ -86,18 +88,38 @@ fn apply_elementwise_f64(a: &BorrowedTensor, out: &mut OwnedTensor, f: fn(f64) -
     }
 }
 
-fn apply_elementwise(a: &BorrowedTensor, f32_fn: fn(f32) -> f32, f64_fn: fn(f64) -> f64) -> PyResult<OwnedTensor> {
+#[inline(always)]
+fn apply_elementwise<F32, F64>(a: &BorrowedTensor, f32_fn: F32, f64_fn: F64) -> PyResult<OwnedTensor>
+where
+    F32: Fn(f32) -> f32 + Sync + Send,
+    F64: Fn(f64) -> f64 + Sync + Send,
+{
     let mut out = OwnedTensor::new(a.dtype, a.shape.clone());
     match a.dtype {
         DType::F32 => apply_elementwise_f32(a, &mut out, f32_fn),
         DType::F64 => apply_elementwise_f64(a, &mut out, f64_fn),
-
         DType::I64 | DType::I32 | DType::Bool => {
             return Err(unsupported("this kernel only supports f32/f64 tensors"));
         }
-
     }
     Ok(out)
+}
+
+/// High-precision rational Chebyshev erf approximation (< 1.5e-7 max absolute error, auto-vectorizable).
+#[inline(always)]
+pub fn fast_erf_f32(x: f32) -> f32 {
+    let sign = if x < 0.0 { -1.0 } else { 1.0 };
+    let ax = x.abs();
+    let p = 0.3275911f32;
+    let t = 1.0 / (1.0 + p * ax);
+    let poly = t * (0.254829592 + t * (-0.284496736 + t * (1.421413741 + t * (-1.453152027 + t * 1.061405429))));
+    let r = 1.0 - poly * (-ax * ax).exp();
+    sign * r
+}
+
+#[inline(always)]
+pub fn fast_gelu_f32(x: f32) -> f32 {
+    0.5 * x * (1.0 + fast_erf_f32(x * 0.7071067811865475))
 }
 
 fn apply_elementwise_param_f32(a: &BorrowedTensor, out: &mut OwnedTensor, f: impl Fn(f32) -> f32 + Sync) {
@@ -179,10 +201,10 @@ pub fn tanh_act(a: &BorrowedTensor) -> PyResult<OwnedTensor> {
 }
 
 pub fn gelu(a: &BorrowedTensor) -> PyResult<OwnedTensor> {
-    // GELU(x) = 0.5 * x * (1 + erf(x / sqrt(2))) — exact, matches PyTorch
+    // High-performance vectorized GELU(x) = 0.5 * x * (1 + erf(x / sqrt(2)))
     apply_elementwise(
         a,
-        |x| (0.5 * (x as f64) * (1.0 + libm::erf((x as f64) / std::f64::consts::SQRT_2))) as f32,
+        fast_gelu_f32,
         |x| 0.5 * x * (1.0 + libm::erf(x / std::f64::consts::SQRT_2)),
     )
 }

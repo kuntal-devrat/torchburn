@@ -203,6 +203,12 @@ class _BaseInterpreter:
         self._combined_input_keys = all_input_keys
         self._combined_output_ids = sorted(needed)
         self._combined_payload_template = payload
+        self._cached_const_tensors = {
+            i: torch.tensor(k[2], dtype=torch.float32)
+            for i, k in enumerate(all_input_keys)
+            if k[0] == "const" and k[2] is not None
+        }
+        self._all_native_ids = {n["id"] for p in self._phases if p["kind"] == "native" for n in p["nodes"]}
         try:
             self._graph_handle = _native.prepare_graph(payload)
         except Exception:
@@ -247,11 +253,13 @@ class _BaseInterpreter:
         run_inputs: list[torch.Tensor] = []
         cast_map: dict[int, torch.dtype] = {}
         bad_keys: set[int] = set()
+        cached_consts = self._cached_const_tensors
         for i, key in enumerate(self._combined_input_keys):
             kind = key[0]
             if kind == "const":
-                val = key[2]
-                tensor = torch.tensor(val, dtype=torch.float32)
+                tensor = cached_consts.get(i)
+                if tensor is None:
+                    tensor = torch.tensor(key[2], dtype=torch.float32)
                 run_inputs.append(tensor)
             else:
                 index = key[1]
@@ -280,12 +288,7 @@ class _BaseInterpreter:
             self._exec_phases_sequentially(env)
             return
         by_id = dict(zip(self._combined_output_ids, out_capsules))
-        all_native_ids = set()
-        for p in self._phases:
-            if p["kind"] == "native":
-                for n in p["nodes"]:
-                    all_native_ids.add(n["id"])
-        for node_id in all_native_ids:
+        for node_id in self._all_native_ids:
             capsule = by_id.get(node_id)
             if capsule is not None:
                 t = torch.from_dlpack(capsule)

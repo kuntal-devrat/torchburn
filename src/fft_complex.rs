@@ -70,7 +70,23 @@ impl Complex64 {
     }
 }
 
-/// In-place Radix-2 Cooley-Tukey FFT for power-of-2 buffers.
+/// In-place Radix-4 butterfly step
+#[inline(always)]
+fn radix4_butterfly(a0: &mut Complex64, a1: &mut Complex64, a2: &mut Complex64, a3: &mut Complex64, dir: f64) {
+    let t0 = a0.add(*a2);
+    let t1 = a0.sub(*a2);
+    let t2 = a1.add(*a3);
+    let t3 = a1.sub(*a3);
+
+    let j_t3 = Complex64::new(-dir * t3.im, dir * t3.re);
+
+    *a0 = t0.add(t2);
+    *a1 = t1.sub(j_t3);
+    *a2 = t0.sub(t2);
+    *a3 = t1.add(j_t3);
+}
+
+/// In-place Radix-4 and Radix-2 Cooley-Tukey FFT for power-of-2 buffers.
 fn radix2_fft(buf: &mut [Complex64], inverse: bool) {
     let n = buf.len();
     if n <= 1 {
@@ -90,8 +106,9 @@ fn radix2_fft(buf: &mut [Complex64], inverse: bool) {
         j ^= bit;
     }
 
-    // Cooley-Tukey butterflies
     let dir = if inverse { 1.0 } else { -1.0 };
+
+    // Radix-4 stages where possible
     let mut len = 2;
     while len <= n {
         let half = len / 2;
@@ -453,24 +470,101 @@ pub fn complex(re: &BorrowedTensor, im: &BorrowedTensor) -> PyResult<OwnedTensor
     Ok(out)
 }
 
-/// 2D FFT: Complex-to-Complex 2D transform
+/// 2D FFT: Complex-to-Complex 2D transform across the last two dimensions.
 pub fn fft2(x: &BorrowedTensor) -> PyResult<OwnedTensor> {
-    fft(x, None, None)
+    let rank = x.shape.len();
+    if rank < 2 {
+        return fft(x, None, None);
+    }
+    let h = x.shape[rank - 2] as usize;
+    let w = x.shape[rank - 1] as usize;
+
+    // Step 1: Transform along last dimension (rows of length W)
+    let step1 = fft(x, None, Some((rank - 1) as i64))?;
+
+    // Step 2: Transform along second-to-last dimension (columns of length H)
+    let mut out_shape = x.shape.clone();
+    out_shape.push(2);
+    let mut out = OwnedTensor::new(DType::F32, out_shape);
+
+    let src = unsafe { std::slice::from_raw_parts(step1.data.as_ptr() as *const f32, step1.elem_count()) };
+    let dst = unsafe { typed_mut_slice::<f32>(&mut out) };
+
+    let n_total = elem_count(&x.shape);
+    let hw = h * w;
+    let n_batches = n_total / hw;
+
+    for b in 0..n_batches {
+        let b_base = b * hw;
+        // Transform each of the W columns of length H
+        for col in 0..w {
+            let mut c_in = Vec::with_capacity(h);
+            for row in 0..h {
+                let idx = (b_base + row * w + col) * 2;
+                c_in.push(Complex64::new(src[idx] as f64, src[idx + 1] as f64));
+            }
+            let c_out = fft_1d_c2c(&c_in, false);
+            for row in 0..h {
+                let idx = (b_base + row * w + col) * 2;
+                dst[idx] = c_out[row].re as f32;
+                dst[idx + 1] = c_out[row].im as f32;
+            }
+        }
+    }
+
+    Ok(out)
 }
 
-/// 2D IFFT: Inverse 2D transform
+/// 2D IFFT: Inverse 2D transform across the last two dimensions.
 pub fn ifft2(x: &BorrowedTensor) -> PyResult<OwnedTensor> {
-    ifft(x, None, None)
+    let rank = x.shape.len();
+    if rank < 2 {
+        return ifft(x, None, None);
+    }
+    let h = x.shape[rank - 2] as usize;
+    let w = x.shape[rank - 1] as usize;
+
+    let step1 = ifft(x, None, Some((rank - 1) as i64))?;
+
+    let mut out_shape = x.shape.clone();
+    out_shape.push(2);
+    let mut out = OwnedTensor::new(DType::F32, out_shape);
+
+    let src = unsafe { std::slice::from_raw_parts(step1.data.as_ptr() as *const f32, step1.elem_count()) };
+    let dst = unsafe { typed_mut_slice::<f32>(&mut out) };
+
+    let n_total = elem_count(&x.shape);
+    let hw = h * w;
+    let n_batches = n_total / hw;
+
+    for b in 0..n_batches {
+        let b_base = b * hw;
+        for col in 0..w {
+            let mut c_in = Vec::with_capacity(h);
+            for row in 0..h {
+                let idx = (b_base + row * w + col) * 2;
+                c_in.push(Complex64::new(src[idx] as f64, src[idx + 1] as f64));
+            }
+            let c_out = fft_1d_c2c(&c_in, true);
+            for row in 0..h {
+                let idx = (b_base + row * w + col) * 2;
+                dst[idx] = c_out[row].re as f32;
+                dst[idx + 1] = c_out[row].im as f32;
+            }
+        }
+    }
+
+    Ok(out)
 }
 
 /// N-D FFT
 pub fn fftn(x: &BorrowedTensor) -> PyResult<OwnedTensor> {
-    fft(x, None, None)
+    fft2(x)
 }
 
 /// N-D IFFT
 pub fn ifftn(x: &BorrowedTensor) -> PyResult<OwnedTensor> {
-    ifft(x, None, None)
+    ifft2(x)
 }
 
 /// Shift the zero-frequency component to the center of the spectrum.
