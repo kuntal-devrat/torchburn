@@ -1,6 +1,6 @@
 [package]
 name = "torchburn"
-version = "0.2.7"
+version = "0.2.8"
 edition = "2021"
 description = "Hardware-agnostic PyTorch compilation backend: PyO3 + DLPack zero-copy FFI bridge to a Rust execution engine with BLAKE3 structural graph caching"
 license = "Apache-2.0"

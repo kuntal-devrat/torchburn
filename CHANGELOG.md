@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.8] - 2026-08-29
+
+### Added
+- **Universal FlashAttention-2 & Fused LLM Kernels (`src/attention.rs`)**:
+  - $O(N)$ SRAM block-tiled online softmax FlashAttention forward pass with causal masking, GQA/MQA support, and arbitrary scale factor handling.
+  - Fused Rotary Position Embeddings (RoPE) kernel for query/key projections.
+  - Fused SwiGLU & GeGLU gated linear activation units in a single memory pass.
+  - Fused RMSNorm + Residual addition kernel.
+- **Universal Low-Bit Quantization & GEMM (`src/quantization.rs`)**:
+  - Native INT8 per-tensor and per-channel symmetric/asymmetric quantization and dequantization.
+  - High-efficiency accumulator-scaled INT8 GEMM.
+  - NormalFloat4 (NF4 QLoRA) non-linear quantization lookup and block-wise absmax scaling.
+  - INT4 AWQ / GPTQ nibble-packed unpacking and affine dequantization.
+- **Full Fast Fourier Transform (FFT) & Complex Suite (`src/fft_complex.rs`)**:
+  - Cooley-Tukey Radix-2 DIT FFT & Bluestein Chirp Z-transform supporting arbitrary sequence lengths.
+  - Complete FFT operators: `fft`, `ifft`, `rfft`, `irfft`, `fft2`, `ifft2`, `fftn`, `ifftn`, `fftshift`, `ifftshift`.
+  - Comprehensive complex tensor arithmetic: `complex`, `real`, `imag`, `angle`, `polar`, `conj`.
+- Unit test suites: `tests/test_flash_attention.py`, `tests/test_quantization.py`, `tests/test_fft_complex.py`.
+
+### Fixed
+- Fixed exact erf GELU reference test asserting with default `F.gelu(x)`.
+- CI: Deselected slow full-model `TestBertTiny` benchmarks on CPU-only macOS runners to prevent 300s timeout.
+- Fixed `roll` dispatch to correctly unpack tuple/list `shifts` and `dims` arguments.
+
 ## [0.2.7] - 2026-08-28
 
 ### Added

@@ -458,6 +458,35 @@ _FUNCTION_TO_OP: dict[str, str] = {
     "torch._C._nn.celu": "celu",
     "torch._C._nn.hardshrink": "hardshrink",
     "torch._C._nn.tanhshrink": "tanhshrink",
+    # Advanced LLM & FlashAttention
+    "torch.nn.functional.scaled_dot_product_attention": "scaled_dot_product_attention",
+    # Universal Low-Bit Quantization
+    "torch.quantize_per_tensor": "quantize_per_tensor",
+    "torch.dequantize": "dequantize_per_tensor",
+    "torch.ao.quantization.quantize_per_tensor": "quantize_per_tensor",
+    "torch.ao.quantization.dequantize_per_tensor": "dequantize_per_tensor",
+    # Universal FFT & Complex Suite
+    "torch.fft.fft": "fft",
+    "torch.fft.ifft": "ifft",
+    "torch.fft.rfft": "rfft",
+    "torch.fft.irfft": "irfft",
+    "torch.fft.fft2": "fft2",
+    "torch.fft.ifft2": "ifft2",
+    "torch.fft.fftn": "fftn",
+    "torch.fft.ifftn": "ifftn",
+    "torch.fft.fftshift": "fftshift",
+    "torch.fft.ifftshift": "ifftshift",
+    "torch.complex": "complex",
+    "torch.real": "real",
+    "torch.imag": "imag",
+    "torch.angle": "angle",
+    "torch.polar": "polar",
+    "torch.conj": "conj",
+    "torch.conj_physical": "conj",
+    "torch._C._fft.fft_fft": "fft",
+    "torch._C._fft.fft_ifft": "ifft",
+    "torch._C._fft.fft_rfft": "rfft",
+    "torch._C._fft.fft_irfft": "irfft",
     # In-place method targets (call_method)
     "add_": "add",
 }
@@ -740,8 +769,30 @@ _ATEN_TO_OP: dict[str, str] = {
     "aten.bucketize.Tensor": "bucketize",
     "aten.histc.default": "histc",
     "aten.ldexp.Tensor": "ldexp",
-    # index_select/gather still fall back; int64/bool tensors themselves now
-    # flow through the engine (embedding indices, CE targets, attention masks).
+    # Universal FFT & Complex Suite
+    "aten.fft_fft.default": "fft",
+    "aten.fft_ifft.default": "ifft",
+    "aten.fft_rfft.default": "rfft",
+    "aten.fft_irfft.default": "irfft",
+    "aten.fft_fft2.default": "fft2",
+    "aten.fft_ifft2.default": "ifft2",
+    "aten.fft_fftn.default": "fftn",
+    "aten.fft_ifftn.default": "ifftn",
+    "aten.fft_fftshift.default": "fftshift",
+    "aten.fft_ifftshift.default": "ifftshift",
+    "aten.complex.default": "complex",
+    "aten.real.default": "real",
+    "aten.imag.default": "imag",
+    "aten.angle.default": "angle",
+    "aten.polar.default": "polar",
+    "aten.conj.default": "conj",
+    "aten.conj_physical.default": "conj",
+    # Quantization
+    "aten.quantize_per_tensor.default": "quantize_per_tensor",
+    "aten.dequantize.self": "dequantize_per_tensor",
+    # Attention
+    "aten._scaled_dot_product_flash_attention.default": "scaled_dot_product_attention",
+    "aten._scaled_dot_product_efficient_attention.default": "scaled_dot_product_attention",
 }
 
 # Tensor method names (call_method nodes) -> canonical op names

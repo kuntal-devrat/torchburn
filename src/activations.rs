@@ -182,7 +182,7 @@ pub fn gelu(a: &BorrowedTensor) -> PyResult<OwnedTensor> {
     // GELU(x) = 0.5 * x * (1 + erf(x / sqrt(2))) — exact, matches PyTorch
     apply_elementwise(
         a,
-        |x| 0.5 * x * (1.0 + libm::erf((x as f64 / std::f64::consts::SQRT_2) as f32 as f64) as f32),
+        |x| (0.5 * (x as f64) * (1.0 + libm::erf((x as f64) / std::f64::consts::SQRT_2))) as f32,
         |x| 0.5 * x * (1.0 + libm::erf(x / std::f64::consts::SQRT_2)),
     )
 }

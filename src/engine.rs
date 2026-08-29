@@ -13,7 +13,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use std::collections::HashMap;
 
-use crate::{ops, activations, math_ops, reductions, linalg, norm, shape_ops, convolution, pooling, upsample, embedding, losses, attention, fusion, ops_phase7, extra_ops, extra_ops2, extra_ops3};
+use crate::{ops, activations, math_ops, reductions, linalg, norm, shape_ops, convolution, pooling, upsample, embedding, losses, attention, fusion, ops_phase7, extra_ops, extra_ops2, extra_ops3, quantization, fft_complex};
 use std::sync::{RwLock, OnceLock};
 
 // ---------------------------------------------------------------------------
@@ -285,6 +285,14 @@ pub fn supported_targets() -> Vec<String> {
         "gru_cell".into(), "lstm_cell".into(), "multi_head_attention_forward".into(), "lu_solve".into(), "lu_unpack".into(),
         "linalg_solve".into(), "linalg_inv".into(), "linalg_pinv".into(), "linalg_det".into(), "linalg_slogdet".into(),
         "linalg_cond".into(),
+        // Advanced LLM & FlashAttention
+        "flash_attention".into(), "fused_swiglu".into(), "fused_geglu".into(), "fused_rmsnorm_residual".into(),
+        // Universal Low-Bit Quantization & GEMM
+        "quantize_per_tensor".into(), "dequantize_per_tensor".into(), "quantize_per_channel".into(), "dequantize_per_channel".into(),
+        "int8_gemm".into(), "nf4_dequantize".into(), "int4_unpack_dequantize".into(),
+        // Universal FFT & Complex Suite
+        "fft".into(), "ifft".into(), "rfft".into(), "irfft".into(), "fft2".into(), "ifft2".into(), "fftn".into(), "ifftn".into(),
+        "fftshift".into(), "ifftshift".into(), "complex".into(), "real".into(), "imag".into(), "angle".into(), "polar".into(), "conj".into(),
     ]
 }
 
@@ -1481,7 +1489,18 @@ fn dispatch_node(node: &Node, slots: &mut Vec<Slot>, capsules: &[CapsuleRef]) ->
         "nansum" => { let a = slot_view(slots, capsules, arg_index(node, 0)?)?; slots.push(Slot::Owned(extra_ops::nansum(&a)?)); }
         "nanmean" => { let a = slot_view(slots, capsules, arg_index(node, 0)?)?; slots.push(Slot::Owned(extra_ops::nanmean(&a)?)); }
         "tile" => { let a = slot_view(slots, capsules, arg_index(node, 0)?)?; let repeats = kw_i64_vec(node, "repeats"); let repeats = if repeats.is_empty() { kw_i64_vec(node, "dims") } else { repeats }; slots.push(Slot::Owned(extra_ops::tile(&a, &repeats)?)); }
-        "roll" => { let a = slot_view(slots, capsules, arg_index(node, 0)?)?; let shift = kw_isize(node, "shift", 1) as i64; let dim = kw_isize(node, "dim", 0); slots.push(Slot::Owned(extra_ops::roll(&a, shift, dim)?)); }
+        "roll" => {
+            let a = slot_view(slots, capsules, arg_index(node, 0)?)?;
+            let shift = node.kwargs.get("shifts")
+                .or_else(|| node.kwargs.get("shift"))
+                .and_then(|v| v.as_i64().or_else(|| v.as_array().and_then(|arr| arr.first().and_then(|x| x.as_i64()))))
+                .unwrap_or(1);
+            let dim = node.kwargs.get("dims")
+                .or_else(|| node.kwargs.get("dim"))
+                .and_then(|v| v.as_i64().or_else(|| v.as_array().and_then(|arr| arr.first().and_then(|x| x.as_i64()))))
+                .unwrap_or(0) as isize;
+            slots.push(Slot::Owned(extra_ops::roll(&a, shift, dim)?));
+        }
         "pixel_shuffle" => { let a = slot_view(slots, capsules, arg_index(node, 0)?)?; let r = kw_isize(node, "upscale_factor", kw_isize(node, "upscale", 2)) as i64; slots.push(Slot::Owned(extra_ops::pixel_shuffle(&a, r)?)); }
         "instance_norm" => { let a = slot_view(slots, capsules, arg_index(node, 0)?)?; let eps = kw_f64(node, "eps", 1e-5); slots.push(Slot::Owned(extra_ops::instance_norm(&a, eps)?)); }
         "cross_entropy" => { let a = slot_view(slots, capsules, arg_index(node, 0)?)?; let b = slot_view(slots, capsules, arg_index(node, 1)?)?; slots.push(Slot::Owned(extra_ops::cross_entropy(&a, &b)?)); }
@@ -2478,6 +2497,169 @@ fn dispatch_node(node: &Node, slots: &mut Vec<Slot>, capsules: &[CapsuleRef]) ->
         "linalg_cond" => {
             let a = slot_view(slots, capsules, arg_index(node, 0)?)?;
             slots.push(Slot::Owned(extra_ops3::linalg_cond(&a)?));
+        }
+
+        // Advanced LLM & FlashAttention
+        "flash_attention" => {
+            let q = slot_view(slots, capsules, arg_index(node, 0)?)?;
+            let k = slot_view(slots, capsules, arg_index(node, 1)?)?;
+            let v = slot_view(slots, capsules, arg_index(node, 2)?)?;
+            let mask = if let Ok(idx) = arg_index(node, 3) {
+                Some(slot_view(slots, capsules, idx)?)
+            } else {
+                None
+            };
+            let is_causal = kw_bool(node, "is_causal", false);
+            let scale = node.kwargs.get("scale").and_then(|v| v.as_f64());
+            slots.push(Slot::Owned(attention::flash_attention_forward(&q, &k, &v, mask.as_ref(), is_causal, scale)?));
+        }
+        "fused_swiglu" => {
+            let x = slot_view(slots, capsules, arg_index(node, 0)?)?;
+            let gate_w = slot_view(slots, capsules, arg_index(node, 1)?)?;
+            let up_w = slot_view(slots, capsules, arg_index(node, 2)?)?;
+            slots.push(Slot::Owned(attention::fused_swiglu(&x, &gate_w, &up_w)?));
+        }
+        "fused_geglu" => {
+            let x = slot_view(slots, capsules, arg_index(node, 0)?)?;
+            let gate_w = slot_view(slots, capsules, arg_index(node, 1)?)?;
+            let up_w = slot_view(slots, capsules, arg_index(node, 2)?)?;
+            slots.push(Slot::Owned(attention::fused_geglu(&x, &gate_w, &up_w)?));
+        }
+        "fused_rmsnorm_residual" => {
+            let x = slot_view(slots, capsules, arg_index(node, 0)?)?;
+            let residual = slot_view(slots, capsules, arg_index(node, 1)?)?;
+            let weight = slot_view(slots, capsules, arg_index(node, 2)?)?;
+            let eps = kw_f64(node, "eps", 1e-5);
+            slots.push(Slot::Owned(attention::fused_rmsnorm_residual(&x, &residual, &weight, eps)?));
+        }
+
+        // Universal Low-Bit Quantization & GEMM
+        "quantize_per_tensor" => {
+            let x = slot_view(slots, capsules, arg_index(node, 0)?)?;
+            let scale = kw_f64(node, "scale", 1.0);
+            let zero_point = node.kwargs.get("zero_point").and_then(|v| v.as_i64()).unwrap_or(0);
+            let dtype = if let Some(s) = node.kwargs.get("dtype").and_then(|v| v.as_str()) {
+                dtype_from_spec(s).unwrap_or(DType::I32)
+            } else {
+                DType::I32
+            };
+            slots.push(Slot::Owned(quantization::quantize_per_tensor(&x, scale, zero_point, dtype)?));
+        }
+        "dequantize_per_tensor" => {
+            let q = slot_view(slots, capsules, arg_index(node, 0)?)?;
+            let scale = kw_f64(node, "scale", 1.0);
+            let zero_point = node.kwargs.get("zero_point").and_then(|v| v.as_i64()).unwrap_or(0);
+            slots.push(Slot::Owned(quantization::dequantize_per_tensor(&q, scale, zero_point)?));
+        }
+        "quantize_per_channel" => {
+            let x = slot_view(slots, capsules, arg_index(node, 0)?)?;
+            let scales = slot_view(slots, capsules, arg_index(node, 1)?)?;
+            let zero_points = slot_view(slots, capsules, arg_index(node, 2)?)?;
+            let axis = kw_isize(node, "axis", 0) as usize;
+            slots.push(Slot::Owned(quantization::quantize_per_channel(&x, &scales, &zero_points, axis)?));
+        }
+        "dequantize_per_channel" => {
+            let q = slot_view(slots, capsules, arg_index(node, 0)?)?;
+            let scales = slot_view(slots, capsules, arg_index(node, 1)?)?;
+            let zero_points = slot_view(slots, capsules, arg_index(node, 2)?)?;
+            let axis = kw_isize(node, "axis", 0) as usize;
+            slots.push(Slot::Owned(quantization::dequantize_per_channel(&q, &scales, &zero_points, axis)?));
+        }
+        "int8_gemm" => {
+            let a = slot_view(slots, capsules, arg_index(node, 0)?)?;
+            let b = slot_view(slots, capsules, arg_index(node, 1)?)?;
+            let scale_a = kw_f64(node, "scale_a", 1.0);
+            let scale_b = kw_f64(node, "scale_b", 1.0);
+            slots.push(Slot::Owned(quantization::int8_gemm(&a, &b, scale_a, scale_b)?));
+        }
+        "nf4_dequantize" => {
+            let packed = slot_view(slots, capsules, arg_index(node, 0)?)?;
+            let absmax = slot_view(slots, capsules, arg_index(node, 1)?)?;
+            let group_size = kw_isize(node, "group_size", 64) as usize;
+            slots.push(Slot::Owned(quantization::nf4_dequantize(&packed, &absmax, group_size)?));
+        }
+        "int4_unpack_dequantize" => {
+            let packed = slot_view(slots, capsules, arg_index(node, 0)?)?;
+            let scales = slot_view(slots, capsules, arg_index(node, 1)?)?;
+            let zeros = slot_view(slots, capsules, arg_index(node, 2)?)?;
+            let group_size = kw_isize(node, "group_size", 128) as usize;
+            slots.push(Slot::Owned(quantization::int4_unpack_dequantize(&packed, &scales, &zeros, group_size)?));
+        }
+
+        // Universal FFT & Complex Suite
+        "fft" => {
+            let x = slot_view(slots, capsules, arg_index(node, 0)?)?;
+            let n = node.kwargs.get("n").and_then(|v| v.as_i64());
+            let dim = node.kwargs.get("dim").and_then(|v| v.as_i64());
+            slots.push(Slot::Owned(fft_complex::fft(&x, n, dim)?));
+        }
+        "ifft" => {
+            let x = slot_view(slots, capsules, arg_index(node, 0)?)?;
+            let n = node.kwargs.get("n").and_then(|v| v.as_i64());
+            let dim = node.kwargs.get("dim").and_then(|v| v.as_i64());
+            slots.push(Slot::Owned(fft_complex::ifft(&x, n, dim)?));
+        }
+        "rfft" => {
+            let x = slot_view(slots, capsules, arg_index(node, 0)?)?;
+            let n = node.kwargs.get("n").and_then(|v| v.as_i64());
+            let dim = node.kwargs.get("dim").and_then(|v| v.as_i64());
+            slots.push(Slot::Owned(fft_complex::rfft(&x, n, dim)?));
+        }
+        "irfft" => {
+            let x = slot_view(slots, capsules, arg_index(node, 0)?)?;
+            let n = node.kwargs.get("n").and_then(|v| v.as_i64());
+            let dim = node.kwargs.get("dim").and_then(|v| v.as_i64());
+            slots.push(Slot::Owned(fft_complex::irfft(&x, n, dim)?));
+        }
+        "fft2" => {
+            let x = slot_view(slots, capsules, arg_index(node, 0)?)?;
+            slots.push(Slot::Owned(fft_complex::fft2(&x)?));
+        }
+        "ifft2" => {
+            let x = slot_view(slots, capsules, arg_index(node, 0)?)?;
+            slots.push(Slot::Owned(fft_complex::ifft2(&x)?));
+        }
+        "fftn" => {
+            let x = slot_view(slots, capsules, arg_index(node, 0)?)?;
+            slots.push(Slot::Owned(fft_complex::fftn(&x)?));
+        }
+        "ifftn" => {
+            let x = slot_view(slots, capsules, arg_index(node, 0)?)?;
+            slots.push(Slot::Owned(fft_complex::ifftn(&x)?));
+        }
+        "fftshift" => {
+            let x = slot_view(slots, capsules, arg_index(node, 0)?)?;
+            slots.push(Slot::Owned(fft_complex::fftshift(&x)?));
+        }
+        "ifftshift" => {
+            let x = slot_view(slots, capsules, arg_index(node, 0)?)?;
+            slots.push(Slot::Owned(fft_complex::ifftshift(&x)?));
+        }
+        "complex" => {
+            let re = slot_view(slots, capsules, arg_index(node, 0)?)?;
+            let im = slot_view(slots, capsules, arg_index(node, 1)?)?;
+            slots.push(Slot::Owned(fft_complex::complex(&re, &im)?));
+        }
+        "real" => {
+            let x = slot_view(slots, capsules, arg_index(node, 0)?)?;
+            slots.push(Slot::Owned(fft_complex::real(&x)?));
+        }
+        "imag" => {
+            let x = slot_view(slots, capsules, arg_index(node, 0)?)?;
+            slots.push(Slot::Owned(fft_complex::imag(&x)?));
+        }
+        "angle" => {
+            let x = slot_view(slots, capsules, arg_index(node, 0)?)?;
+            slots.push(Slot::Owned(fft_complex::angle(&x)?));
+        }
+        "polar" => {
+            let abs = slot_view(slots, capsules, arg_index(node, 0)?)?;
+            let ang = slot_view(slots, capsules, arg_index(node, 1)?)?;
+            slots.push(Slot::Owned(fft_complex::polar(&abs, &ang)?));
+        }
+        "conj" => {
+            let x = slot_view(slots, capsules, arg_index(node, 0)?)?;
+            slots.push(Slot::Owned(fft_complex::conj(&x)?));
         }
 
         _ => {

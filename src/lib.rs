@@ -86,6 +86,8 @@ mod ops_phase7;
 mod extra_ops;
 mod extra_ops2;
 mod extra_ops3;
+mod quantization;
+mod fft_complex;
 mod pool;
 pub mod autograd;
 
