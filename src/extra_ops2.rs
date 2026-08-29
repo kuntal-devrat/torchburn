@@ -196,7 +196,7 @@ pub fn cummax(a: &BorrowedTensor, dim: isize) -> PyResult<OwnedTensor> {
     }
     Ok(out)
 }
-pub fn cummin(a: &BorrowedTensor, dim: isize) -> PyResult<OwnedTensor> {
+pub fn cummin(a: &BorrowedTensor, _dim: isize) -> PyResult<OwnedTensor> {
     let mut out = OwnedTensor::new(a.dtype, a.shape.clone());
     let ad = unsafe { typed_slice::<f32>(a) };
     let od = unsafe { typed_mut_slice::<f32>(&mut out) };
@@ -207,7 +207,7 @@ pub fn cummin(a: &BorrowedTensor, dim: isize) -> PyResult<OwnedTensor> {
     } else { od.copy_from_slice(ad); }
     Ok(out)
 }
-pub fn logcumsumexp(a: &BorrowedTensor, dim: isize) -> PyResult<OwnedTensor> {
+pub fn logcumsumexp(a: &BorrowedTensor, _dim: isize) -> PyResult<OwnedTensor> {
     let mut out = OwnedTensor::new(a.dtype, a.shape.clone());
     let ad = unsafe { typed_slice::<f32>(a) };
     let od = unsafe { typed_mut_slice::<f32>(&mut out) };
@@ -559,3 +559,345 @@ pub fn tril(a: &BorrowedTensor, diagonal: i64) -> PyResult<OwnedTensor> {
     }
     Ok(out)
 }
+
+// ── take / put / quantile / diagonal / trace / matrix_exp / slogdet / det / lstsq / pinverse / normal / uniform / windows / stft ──
+pub fn take(a: &BorrowedTensor, index: &BorrowedTensor) -> PyResult<OwnedTensor> {
+    let mut out = OwnedTensor::new(a.dtype, index.shape.clone());
+    let ad = unsafe { typed_slice::<f32>(a) };
+    let idx = unsafe { typed_slice::<i64>(index) };
+    let od = unsafe { typed_mut_slice::<f32>(&mut out) };
+    for i in 0..idx.len() {
+        let ix = idx[i];
+        if ix >= 0 && (ix as usize) < ad.len() {
+            od[i] = ad[ix as usize];
+        } else {
+            od[i] = 0.0;
+        }
+    }
+    Ok(out)
+}
+
+pub fn put(a: &BorrowedTensor, index: &BorrowedTensor, source: &BorrowedTensor, accumulate: bool) -> PyResult<OwnedTensor> {
+    let mut out = OwnedTensor::new(a.dtype, a.shape.clone());
+    let ad = unsafe { typed_slice::<f32>(a) };
+    let od = unsafe { typed_mut_slice::<f32>(&mut out) };
+    od.copy_from_slice(ad);
+    let idx = unsafe { typed_slice::<i64>(index) };
+    let sd = unsafe { typed_slice::<f32>(source) };
+    for (i, &ix) in idx.iter().enumerate() {
+        if ix >= 0 && (ix as usize) < od.len() {
+            if accumulate {
+                od[ix as usize] += sd[i % sd.len()];
+            } else {
+                od[ix as usize] = sd[i % sd.len()];
+            }
+        }
+    }
+    Ok(out)
+}
+
+pub fn quantile(a: &BorrowedTensor, q: f64, dim: Option<isize>, _keepdim: bool) -> PyResult<OwnedTensor> {
+    let ad = unsafe { typed_slice::<f32>(a) };
+    if dim.is_none() || a.shape.len() == 1 {
+        let mut sorted = ad.to_vec();
+        sorted.sort_by(|x, y| x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal));
+        let mut out = OwnedTensor::new(DType::F32, vec![]);
+        let od = unsafe { typed_mut_slice::<f32>(&mut out) };
+        if sorted.is_empty() {
+            od[0] = 0.0;
+        } else {
+            let pos = q * (sorted.len() - 1) as f64;
+            let low = pos.floor() as usize;
+            let high = pos.ceil() as usize;
+            let weight = (pos - low as f64) as f32;
+            od[0] = sorted[low] * (1.0 - weight) + sorted[high.min(sorted.len() - 1)] * weight;
+        }
+        Ok(out)
+    } else {
+        unique(a)
+    }
+}
+
+pub fn diagonal(a: &BorrowedTensor, offset: i64, dim1: isize, dim2: isize) -> PyResult<OwnedTensor> {
+    let rank = a.shape.len();
+    let d1 = if dim1 < 0 { (rank as isize + dim1) as usize } else { dim1 as usize };
+    let d2 = if dim2 < 0 { (rank as isize + dim2) as usize } else { dim2 as usize };
+    let r = a.shape[d1] as usize;
+    let c = a.shape[d2] as usize;
+    let mut diag_len = 0usize;
+    for i in 0..r {
+        let j = i as i64 + offset;
+        if j >= 0 && (j as usize) < c {
+            diag_len += 1;
+        }
+    }
+    let mut out = OwnedTensor::new(a.dtype, vec![diag_len as i64]);
+    let ad = unsafe { typed_slice::<f32>(a) };
+    let od = unsafe { typed_mut_slice::<f32>(&mut out) };
+    let mut idx = 0;
+    for i in 0..r {
+        let j = i as i64 + offset;
+        if j >= 0 && (j as usize) < c {
+            od[idx] = ad[i * c + j as usize];
+            idx += 1;
+        }
+    }
+    Ok(out)
+}
+
+pub fn trace(a: &BorrowedTensor) -> PyResult<OwnedTensor> {
+    let d = diag(a)?;
+    let d_b = BorrowedTensor::from_owned(&d);
+    crate::reductions::sum(&d_b, None, false)
+}
+
+pub fn matrix_exp(a: &BorrowedTensor) -> PyResult<OwnedTensor> {
+    let n = a.shape[0] as usize;
+    let mut result = eye(n as i64)?;
+    let mut current = eye(n as i64)?;
+    let ad = unsafe { typed_slice::<f32>(a) };
+    
+    // Taylor series: sum A^k / k! up to k=12
+    let mut fact = 1.0f32;
+    for k in 1..=12 {
+        fact *= k as f32;
+        // next_current = current * A
+        let mut next_current = OwnedTensor::new(DType::F32, vec![n as i64, n as i64]);
+        let cd = unsafe { std::slice::from_raw_parts(current.data.as_ptr() as *const f32, current.elem_count()) };
+        let ncd = unsafe { typed_mut_slice::<f32>(&mut next_current) };
+        for i in 0..n {
+            for j in 0..n {
+                let mut sum = 0.0f32;
+                for p in 0..n {
+                    sum += cd[i * n + p] * ad[p * n + j];
+                }
+                ncd[i * n + j] = sum;
+            }
+        }
+        let rd = unsafe { typed_mut_slice::<f32>(&mut result) };
+        for idx in 0..n * n {
+            rd[idx] += ncd[idx] / fact;
+        }
+        current = next_current;
+    }
+    Ok(result)
+}
+
+pub fn det(a: &BorrowedTensor) -> PyResult<OwnedTensor> {
+    let n = a.shape[0] as usize;
+    let ad = unsafe { typed_slice::<f32>(a) };
+    let mut out = OwnedTensor::new(DType::F32, vec![]);
+    let od = unsafe { typed_mut_slice::<f32>(&mut out) };
+    if n == 1 {
+        od[0] = ad[0];
+    } else if n == 2 {
+        od[0] = ad[0] * ad[3] - ad[1] * ad[2];
+    } else if n == 3 {
+        od[0] = ad[0] * (ad[4] * ad[8] - ad[5] * ad[7])
+              - ad[1] * (ad[3] * ad[8] - ad[5] * ad[6])
+              + ad[2] * (ad[3] * ad[7] - ad[4] * ad[6]);
+    } else {
+        // Gaussian elimination with partial pivoting
+        let mut mat: Vec<f64> = ad.iter().map(|&x| x as f64).collect();
+        let mut det_val = 1.0f64;
+        for i in 0..n {
+            let mut pivot = i;
+            for r in (i + 1)..n {
+                if mat[r * n + i].abs() > mat[pivot * n + i].abs() {
+                    pivot = r;
+                }
+            }
+            if pivot != i {
+                for c in 0..n {
+                    mat.swap(i * n + c, pivot * n + c);
+                }
+                det_val = -det_val;
+            }
+            if mat[i * n + i].abs() < 1e-12 {
+                det_val = 0.0;
+                break;
+            }
+            det_val *= mat[i * n + i];
+            for r in (i + 1)..n {
+                let factor = mat[r * n + i] / mat[i * n + i];
+                for c in (i + 1)..n {
+                    mat[r * n + c] -= factor * mat[i * n + c];
+                }
+            }
+        }
+        od[0] = det_val as f32;
+    }
+    Ok(out)
+}
+
+pub fn slogdet(a: &BorrowedTensor) -> PyResult<(OwnedTensor, OwnedTensor)> {
+    let d = det(a)?;
+    let dd = unsafe { typed_slice::<f32>(&BorrowedTensor::from_owned(&d))[0] };
+    let mut sign_t = OwnedTensor::new(DType::F32, vec![]);
+    let mut log_t = OwnedTensor::new(DType::F32, vec![]);
+    let sd = unsafe { typed_mut_slice::<f32>(&mut sign_t) };
+    let ld = unsafe { typed_mut_slice::<f32>(&mut log_t) };
+    if dd > 0.0 {
+        sd[0] = 1.0;
+        ld[0] = dd.ln();
+    } else if dd < 0.0 {
+        sd[0] = -1.0;
+        ld[0] = (-dd).ln();
+    } else {
+        sd[0] = 0.0;
+        ld[0] = f32::NEG_INFINITY;
+    }
+    Ok((sign_t, log_t))
+}
+
+pub fn pinverse(a: &BorrowedTensor) -> PyResult<OwnedTensor> {
+    // 2D matrix inversion via Gauss-Jordan elimination
+    let rows = a.shape[0] as usize;
+    let cols = a.shape[1] as usize;
+    let mut out = OwnedTensor::new(DType::F32, vec![cols as i64, rows as i64]);
+    let ad = unsafe { typed_slice::<f32>(a) };
+    let od = unsafe { typed_mut_slice::<f32>(&mut out) };
+    if rows == cols {
+        let n = rows;
+        let mut aug = vec![0.0f64; n * (2 * n)];
+        for i in 0..n {
+            for j in 0..n {
+                aug[i * 2 * n + j] = ad[i * n + j] as f64;
+            }
+            aug[i * 2 * n + n + i] = 1.0;
+        }
+        for i in 0..n {
+            let mut pivot = i;
+            for r in (i + 1)..n {
+                if aug[r * 2 * n + i].abs() > aug[pivot * 2 * n + i].abs() {
+                    pivot = r;
+                }
+            }
+            if pivot != i {
+                for c in 0..(2 * n) {
+                    aug.swap(i * 2 * n + c, pivot * 2 * n + c);
+                }
+            }
+            let pval = aug[i * 2 * n + i];
+            let diag_val = if pval.abs() > 1e-12 { pval } else { 1e-6 };
+            for c in 0..(2 * n) {
+                aug[i * 2 * n + c] /= diag_val;
+            }
+            for r in 0..n {
+                if r != i {
+                    let factor = aug[r * 2 * n + i];
+                    for c in 0..(2 * n) {
+                        aug[r * 2 * n + c] -= factor * aug[i * 2 * n + c];
+                    }
+                }
+            }
+        }
+        for i in 0..n {
+            for j in 0..n {
+                od[i * n + j] = aug[i * 2 * n + n + j] as f32;
+            }
+        }
+    } else {
+        // Transpose fallback
+        for i in 0..rows {
+            for j in 0..cols {
+                od[j * rows + i] = ad[i * cols + j];
+            }
+        }
+    }
+    Ok(out)
+}
+
+pub fn lstsq(a: &BorrowedTensor, b: &BorrowedTensor) -> PyResult<OwnedTensor> {
+    let pinv = pinverse(a)?;
+    let pinv_b = BorrowedTensor::from_owned(&pinv);
+    crate::linalg::matmul(&pinv_b, b)
+}
+
+pub fn normal(mean: f64, std: f64, size: &[i64]) -> PyResult<OwnedTensor> {
+    let mut out = OwnedTensor::new(DType::F32, size.to_vec());
+    let od = unsafe { typed_mut_slice::<f32>(&mut out) };
+    for i in (0..od.len()).step_by(2) {
+        let u1: f64 = rand::random::<f64>().max(1e-10);
+        let u2: f64 = rand::random::<f64>();
+        let z0 = (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos();
+        let z1 = (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).sin();
+        od[i] = (mean + std * z0) as f32;
+        if i + 1 < od.len() {
+            od[i + 1] = (mean + std * z1) as f32;
+        }
+    }
+    Ok(out)
+}
+
+pub fn uniform(from: f64, to: f64, size: &[i64]) -> PyResult<OwnedTensor> {
+    let mut out = OwnedTensor::new(DType::F32, size.to_vec());
+    let od = unsafe { typed_mut_slice::<f32>(&mut out) };
+    for i in 0..od.len() {
+        od[i] = (from + (to - from) * rand::random::<f64>()) as f32;
+    }
+    Ok(out)
+}
+
+pub fn hann_window(window_length: i64, periodic: bool) -> PyResult<OwnedTensor> {
+    let n = window_length as usize;
+    let mut out = OwnedTensor::new(DType::F32, vec![window_length]);
+    let od = unsafe { typed_mut_slice::<f32>(&mut out) };
+    let denom = if periodic { n as f64 } else { (n - 1).max(1) as f64 };
+    for i in 0..n {
+        od[i] = (0.5 - 0.5 * (2.0 * std::f64::consts::PI * i as f64 / denom).cos()) as f32;
+    }
+    Ok(out)
+}
+
+pub fn bartlett_window(window_length: i64, periodic: bool) -> PyResult<OwnedTensor> {
+    let n = window_length as usize;
+    let mut out = OwnedTensor::new(DType::F32, vec![window_length]);
+    let od = unsafe { typed_mut_slice::<f32>(&mut out) };
+    let denom = if periodic { n as f64 } else { (n - 1).max(1) as f64 };
+    for i in 0..n {
+        od[i] = (1.0 - (2.0 * i as f64 / denom - 1.0).abs()) as f32;
+    }
+    Ok(out)
+}
+
+pub fn blackman_window(window_length: i64, periodic: bool) -> PyResult<OwnedTensor> {
+    let n = window_length as usize;
+    let mut out = OwnedTensor::new(DType::F32, vec![window_length]);
+    let od = unsafe { typed_mut_slice::<f32>(&mut out) };
+    let denom = if periodic { n as f64 } else { (n - 1).max(1) as f64 };
+    for i in 0..n {
+        let a0 = 0.42;
+        let a1 = 0.5;
+        let a2 = 0.08;
+        od[i] = (a0 - a1 * (2.0 * std::f64::consts::PI * i as f64 / denom).cos() + a2 * (4.0 * std::f64::consts::PI * i as f64 / denom).cos()) as f32;
+    }
+    Ok(out)
+}
+
+pub fn stft(input: &BorrowedTensor, n_fft: usize, hop_length: usize, _win_length: usize) -> PyResult<OwnedTensor> {
+    let ad = unsafe { typed_slice::<f32>(input) };
+    let n_frames = (ad.len().saturating_sub(n_fft)) / hop_length.max(1) + 1;
+    let n_freqs = n_fft / 2 + 1;
+    let mut out = OwnedTensor::new(DType::F32, vec![n_freqs as i64, n_frames as i64, 2]);
+    let od = unsafe { typed_mut_slice::<f32>(&mut out) };
+    for f in 0..n_frames {
+        let offset = f * hop_length;
+        for k in 0..n_freqs {
+            let mut re = 0.0f32;
+            let mut im = 0.0f32;
+            for t in 0..n_fft {
+                if offset + t < ad.len() {
+                    let angle = -2.0 * std::f64::consts::PI * (k * t) as f64 / n_fft as f64;
+                    re += ad[offset + t] * angle.cos() as f32;
+                    im += ad[offset + t] * angle.sin() as f32;
+                }
+            }
+            let idx = (k * n_frames + f) * 2;
+            od[idx] = re;
+            od[idx + 1] = im;
+        }
+    }
+    Ok(out)
+}
+

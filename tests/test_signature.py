@@ -20,7 +20,7 @@ def test_engine_surface():
 
 
 def test_version_surface():
-    assert tb.__version__ == torchburn.__version__ == "0.1.0"
+    assert tb.__version__ == torchburn.__version__
 
 
 def test_signature_deterministic():

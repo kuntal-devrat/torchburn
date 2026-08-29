@@ -15,6 +15,8 @@ import torchburn
 
 
 def _assert_fallback_warns(call):
+    from torchburn._interpreter import _WARNED
+    _WARNED.clear()
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         result = call()
@@ -24,11 +26,11 @@ def _assert_fallback_warns(call):
 
 
 def test_unsupported_op_inside_supported_graph():
-    """mul/add runs in Rust, erf runs eagerly, results stay correct."""
+    """mul/add runs in Rust, fft runs eagerly, results stay correct."""
 
     def model(x):
         y = x * 2
-        z = torch.erf(y)  # unsupported
+        z = torch.fft.fft(y).real  # unsupported (fft not in 375)
         return z + 1
 
     compiled = torch.compile(model, backend="torchburn")
@@ -90,7 +92,7 @@ def test_mixed_run_and_fallback_ordering():
 
     def model(x):
         a = x * 2          # rust
-        b = torch.sinc(a)  # unsupported -> eager
+        b = torch.fft.fft(a).real  # unsupported -> eager
         c = b + 1          # rust
         return c
 
@@ -105,14 +107,14 @@ def test_fallback_warns_once_per_target():
     _WARNED.clear()
 
     def model(x):
-        return torch.lgamma(x) + torch.lgamma(x * 2)
+        return torch.special.airy_ai(x)[0] + torch.special.airy_ai(x * 2)[0]
 
     compiled = torch.compile(model, backend="torchburn")
     x = torch.randn(4, 4).abs() + 0.1
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         compiled(x)
-    messages = [str(w.message) for w in caught if "lgamma" in str(w.message)]
+    messages = [str(w.message) for w in caught if "airy_ai" in str(w.message)]
     assert len(messages) == 1  # once per target, not per node
 
 

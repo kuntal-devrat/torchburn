@@ -295,7 +295,7 @@ fn softmax_f32(a: &BorrowedTensor, dim: isize, out: &mut OwnedTensor) {
                     let idx = outer * (dim_size * inner_size) + (i+j) * inner_size + inner;
                     vals[j] = a_data[idx] - max_val;
                 }
-                let av = f32x8::new(vals);
+                let _av = f32x8::new(vals);
                 // fast exp via libm per lane (wide doesn't have exp poly for all, use scalar fallback for now)
                 let mut exp_vals = [0.0f32; 8];
                 for j in 0..8 { exp_vals[j] = vals[j].exp(); }

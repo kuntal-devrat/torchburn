@@ -394,7 +394,7 @@ pub fn binary(op: BinaryOp, a: &BorrowedTensor, b: &BorrowedTensor) -> PyResult<
     // ── Super-fast SIMD fast-path for identical contiguous shapes ──
     let a_contig = a.strides == contiguous_strides(&a.shape);
     let b_contig = b.strides == contiguous_strides(&b.shape);
-    if a.shape == b.shape && a_contig && b_contig && &a.shape == &out_shape {
+    if a.shape == b.shape && a_contig && b_contig && a.shape == out_shape {
         match a.dtype {
             DType::F32 => {
                 let a_data = unsafe { typed_slice::<f32>(a) };
@@ -418,7 +418,7 @@ pub fn binary(op: BinaryOp, a: &BorrowedTensor, b: &BorrowedTensor) -> PyResult<
         }
     }
     // ── Scalar + tensor (splat) ──
-    if a.elem_count() == 1 && b_contig && &b.shape == &out_shape {
+    if a.elem_count() == 1 && b_contig && b.shape == out_shape {
         match a.dtype {
             DType::F32 => {
                 let scalar = unsafe { *typed_slice::<f32>(a).as_ptr() };
@@ -478,7 +478,7 @@ pub fn binary(op: BinaryOp, a: &BorrowedTensor, b: &BorrowedTensor) -> PyResult<
             _ => {}
         }
     }
-    if b.elem_count() == 1 && a_contig && &a.shape == &out_shape {
+    if b.elem_count() == 1 && a_contig && a.shape == out_shape {
         match a.dtype {
             DType::F32 => {
                 let scalar = unsafe { *typed_slice::<f32>(b).as_ptr() };
