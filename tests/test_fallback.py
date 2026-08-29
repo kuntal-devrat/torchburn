@@ -26,11 +26,11 @@ def _assert_fallback_warns(call):
 
 
 def test_unsupported_op_inside_supported_graph():
-    """mul/add runs in Rust, fft runs eagerly, results stay correct."""
+    """mul/add runs in Rust, unsupported op runs eagerly, results stay correct."""
 
     def model(x):
         y = x * 2
-        z = torch.fft.fft(y).real  # unsupported (fft not in 375)
+        z = torch.special.zeta(torch.abs(y) + 1.5, 2.0)  # truly unsupported op
         return z + 1
 
     compiled = torch.compile(model, backend="torchburn")
@@ -92,7 +92,7 @@ def test_mixed_run_and_fallback_ordering():
 
     def model(x):
         a = x * 2          # rust
-        b = torch.fft.fft(a).real  # unsupported -> eager
+        b = torch.special.zeta(torch.abs(a) + 1.5, 2.0)  # unsupported -> eager
         c = b + 1          # rust
         return c
 
@@ -136,7 +136,7 @@ def test_float16_input_auto_casts_to_f32():
 
 def test_unsupported_whole_graph():
     def model(x):
-        return torch.fft.fft(x).real
+        return torch.special.zeta(torch.abs(x) + 1.5, 2.0)
 
     compiled = torch.compile(model, backend="torchburn")
     x = torch.randn(8)

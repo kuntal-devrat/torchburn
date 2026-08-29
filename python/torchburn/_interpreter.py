@@ -281,8 +281,8 @@ class _BaseInterpreter:
         if self._graph_handle is None:
             self._exec_phases_sequentially(env)
             return
-        capsules = [t.__dlpack__() for t in run_inputs]
         try:
+            capsules = [t.__dlpack__() for t in run_inputs]
             out_capsules = _native.execute_prepared(self._graph_handle, capsules)
         except Exception:
             self._exec_phases_sequentially(env)

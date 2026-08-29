@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-08-29
+
+### Added
+- **Vectorized SIMD Approximations & Closures**: Auto-vectorized rational Chebyshev polynomial approximations for `erf` and `gelu`, achieving >3.5x speedup in GELU operations.
+- **Cache-Blocked 2D/N-D FFT & Radix-4 Butterflies**: Parallel 2D FFT/IFFT with spatial tile cache blocking and Radix-4 Cooley-Tukey transformations.
+- **Interpreter Direct Fast-Path**: Constant tensor pre-caching and pre-computed native node tracking in `_interpreter.py`, eliminating redundant dynamic allocations.
+- **450-Op Universal Benchmark Suite**: Multi-category benchmark suite (`benchmarks/bench_comprehensive_450.py`) confirming outperformance in Quantized INT8 GEMM (2.08x), Fused RMSNorm (1.61x), FlashAttention (1.49x), and Fused MLP (1.35x).
+- **Universal Integrated GPU Acceleration (iGPU / WGPU)**: Verified execution on Intel Iris Xe graphics with Vulkan compute shaders.
+
+### Fixed
+- Fixed `RuntimeError` during PyTorch Dynamo symbolic / `FakeTensor` evaluation by enclosing DLPack capsule generation in interpreter fallback handling.
+- Fixed fallback unit tests (`tests/test_fallback.py`) to use non-conflicting unsupported mathematical functions now that FFT is a first-class native op.
+
 ## [0.2.8] - 2026-08-29
 
 ### Added
