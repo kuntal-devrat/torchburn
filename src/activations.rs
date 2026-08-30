@@ -34,12 +34,9 @@ fn apply_elementwise_f32<F: Fn(f32) -> f32 + Sync + Send>(
     let contig = a.strides == contiguous_strides(&a.shape);
     if contig {
         use rayon::prelude::*;
-        out_data
-            .par_iter_mut()
-            .enumerate()
-            .for_each(|(i, o)| {
-                *o = f(a_data[i]);
-            });
+        out_data.par_iter_mut().enumerate().for_each(|(i, o)| {
+            *o = f(a_data[i]);
+        });
     } else {
         let rank = a.shape.len();
         let mut coords = vec![0usize; rank];
@@ -72,12 +69,9 @@ fn apply_elementwise_f64<F: Fn(f64) -> f64 + Sync + Send>(
     let contig = a.strides == contiguous_strides(&a.shape);
     if contig {
         use rayon::prelude::*;
-        out_data
-            .par_iter_mut()
-            .enumerate()
-            .for_each(|(i, o)| {
-                *o = f(a_data[i]);
-            });
+        out_data.par_iter_mut().enumerate().for_each(|(i, o)| {
+            *o = f(a_data[i]);
+        });
     } else {
         let rank = a.shape.len();
         let mut coords = vec![0usize; rank];
@@ -163,12 +157,9 @@ fn apply_elementwise_param_f32(
     let contig = a.strides == contiguous_strides(&a.shape);
     if contig {
         use rayon::prelude::*;
-        out_data
-            .par_iter_mut()
-            .enumerate()
-            .for_each(|(i, o)| {
-                *o = f(a_data[i]);
-            });
+        out_data.par_iter_mut().enumerate().for_each(|(i, o)| {
+            *o = f(a_data[i]);
+        });
     } else {
         let rank = a.shape.len();
         let mut coords = vec![0usize; rank];
@@ -201,10 +192,7 @@ fn apply_elementwise_param_f64(
     let contig = a.strides == contiguous_strides(&a.shape);
     if contig {
         use rayon::prelude::*;
-        out_data
-        .par_iter_mut()
-        .enumerate()
-        .for_each(|(i, o)| {
+        out_data.par_iter_mut().enumerate().for_each(|(i, o)| {
             *o = f(a_data[i]);
         });
     } else {

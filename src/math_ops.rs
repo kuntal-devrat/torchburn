@@ -36,12 +36,13 @@ fn run_cmp<T: Scalar + PartialOrd>(
     let out_data = unsafe { typed_mut_slice::<f32>(out) };
     use rayon::prelude::*;
     // Use par_iter with direct index for ARM correctness (avoid chunk enumerate start calc)
-    out_data
-        .par_iter_mut()
-        .enumerate()
-        .for_each(|(i, o)| {
-            *o = if cmp_fn(a_data[i], b_data[i]) { 1.0 } else { 0.0 };
-        });
+    out_data.par_iter_mut().enumerate().for_each(|(i, o)| {
+        *o = if cmp_fn(a_data[i], b_data[i]) {
+            1.0
+        } else {
+            0.0
+        };
+    });
 }
 
 fn run_cmp_broadcast<T: Scalar + PartialOrd>(
@@ -278,12 +279,9 @@ fn run_unary_contig_f32(
     let a_data = unsafe { typed_slice::<f32>(a) };
     let out_data = unsafe { typed_mut_slice::<f32>(out) };
     use rayon::prelude::*;
-    out_data
-        .par_iter_mut()
-        .enumerate()
-        .for_each(|(i, o)| {
-            *o = f(a_data[i]);
-        });
+    out_data.par_iter_mut().enumerate().for_each(|(i, o)| {
+        *o = f(a_data[i]);
+    });
 }
 
 fn run_unary_contig_f64(
@@ -294,12 +292,9 @@ fn run_unary_contig_f64(
     let a_data = unsafe { typed_slice::<f64>(a) };
     let out_data = unsafe { typed_mut_slice::<f64>(out) };
     use rayon::prelude::*;
-    out_data
-        .par_iter_mut()
-        .enumerate()
-        .for_each(|(i, o)| {
-            *o = f(a_data[i]);
-        });
+    out_data.par_iter_mut().enumerate().for_each(|(i, o)| {
+        *o = f(a_data[i]);
+    });
 }
 
 fn run_unary_general_f32(a: &BorrowedTensor, out: &mut OwnedTensor, f: impl Fn(f32) -> f32) {
@@ -484,26 +479,20 @@ fn run_clamp_f32(a: &BorrowedTensor, out: &mut OwnedTensor, min: f32, max: f32) 
     let a_data = unsafe { typed_slice::<f32>(a) };
     let out_data = unsafe { typed_mut_slice::<f32>(out) };
     use rayon::prelude::*;
-    out_data
-        .par_iter_mut()
-        .enumerate()
-        .for_each(|(i, o)| {
-            let v = a_data[i];
-            *o = v.max(min).min(max);
-        });
+    out_data.par_iter_mut().enumerate().for_each(|(i, o)| {
+        let v = a_data[i];
+        *o = v.max(min).min(max);
+    });
 }
 
 fn run_clamp_f64(a: &BorrowedTensor, out: &mut OwnedTensor, min: f64, max: f64) {
     let a_data = unsafe { typed_slice::<f64>(a) };
     let out_data = unsafe { typed_mut_slice::<f64>(out) };
     use rayon::prelude::*;
-    out_data
-        .par_iter_mut()
-        .enumerate()
-        .for_each(|(i, o)| {
-            let v = a_data[i];
-            *o = v.max(min).min(max);
-        });
+    out_data.par_iter_mut().enumerate().for_each(|(i, o)| {
+        let v = a_data[i];
+        *o = v.max(min).min(max);
+    });
 }
 
 pub fn clamp(a: &BorrowedTensor, min: f64, max: f64) -> PyResult<OwnedTensor> {
@@ -587,48 +576,36 @@ fn run_clamp_min_f32(a: &BorrowedTensor, out: &mut OwnedTensor, min: f32) {
     let a_data = unsafe { typed_slice::<f32>(a) };
     let out_data = unsafe { typed_mut_slice::<f32>(out) };
     use rayon::prelude::*;
-    out_data
-        .par_iter_mut()
-        .enumerate()
-        .for_each(|(i, o)| {
-            *o = a_data[i].max(min);
-        });
+    out_data.par_iter_mut().enumerate().for_each(|(i, o)| {
+        *o = a_data[i].max(min);
+    });
 }
 
 fn run_clamp_min_f64(a: &BorrowedTensor, out: &mut OwnedTensor, min: f64) {
     let a_data = unsafe { typed_slice::<f64>(a) };
     let out_data = unsafe { typed_mut_slice::<f64>(out) };
     use rayon::prelude::*;
-    out_data
-        .par_iter_mut()
-        .enumerate()
-        .for_each(|(i, o)| {
-            *o = a_data[i].max(min);
-        });
+    out_data.par_iter_mut().enumerate().for_each(|(i, o)| {
+        *o = a_data[i].max(min);
+    });
 }
 
 fn run_clamp_max_f32(a: &BorrowedTensor, out: &mut OwnedTensor, max: f32) {
     let a_data = unsafe { typed_slice::<f32>(a) };
     let out_data = unsafe { typed_mut_slice::<f32>(out) };
     use rayon::prelude::*;
-    out_data
-        .par_iter_mut()
-        .enumerate()
-        .for_each(|(i, o)| {
-            *o = a_data[i].min(max);
-        });
+    out_data.par_iter_mut().enumerate().for_each(|(i, o)| {
+        *o = a_data[i].min(max);
+    });
 }
 
 fn run_clamp_max_f64(a: &BorrowedTensor, out: &mut OwnedTensor, max: f64) {
     let a_data = unsafe { typed_slice::<f64>(a) };
     let out_data = unsafe { typed_mut_slice::<f64>(out) };
     use rayon::prelude::*;
-    out_data
-        .par_iter_mut()
-        .enumerate()
-        .for_each(|(i, o)| {
-            *o = a_data[i].min(max);
-        });
+    out_data.par_iter_mut().enumerate().for_each(|(i, o)| {
+        *o = a_data[i].min(max);
+    });
 }
 
 pub fn clamp_min(a: &BorrowedTensor, min: f64) -> PyResult<OwnedTensor> {
