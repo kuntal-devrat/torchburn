@@ -95,6 +95,15 @@ pub fn enable() {
 /// Disable autograd recording for the current thread.
 pub fn disable() {
     ENABLED.with(|e| *e.borrow_mut() = false);
+    // Release any leaked saved tensors to prevent unbounded growth if user enabled
+    // but never called backward().
+    SAVED_DATA.with(|s| {
+        for (_, ptr) in s.borrow_mut().drain() {
+            unsafe { drop(Box::from_raw(ptr)); }
+        }
+    });
+    TAPE.with(|t| t.borrow_mut().clear());
+    TAPE_META.with(|m| m.borrow_mut().clear());
 }
 
 /// Check if autograd is enabled on this thread.

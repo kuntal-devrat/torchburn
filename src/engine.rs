@@ -13,7 +13,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use std::collections::HashMap;
 
-use crate::{ops, activations, math_ops, reductions, linalg, norm, shape_ops, convolution, pooling, upsample, embedding, losses, attention, fusion, ops_phase7, extra_ops, extra_ops2, extra_ops3, quantization, fft_complex};
+use crate::{ops, activations, math_ops, reductions, linalg, norm, shape_ops, convolution, pooling, upsample, embedding, losses, attention, fusion, ops_phase7, extra_ops, extra_ops2, extra_ops3, extra_ops4, quantization, fft_complex};
 use std::sync::{RwLock, OnceLock};
 
 // ---------------------------------------------------------------------------
@@ -293,6 +293,17 @@ pub fn supported_targets() -> Vec<String> {
         // Universal FFT & Complex Suite
         "fft".into(), "ifft".into(), "rfft".into(), "irfft".into(), "fft2".into(), "ifft2".into(), "fftn".into(), "ifftn".into(),
         "fftshift".into(), "ifftshift".into(), "complex".into(), "real".into(), "imag".into(), "angle".into(), "polar".into(), "conj".into(),
+        // Extra ops batch 4 (48 ops) -> Total 450 ops
+        "isclose".into(), "allclose".into(), "equal".into(), "isreal".into(), "is_complex".into(), "is_nonzero".into(),
+        "nanprod".into(), "nanmin".into(), "nanmax".into(), "var_mean".into(), "std_mean".into(), "nanmedian".into(),
+        "cov".into(), "corrcoef".into(), "as_strided".into(), "broadcast_to".into(), "broadcast_tensors".into(),
+        "split".into(), "vsplit".into(), "hsplit".into(), "dsplit".into(), "tensor_split".into(),
+        "take_along_dim".into(), "index_reduce".into(), "scatter_max".into(), "scatter_min".into(),
+        "linalg_multi_dot".into(), "linalg_vander".into(), "linalg_vecdot".into(), "linalg_cross".into(), "linalg_tensordot".into(),
+        "linalg_cholesky_ex".into(), "linalg_inv_ex".into(), "linalg_solve_ex".into(), "linalg_lu_factor".into(),
+        "local_response_norm".into(), "adaptive_avg_pool1d".into(), "adaptive_max_pool1d".into(), "lp_pool3d".into(),
+        "logsumexp".into(), "randn_like".into(), "rand_like".into(), "randint_like".into(),
+        "empty_strided".into(),         "view_as".into(), "expand_as".into(), "masked_select_extra".into(), "istft".into(),
     ]
 }
 
@@ -2661,6 +2672,117 @@ fn dispatch_node(node: &Node, slots: &mut Vec<Slot>, capsules: &[CapsuleRef]) ->
             let x = slot_view(slots, capsules, arg_index(node, 0)?)?;
             slots.push(Slot::Owned(fft_complex::conj(&x)?));
         }
+        // Extra ops batch 4 — 48 ops for 450 total
+        "isclose" => {
+            let a = slot_view(slots, capsules, arg_index(node, 0)?)?;
+            let b = slot_view(slots, capsules, arg_index(node, 1)?)?;
+            let rtol = kw_f64(node, "rtol", 1e-05);
+            let atol = kw_f64(node, "atol", 1e-08);
+            let equal_nan = kw_bool(node, "equal_nan", false);
+            slots.push(Slot::Owned(extra_ops4::isclose(&a, &b, rtol, atol, equal_nan)?));
+        }
+        "allclose" => {
+            let a = slot_view(slots, capsules, arg_index(node, 0)?)?;
+            let b = slot_view(slots, capsules, arg_index(node, 1)?)?;
+            let rtol = kw_f64(node, "rtol", 1e-05);
+            let atol = kw_f64(node, "atol", 1e-08);
+            let equal_nan = kw_bool(node, "equal_nan", false);
+            slots.push(Slot::Owned(extra_ops4::allclose(&a, &b, rtol, atol, equal_nan)?));
+        }
+        "equal" => {
+            let a = slot_view(slots, capsules, arg_index(node, 0)?)?;
+            let b = slot_view(slots, capsules, arg_index(node, 1)?)?;
+            slots.push(Slot::Owned(extra_ops4::equal(&a, &b)?));
+        }
+        "isreal" => { let a = slot_view(slots, capsules, arg_index(node, 0)?)?; slots.push(Slot::Owned(extra_ops4::isreal(&a)?)); }
+        "is_complex" => { let a = slot_view(slots, capsules, arg_index(node, 0)?)?; slots.push(Slot::Owned(extra_ops4::is_complex(&a)?)); }
+        "is_nonzero" => { let a = slot_view(slots, capsules, arg_index(node, 0)?)?; slots.push(Slot::Owned(extra_ops4::is_nonzero(&a)?)); }
+        "nanprod" => {
+            let a = slot_view(slots, capsules, arg_index(node, 0)?)?;
+            let dim = kw_opt_dim(node)?; let keepdim = kw_bool(node, "keepdim", false);
+            slots.push(Slot::Owned(extra_ops4::nanprod(&a, dim, keepdim)?));
+        }
+        "nanmin" => { let a = slot_view(slots, capsules, arg_index(node, 0)?)?; slots.push(Slot::Owned(extra_ops4::nanmin(&a)?)); }
+        "nanmax" => { let a = slot_view(slots, capsules, arg_index(node, 0)?)?; slots.push(Slot::Owned(extra_ops4::nanmax(&a)?)); }
+        "var_mean" => {
+            let a = slot_view(slots, capsules, arg_index(node, 0)?)?;
+            let dim = kw_opt_dim(node)?; let keepdim = kw_bool(node, "keepdim", false); let unbiased = kw_bool(node, "unbiased", true);
+            let (v,m)= extra_ops4::var_mean(&a, dim, keepdim, unbiased)?; slots.push(Slot::Tuple(vec![v,m]));
+        }
+        "std_mean" => {
+            let a = slot_view(slots, capsules, arg_index(node, 0)?)?;
+            let dim = kw_opt_dim(node)?; let keepdim = kw_bool(node, "keepdim", false); let unbiased = kw_bool(node, "unbiased", true);
+            let (s,m)= extra_ops4::std_mean(&a, dim, keepdim, unbiased)?; slots.push(Slot::Tuple(vec![s,m]));
+        }
+        "nanmedian" => { let a = slot_view(slots, capsules, arg_index(node, 0)?)?; slots.push(Slot::Owned(extra_ops4::nanmedian(&a)?)); }
+        "cov" => { let a = slot_view(slots, capsules, arg_index(node, 0)?)?; let corr = kw_i64(node, "correction", 1); slots.push(Slot::Owned(extra_ops4::cov(&a, corr)?)); }
+        "corrcoef" => { let a = slot_view(slots, capsules, arg_index(node, 0)?)?; slots.push(Slot::Owned(extra_ops4::corrcoef(&a)?)); }
+        "as_strided" => {
+            let a = slot_view(slots, capsules, arg_index(node, 0)?)?;
+            let size = kw_i64_vec(node, "size"); let stride = kw_i64_vec(node, "stride"); let offset = kw_usize(node, "storage_offset", 0);
+            slots.push(Slot::Owned(extra_ops4::as_strided(&a, size, stride, offset)?));
+        }
+        "broadcast_to" => { let a = slot_view(slots, capsules, arg_index(node, 0)?)?; let shape = kw_i64_vec(node, "shape"); slots.push(Slot::Owned(extra_ops4::broadcast_to(&a, shape)?)); }
+        "broadcast_tensors" => {
+            let a = slot_view(slots, capsules, arg_index(node, 0)?)?; let b = slot_view(slots, capsules, arg_index(node, 1)?)?;
+            let (ea,eb)= extra_ops4::broadcast_tensors(&a,&b)?; slots.push(Slot::Tuple(vec![ea,eb]));
+        }
+        "split" => {
+            let a = slot_view(slots, capsules, arg_index(node, 0)?)?;
+            let split_size = kw_usize(node, "split_size", kw_usize(node, "split_size_or_sections", 1));
+            let dim = kw_isize(node, "dim", 0);
+            slots.push(Slot::Tuple(extra_ops4::split(&a, split_size, dim)?));
+        }
+        "vsplit" => { let a = slot_view(slots, capsules, arg_index(node, 0)?)?; let sec = kw_usize(node, "sections", kw_usize(node, "split_size", 2)); slots.push(Slot::Tuple(extra_ops4::vsplit(&a, sec)?)); }
+        "hsplit" => { let a = slot_view(slots, capsules, arg_index(node, 0)?)?; let sec = kw_usize(node, "sections", kw_usize(node, "split_size", 2)); slots.push(Slot::Tuple(extra_ops4::hsplit(&a, sec)?)); }
+        "dsplit" => { let a = slot_view(slots, capsules, arg_index(node, 0)?)?; let sec = kw_usize(node, "sections", kw_usize(node, "split_size", 2)); slots.push(Slot::Tuple(extra_ops4::dsplit(&a, sec)?)); }
+        "tensor_split" => {
+            let a = slot_view(slots, capsules, arg_index(node, 0)?)?;
+            let indices = kw_i64_vec(node, "indices"); let idx_us: Vec<usize> = indices.iter().map(|&v| v as usize).collect();
+            let dim = kw_isize(node, "dim", 0);
+            slots.push(Slot::Tuple(extra_ops4::tensor_split(&a, idx_us, dim)?));
+        }
+        "take_along_dim" => {
+            let a = slot_view(slots, capsules, arg_index(node, 0)?)?; let idx = slot_view(slots, capsules, arg_index(node, 1)?)?; let dim = kw_isize(node, "dim", 0);
+            slots.push(Slot::Owned(extra_ops4::take_along_dim(&a, &idx, dim)?));
+        }
+        "index_reduce" => {
+            let a = slot_view(slots, capsules, arg_index(node, 0)?)?; let dim = kw_isize(node, "dim", 0); let idx = slot_view(slots, capsules, arg_index(node, 1)?)?; let src = slot_view(slots, capsules, arg_index(node, 2)?)?; let reduce = kw_str(node, "reduce", "sum");
+            slots.push(Slot::Owned(extra_ops4::index_reduce(&a, dim, &idx, &src, reduce)?));
+        }
+        "scatter_max" => {
+            let a = slot_view(slots, capsules, arg_index(node, 0)?)?; let dim = kw_isize(node, "dim", 0); let idx = slot_view(slots, capsules, arg_index(node, 1)?)?; let src = slot_view(slots, capsules, arg_index(node, 2)?)?;
+            slots.push(Slot::Owned(extra_ops4::scatter_max(&a, dim, &idx, &src)?));
+        }
+        "scatter_min" => {
+            let a = slot_view(slots, capsules, arg_index(node, 0)?)?; let dim = kw_isize(node, "dim", 0); let idx = slot_view(slots, capsules, arg_index(node, 1)?)?; let src = slot_view(slots, capsules, arg_index(node, 2)?)?;
+            slots.push(Slot::Owned(extra_ops4::scatter_min(&a, dim, &idx, &src)?));
+        }
+        "linalg_multi_dot" => {
+            let mut tens=Vec::new(); for i in 0..node.args.len(){ if let Ok(idx)=arg_index(node,i){ tens.push(slot_view(slots,capsules,idx)?); } }
+            slots.push(Slot::Owned(extra_ops4::linalg_multi_dot(tens)?));
+        }
+        "linalg_vander" => { let x = slot_view(slots, capsules, arg_index(node, 0)?)?; let n = node.kwargs.get("N").and_then(|v| v.as_i64()).map(|v| v as usize); slots.push(Slot::Owned(extra_ops4::linalg_vander(&x, n)?)); }
+        "linalg_vecdot" => { let a = slot_view(slots, capsules, arg_index(node, 0)?)?; let b = slot_view(slots, capsules, arg_index(node, 1)?)?; let dim = kw_isize(node, "dim", -1); slots.push(Slot::Owned(extra_ops4::linalg_vecdot(&a,&b,dim)?)); }
+        "linalg_cross" => { let a = slot_view(slots, capsules, arg_index(node, 0)?)?; let b = slot_view(slots, capsules, arg_index(node, 1)?)?; let dim = kw_isize(node, "dim", -1); slots.push(Slot::Owned(extra_ops4::linalg_cross(&a,&b,dim)?)); }
+        "linalg_tensordot" => { let a = slot_view(slots, capsules, arg_index(node, 0)?)?; let b = slot_view(slots, capsules, arg_index(node, 1)?)?; let dims = kw_usize(node, "dims", 2); slots.push(Slot::Owned(extra_ops4::linalg_tensordot(&a,&b,dims)?)); }
+        "linalg_cholesky_ex" => { let a = slot_view(slots, capsules, arg_index(node, 0)?)?; let (l,info)=extra_ops4::linalg_cholesky_ex(&a)?; slots.push(Slot::Tuple(vec![l,info])); }
+        "linalg_inv_ex" => { let a = slot_view(slots, capsules, arg_index(node, 0)?)?; let (inv,info)=extra_ops4::linalg_inv_ex(&a)?; slots.push(Slot::Tuple(vec![inv,info])); }
+        "linalg_solve_ex" => { let a = slot_view(slots, capsules, arg_index(node, 0)?)?; let b = slot_view(slots, capsules, arg_index(node, 1)?)?; let (sol,info)=extra_ops4::linalg_solve_ex(&a,&b)?; slots.push(Slot::Tuple(vec![sol,info])); }
+        "linalg_lu_factor" => { let a = slot_view(slots, capsules, arg_index(node, 0)?)?; let (lu,piv)=extra_ops4::linalg_lu_factor(&a)?; slots.push(Slot::Tuple(vec![lu,piv])); }
+        "local_response_norm" => { let a = slot_view(slots, capsules, arg_index(node, 0)?)?; let size = kw_usize(node, "size", 5); let alpha = kw_f64(node, "alpha", 1e-4); let beta = kw_f64(node, "beta", 0.75); let k = kw_f64(node, "k", 1.0); slots.push(Slot::Owned(extra_ops4::local_response_norm(&a,size,alpha,beta,k)?)); }
+        "adaptive_avg_pool1d" => { let a = slot_view(slots, capsules, arg_index(node, 0)?)?; let out_sz = kw_usize(node, "output_size", kw_usize(node, "output_size_0", 1)); slots.push(Slot::Owned(extra_ops4::adaptive_avg_pool1d(&a,out_sz)?)); }
+        "adaptive_max_pool1d" => { let a = slot_view(slots, capsules, arg_index(node, 0)?)?; let out_sz = kw_usize(node, "output_size", kw_usize(node, "output_size_0", 1)); slots.push(Slot::Owned(extra_ops4::adaptive_max_pool1d(&a,out_sz)?)); }
+        "lp_pool3d" => { let a = slot_view(slots, capsules, arg_index(node, 0)?)?; let p = kw_f64(node, "norm_type", 2.0); let k = kw_usize(node, "kernel_size", 2); let s = kw_usize(node, "stride", 2); slots.push(Slot::Owned(extra_ops4::lp_pool3d(&a,p,k,s)?)); }
+        "logsumexp" => { let a = slot_view(slots, capsules, arg_index(node, 0)?)?; let dim = kw_isize(node, "dim", -1); let keepdim = kw_bool(node, "keepdim", false); slots.push(Slot::Owned(extra_ops4::logsumexp(&a,dim,keepdim)?)); }
+        "randn_like" => { let a = slot_view(slots, capsules, arg_index(node, 0)?)?; slots.push(Slot::Owned(extra_ops4::randn_like(&a)?)); }
+        "rand_like" => { let a = slot_view(slots, capsules, arg_index(node, 0)?)?; slots.push(Slot::Owned(extra_ops4::rand_like(&a)?)); }
+        "randint_like" => { let a = slot_view(slots, capsules, arg_index(node, 0)?)?; let low = kw_i64(node, "low", 0); let high = kw_i64(node, "high", 10); slots.push(Slot::Owned(extra_ops4::randint_like(&a,low,high)?)); }
+        "empty_strided" => { let size = kw_i64_vec(node, "size"); let stride = kw_i64_vec(node, "stride"); slots.push(Slot::Owned(extra_ops4::empty_strided(size,stride)?)); }
+        "view_as" => { let a = slot_view(slots, capsules, arg_index(node, 0)?)?; let b = slot_view(slots, capsules, arg_index(node, 1)?)?; slots.push(Slot::Owned(extra_ops4::view_as(&a,&b)?)); }
+        "expand_as" => { let a = slot_view(slots, capsules, arg_index(node, 0)?)?; let b = slot_view(slots, capsules, arg_index(node, 1)?)?; slots.push(Slot::Owned(extra_ops4::expand_as(&a,&b)?)); }
+        "masked_select_extra" => { let a = slot_view(slots, capsules, arg_index(node, 0)?)?; let m = slot_view(slots, capsules, arg_index(node, 1)?)?; slots.push(Slot::Owned(extra_ops4::masked_select(&a,&m)?)); }
+        "istft" => { let a = slot_view(slots, capsules, arg_index(node, 0)?)?; slots.push(Slot::Owned(extra_ops4::istft(&a)?)); }
 
         _ => {
             return Err(unsupported(&format!("unknown target {:?}", target)));
@@ -2738,12 +2860,15 @@ fn collect_outputs(
             .ok_or_else(|| unsupported(&format!("output references unknown node {effective_id}")))?;
         match &mut slots[*slot_idx] {
             Slot::Owned(t) => {
-                let count = ref_counts.get_mut(slot_idx).unwrap();
-                if *count > 1 {
-                    *count -= 1;
-                    out.push(t.clone());
+                if let Some(count) = ref_counts.get_mut(slot_idx) {
+                    if *count > 1 {
+                        *count -= 1;
+                        out.push(t.clone());
+                    } else {
+                        out.push(std::mem::take(t));
+                    }
                 } else {
-                    out.push(std::mem::take(t));
+                    out.push(t.clone());
                 }
             }
             Slot::View { data, shape, strides, dtype } => {
@@ -3209,6 +3334,13 @@ pub fn dict_to_payload(dict: &Bound<'_, PyDict>) -> PyResult<Payload> {
     };
     if nodes.is_empty() && !inputs.is_empty() {
         return Err(pyo3::exceptions::PyValueError::new_err("payload has inputs but no nodes"));
+    }
+    // DoS protection: same 10 MB limit as JSON path – estimate from counts.
+    if nodes.len() > 100_000 {
+        return Err(unsupported(&format!("payload too large ({} nodes > limit)", nodes.len())));
+    }
+    if inputs.len() > 1024 {
+        return Err(unsupported(&format!("payload too large ({} inputs > limit)", inputs.len())));
     }
 
     Ok(Payload { inputs, nodes, outputs })

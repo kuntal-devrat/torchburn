@@ -225,7 +225,13 @@ impl BorrowedTensor {
             if dl.ndim < 0 {
                 return Err(PyValueError::new_err("negative ndim in DLPack tensor"));
             }
+            if dl.ndim as usize > 32 {
+                return Err(PyValueError::new_err(format!("ndim too large in DLPack tensor: {}", dl.ndim)));
+            }
             let ndim = dl.ndim as usize;
+            if ndim > 0 && dl.shape.is_null() {
+                return Err(PyValueError::new_err("null shape pointer in DLPack tensor"));
+            }
             let shape: Vec<i64> = std::slice::from_raw_parts(dl.shape, ndim).to_vec();
             if shape.iter().any(|&d| d < 0) {
                 return Err(PyValueError::new_err("negative dimension in DLPack shape"));
