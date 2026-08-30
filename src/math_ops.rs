@@ -35,18 +35,12 @@ fn run_cmp<T: Scalar + PartialOrd>(
     let b_data = unsafe { typed_slice::<T>(b) };
     let out_data = unsafe { typed_mut_slice::<f32>(out) };
     use rayon::prelude::*;
+    // Use par_iter with direct index for ARM correctness (avoid chunk enumerate start calc)
     out_data
-        .par_chunks_mut(PAR_CHUNK)
+        .par_iter_mut()
         .enumerate()
-        .for_each(|(ci, chunk)| {
-            let start = ci * PAR_CHUNK;
-            for (i, o) in chunk.iter_mut().enumerate() {
-                *o = if cmp_fn(a_data[start + i], b_data[start + i]) {
-                    1.0
-                } else {
-                    0.0
-                };
-            }
+        .for_each(|(i, o)| {
+            *o = if cmp_fn(a_data[i], b_data[i]) { 1.0 } else { 0.0 };
         });
 }
 
@@ -285,13 +279,10 @@ fn run_unary_contig_f32(
     let out_data = unsafe { typed_mut_slice::<f32>(out) };
     use rayon::prelude::*;
     out_data
-        .par_chunks_mut(PAR_CHUNK)
+        .par_iter_mut()
         .enumerate()
-        .for_each(|(ci, chunk)| {
-            let start = ci * PAR_CHUNK;
-            for (i, o) in chunk.iter_mut().enumerate() {
-                *o = f(a_data[start + i]);
-            }
+        .for_each(|(i, o)| {
+            *o = f(a_data[i]);
         });
 }
 
@@ -304,13 +295,10 @@ fn run_unary_contig_f64(
     let out_data = unsafe { typed_mut_slice::<f64>(out) };
     use rayon::prelude::*;
     out_data
-        .par_chunks_mut(PAR_CHUNK)
+        .par_iter_mut()
         .enumerate()
-        .for_each(|(ci, chunk)| {
-            let start = ci * PAR_CHUNK;
-            for (i, o) in chunk.iter_mut().enumerate() {
-                *o = f(a_data[start + i]);
-            }
+        .for_each(|(i, o)| {
+            *o = f(a_data[i]);
         });
 }
 
@@ -497,14 +485,11 @@ fn run_clamp_f32(a: &BorrowedTensor, out: &mut OwnedTensor, min: f32, max: f32) 
     let out_data = unsafe { typed_mut_slice::<f32>(out) };
     use rayon::prelude::*;
     out_data
-        .par_chunks_mut(PAR_CHUNK)
+        .par_iter_mut()
         .enumerate()
-        .for_each(|(ci, chunk)| {
-            let start = ci * PAR_CHUNK;
-            for (i, o) in chunk.iter_mut().enumerate() {
-                let v = a_data[start + i];
-                *o = v.max(min).min(max);
-            }
+        .for_each(|(i, o)| {
+            let v = a_data[i];
+            *o = v.max(min).min(max);
         });
 }
 
@@ -513,14 +498,11 @@ fn run_clamp_f64(a: &BorrowedTensor, out: &mut OwnedTensor, min: f64, max: f64) 
     let out_data = unsafe { typed_mut_slice::<f64>(out) };
     use rayon::prelude::*;
     out_data
-        .par_chunks_mut(PAR_CHUNK)
+        .par_iter_mut()
         .enumerate()
-        .for_each(|(ci, chunk)| {
-            let start = ci * PAR_CHUNK;
-            for (i, o) in chunk.iter_mut().enumerate() {
-                let v = a_data[start + i];
-                *o = v.max(min).min(max);
-            }
+        .for_each(|(i, o)| {
+            let v = a_data[i];
+            *o = v.max(min).min(max);
         });
 }
 
@@ -606,13 +588,10 @@ fn run_clamp_min_f32(a: &BorrowedTensor, out: &mut OwnedTensor, min: f32) {
     let out_data = unsafe { typed_mut_slice::<f32>(out) };
     use rayon::prelude::*;
     out_data
-        .par_chunks_mut(PAR_CHUNK)
+        .par_iter_mut()
         .enumerate()
-        .for_each(|(ci, chunk)| {
-            let start = ci * PAR_CHUNK;
-            for (i, o) in chunk.iter_mut().enumerate() {
-                *o = a_data[start + i].max(min);
-            }
+        .for_each(|(i, o)| {
+            *o = a_data[i].max(min);
         });
 }
 
@@ -621,13 +600,10 @@ fn run_clamp_min_f64(a: &BorrowedTensor, out: &mut OwnedTensor, min: f64) {
     let out_data = unsafe { typed_mut_slice::<f64>(out) };
     use rayon::prelude::*;
     out_data
-        .par_chunks_mut(PAR_CHUNK)
+        .par_iter_mut()
         .enumerate()
-        .for_each(|(ci, chunk)| {
-            let start = ci * PAR_CHUNK;
-            for (i, o) in chunk.iter_mut().enumerate() {
-                *o = a_data[start + i].max(min);
-            }
+        .for_each(|(i, o)| {
+            *o = a_data[i].max(min);
         });
 }
 
@@ -636,13 +612,10 @@ fn run_clamp_max_f32(a: &BorrowedTensor, out: &mut OwnedTensor, max: f32) {
     let out_data = unsafe { typed_mut_slice::<f32>(out) };
     use rayon::prelude::*;
     out_data
-        .par_chunks_mut(PAR_CHUNK)
+        .par_iter_mut()
         .enumerate()
-        .for_each(|(ci, chunk)| {
-            let start = ci * PAR_CHUNK;
-            for (i, o) in chunk.iter_mut().enumerate() {
-                *o = a_data[start + i].min(max);
-            }
+        .for_each(|(i, o)| {
+            *o = a_data[i].min(max);
         });
 }
 
@@ -651,13 +624,10 @@ fn run_clamp_max_f64(a: &BorrowedTensor, out: &mut OwnedTensor, max: f64) {
     let out_data = unsafe { typed_mut_slice::<f64>(out) };
     use rayon::prelude::*;
     out_data
-        .par_chunks_mut(PAR_CHUNK)
+        .par_iter_mut()
         .enumerate()
-        .for_each(|(ci, chunk)| {
-            let start = ci * PAR_CHUNK;
-            for (i, o) in chunk.iter_mut().enumerate() {
-                *o = a_data[start + i].min(max);
-            }
+        .for_each(|(i, o)| {
+            *o = a_data[i].min(max);
         });
 }
 

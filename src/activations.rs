@@ -35,13 +35,10 @@ fn apply_elementwise_f32<F: Fn(f32) -> f32 + Sync + Send>(
     if contig {
         use rayon::prelude::*;
         out_data
-            .par_chunks_mut(PAR_CHUNK)
+            .par_iter_mut()
             .enumerate()
-            .for_each(|(ci, chunk)| {
-                let start = ci * PAR_CHUNK;
-                for (i, o) in chunk.iter_mut().enumerate() {
-                    *o = f(a_data[start + i]);
-                }
+            .for_each(|(i, o)| {
+                *o = f(a_data[i]);
             });
     } else {
         let rank = a.shape.len();
@@ -76,13 +73,10 @@ fn apply_elementwise_f64<F: Fn(f64) -> f64 + Sync + Send>(
     if contig {
         use rayon::prelude::*;
         out_data
-            .par_chunks_mut(PAR_CHUNK)
+            .par_iter_mut()
             .enumerate()
-            .for_each(|(ci, chunk)| {
-                let start = ci * PAR_CHUNK;
-                for (i, o) in chunk.iter_mut().enumerate() {
-                    *o = f(a_data[start + i]);
-                }
+            .for_each(|(i, o)| {
+                *o = f(a_data[i]);
             });
     } else {
         let rank = a.shape.len();
@@ -170,13 +164,10 @@ fn apply_elementwise_param_f32(
     if contig {
         use rayon::prelude::*;
         out_data
-            .par_chunks_mut(PAR_CHUNK)
+            .par_iter_mut()
             .enumerate()
-            .for_each(|(ci, chunk)| {
-                let start = ci * PAR_CHUNK;
-                for (i, o) in chunk.iter_mut().enumerate() {
-                    *o = f(a_data[start + i]);
-                }
+            .for_each(|(i, o)| {
+                *o = f(a_data[i]);
             });
     } else {
         let rank = a.shape.len();
@@ -198,6 +189,7 @@ fn apply_elementwise_param_f32(
     }
 }
 
+#[inline(always)]
 fn apply_elementwise_param_f64(
     a: &BorrowedTensor,
     out: &mut OwnedTensor,
@@ -210,14 +202,11 @@ fn apply_elementwise_param_f64(
     if contig {
         use rayon::prelude::*;
         out_data
-            .par_chunks_mut(PAR_CHUNK)
-            .enumerate()
-            .for_each(|(ci, chunk)| {
-                let start = ci * PAR_CHUNK;
-                for (i, o) in chunk.iter_mut().enumerate() {
-                    *o = f(a_data[start + i]);
-                }
-            });
+        .par_iter_mut()
+        .enumerate()
+        .for_each(|(i, o)| {
+            *o = f(a_data[i]);
+        });
     } else {
         let rank = a.shape.len();
         let mut coords = vec![0usize; rank];
