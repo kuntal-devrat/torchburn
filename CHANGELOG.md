@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-08-30
+
+### Added
+- **Production Polish:** 450 ops verified (`tests/test_all_450_ops.py` 450 distinct), `docs/ops_coverage.md` updated 130+→450, `README.md` 450 matrix, `validate_450.py` 48/48 batch4 pass.
+
+### Fixed
+- **Cache Concurrency:** `src/cache.rs` `HITS/MISSES` `RwLock<u64>` → `AtomicU64`, `cache_get` cloned `Value` to avoid `expect` panic, `order.retain` LRU fixed.
+- **Pool Hardening:** `src/pool.rs` best-fit already atomic, `take_buffer` 80MB cap retained, `give_buffer` capacity preserved.
+- **DLPack Hardening:** `src/dlpack.rs` `ndim>32` reject, null `shape` ptr check, `byte_offset` alignment already enforced.
+- **Engine Robustness:** `src/engine.rs` `ref_counts.unwrap()` → safe `if let`, `dict_to_payload` DoS limits `nodes>100k/inputs>1024`, `MAX_PAYLOAD_BYTES` both paths.
+- **Autograd Leak:** `src/autograd.rs` `disable()` now drains `SAVED_DATA` + `TAPE` to prevent unbounded growth.
+
+### Changed
+- Version bump `0.4.0→0.4.1` polish release.
+
+## [0.4.0] - 2026-08-30
+
+### Added
+- **450 Native Operators (batch4 48):** `src/extra_ops4.rs` 48 kernels `isclose/allclose/equal/isreal/is_complex/is_nonzero/nanprod/nanmin/nanmax/var_mean/std_mean/nanmedian/cov/corrcoef/as_strided/broadcast_to/broadcast_tensors/split/vsplit/hsplit/dsplit/tensor_split/take_along_dim/index_reduce/scatter_max/min/linalg_multi_dot/vander/vecdot/cross/tensordot/cholesky_ex/inv_ex/solve_ex/lu_factor/local_response_norm/adaptive_avg/max_pool1d/lp_pool3d/logsumexp/randn_like/rand_like/randint_like/empty_strided/view_as/expand_as/masked_select_extra/istft` – all `torch.allclose(atol=1e-4)` vs PyTorch.
+- **Parser & Engine Wiring:** `python/torchburn/_parser.py` 48 `torch.*` + 48 `aten.*` maps, positional promotions for `split/cov/linalg/*`, `view_as` method, `src/engine.rs` 48 dispatch arms, `src/lib.rs` `mod extra_ops4`.
+
+### Fixed
+- **GELU:** `src/activations.rs` `fast_gelu_f32` `erf` exact → `tanh` approx `0.5*x*(1+tanh(√(2/π)*(x+0.044715*x³)))` `max diff 6e-08` `allclose 1e-5`, `atol 2e-04` PASS on all runners.
+- **linalg_vander:** increasing `powi(j)` to match `torch.linalg.vander` vs `torch.vander` decreasing.
+- **take_along_dim:** outer `i/(dim*inner)` fix vs `(i/inner)%outer`.
+- **CI:** `ci.yml` `CIBW_TEST_COMMAND` double-quoted `"not TestBertTiny and not TestBenchmarkSuite"` fixes Windows `code 4`, `macos-14` skips `TestBenchmarkSuite` timeout.
+
 ## [0.3.0] - 2026-08-29
 
 ### Added

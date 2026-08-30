@@ -417,7 +417,6 @@ pub fn take_along_dim(a: &BorrowedTensor, indices: &BorrowedTensor, dim: isize) 
                 DType::F32 => {
                     let ad = unsafe{typed_slice::<f32>(a)};
                     let od = unsafe{typed_mut_slice::<f32>(&mut out)};
-                    let outer: usize = a.shape[..d].iter().map(|&s| s.max(0) as usize).product();
                     let inner: usize = a.shape[d+1..].iter().map(|&s| s.max(0) as usize).product();
                     let idx_dim = indices.shape[d] as usize;
                     for i in 0..n {

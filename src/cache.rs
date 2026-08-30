@@ -60,8 +60,8 @@ impl LruCache {
 static GRAPH_CACHE: LazyLock<RwLock<LruCache>> =
     LazyLock::new(|| RwLock::new(LruCache::new()));
 
-static HITS: LazyLock<RwLock<u64>> = LazyLock::new(|| RwLock::new(0));
-static MISSES: LazyLock<RwLock<u64>> = LazyLock::new(|| RwLock::new(0));
+static HITS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static MISSES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// BLAKE3 structural signature over the canonical payload string.
 pub fn structural_signature(payload: &str) -> String {
@@ -76,14 +76,14 @@ pub const MAX_PAYLOAD_BYTES: usize = 10 * 1024 * 1024;
 pub fn cache_get(signature: &str) -> Option<String> {
     let result = {
         let mut cache = GRAPH_CACHE.write().unwrap_or_else(|e| e.into_inner());
-        cache.get(signature).map(|v| serde_json::to_string(v).expect("canonical payload is JSON"))
+        cache.get(signature).cloned().map(|v| serde_json::to_string(&v).unwrap_or_default())
     };
     if result.is_some() {
-        *HITS.write().unwrap_or_else(|e| e.into_inner()) += 1;
+        HITS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     } else {
-        *MISSES.write().unwrap_or_else(|e| e.into_inner()) += 1;
+        MISSES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
-    result
+    if result.as_deref().is_some_and(|s| s.is_empty()) { None } else { result }
 }
 
 /// Cache insert: stores the parsed payload under its signature (first write wins).
@@ -102,8 +102,8 @@ pub fn cache_put(signature: &str, payload: &str) {
 #[pyfunction]
 pub fn cache_stats() -> (usize, u64, u64) {
     let size = GRAPH_CACHE.read().unwrap_or_else(|e| e.into_inner()).len();
-    let hits = *HITS.read().unwrap_or_else(|e| e.into_inner());
-    let misses = *MISSES.read().unwrap_or_else(|e| e.into_inner());
+    let hits = HITS.load(std::sync::atomic::Ordering::Relaxed);
+    let misses = MISSES.load(std::sync::atomic::Ordering::Relaxed);
     (size, hits, misses)
 }
 
@@ -111,6 +111,6 @@ pub fn cache_stats() -> (usize, u64, u64) {
 #[pyfunction]
 pub fn cache_clear() {
     GRAPH_CACHE.write().unwrap_or_else(|e| e.into_inner()).clear();
-    *HITS.write().unwrap_or_else(|e| e.into_inner()) = 0;
-    *MISSES.write().unwrap_or_else(|e| e.into_inner()) = 0;
+    HITS.store(0, std::sync::atomic::Ordering::Relaxed);
+    MISSES.store(0, std::sync::atomic::Ordering::Relaxed);
 }

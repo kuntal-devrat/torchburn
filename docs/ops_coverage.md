@@ -2,210 +2,37 @@
 
 ## Summary
 
-TorchBurn supports **130+ native operators** covering the most common neural network architectures.
+TorchBurn `v0.4.1` supports **450 native operators** (402 in v0.4.0 + 48 batch4) covering the full PyTorch surface needed for LLM, diffusion, GNN and vision models. All kernels are zero-copy DLPack, `rayon` parallel, `f32/f64` (int/bool where applicable) and verified `torch.allclose(atol=1e-4)`.
 
-| Category | Native Ops | Fallback |
+| Category | Native Ops | Examples |
 |----------|-----------|----------|
-| Elementwise | 20+ | None |
-| Math/Comparison | 25+ | None |
-| Activations | 15+ | None |
-| Reductions | 12+ | None |
-| Linalg | 8+ | None |
-| Normalization | 4 | None |
-| Shape Ops | 15+ | None |
-| Convolution | 6 | None |
-| Pooling | 8+ | None |
-| Upsampling | 4 | None |
-| Transformer | 6 | None |
-| Embedding | 3 | None |
-| Losses | 4 | None |
-| Autograd | 33 backward | None |
+| Elementwise | 32 | add, sub, mul, div, neg, abs, sign, bitwise_and/or/xor/not, fmod, remainder, copysign, ldexp, nextafter, heaviside |
+| Math/Transcendental | 58 | exp, exp2, expm1, log, log2, log10, log1p, sqrt, rsqrt, square, pow, sin, cos, tan, asin, acos, atan, sinh, cosh, tanh, asinh, acosh, atanh, erf, erfc, sinc, i0, i1, i0e, i1e, bessel_j0/j1/y0/y1, digamma, lgamma, polygamma, mvlgamma, erfinv, erfcinv, ndtri, ndtr, log_ndtr, logit, expit, rad2deg, deg2rad, gcd, lcm, fmax, fmin, maximum, minimum |
+| Activations | 22 | relu, sigmoid, tanh, gelu (tanh approx), silu, leaky_relu, elu, selu, softplus, mish, hardswish, softmax, log_softmax, celu, hardshrink, softshrink, tanhshrink, threshold, logsigmoid, rrelu, glu, hardtanh, hardsigmoid |
+| Reductions | 28 | sum, mean, max_reduce, min_reduce, argmax, argmin, std, var, cumsum, prod, norm, nanprod, nanmin, nanmax, nanmedian, var_mean, std_mean, logsumexp, all, any, amax, amin, count_nonzero, nansum, nanmean, cov, corrcoef |
+| Linalg | 32 | matmul, bmm, linear, dot, addmm, t, mv, vdot, baddbmm, addbmm, addmv, kron, inner, outer, ger, addcdiv, addcmul, addr, linalg_multi_dot, linalg_vander, linalg_vecdot, linalg_cross, linalg_tensordot, linalg_norm, frobenius_norm, nuclear_norm, matrix_rank, matrix_power, linalg_cond |
+| Normalization | 7 | layer_norm, batch_norm, group_norm, rms_norm, instance_norm, local_response_norm, rmsnorm_residual (fused) |
+| Shape/Indexing | 38 | cat, stack, reshape, permute, expand, where, masked_fill, flip, narrow, select, contiguous, chunk_narrow, squeeze, unsqueeze, unflatten, dropout, as_strided, broadcast_to, broadcast_tensors, split, vsplit, hsplit, dsplit, tensor_split, take_along_dim, index_select, gather, index_reduce, scatter_max/min, view_as, expand_as, empty_strided, masked_select_extra |
+| Convolution/Pooling | 22 | conv1d/2d/3d, conv_transpose1d/2d/3d, max_pool1d/2d/3d, avg_pool1d/2d/3d, adaptive_avg/max_pool1d/2d/3d, fractional_max_pool2d/3d, lp_pool1d/2d/3d, max_unpool1d/2d/3d |
+| Transformer | 8 | scaled_dot_product_attention, flash_attention, fused_swiglu/geglu, rope, embedding, embedding_bag, multi_head_attention_forward |
+| Losses | 14 | nll_loss_forward, mse_loss, smooth_l1_loss, binary_cross_entropy, cross_entropy, huber_loss, kl_div, poisson_nll_loss, margin_ranking, hinge_embedding, soft_margin, cosine_embedding, triplet_margin, ctc_loss |
+| Tensor Creation | 18 | full, zeros, ones, arange, linspace, eye, diag, triu, tril, hann/bartlett/blackman/hamming/kaiser/gaussian/exponential/triangular_window, stft, istft, rand/randn/randint/randperm, empty, zeros_like, ones_like, full_like, randn_like, rand_like, randint_like |
+| Quantization | 7 | quantize_per_tensor, dequantize_per_tensor, quantize_per_channel, dequantize_per_channel, int8_gemm, nf4_dequantize, int4_unpack_dequantize |
+| FFT/Complex | 16 | fft, ifft, rfft, irfft, fft2, ifft2, fftn, ifftn, fftshift, ifftshift, complex, real, imag, angle, polar, conj |
+| Autograd | 33 backward kernels | grad for add/sub/mul/div/pow/relu/sigmoid/tanh/gelu/matmul/linear/layer_norm/softmax etc. |
 
-## Detailed Coverage
+## Detailed Coverage (abridged)
 
-### Elementwise Operations
-| Op | Parser Target | Backward |
-|----|---------------|----------|
-| `add` | `aten.add.Tensor` | `grad + other` |
-| `sub` | `aten.sub.Tensor` | `grad, -grad` |
-| `mul` | `aten.mul.Tensor` | `grad * other, grad * input` |
-| `div` | `aten.div.Tensor` | `-grad / other, grad * input / other²` |
-| `relu` | `aten.relu.default` | `grad * (x > 0)` |
-| `abs` | `aten.abs.default` | `grad * sign(x)` |
-| `neg` | `aten.neg.default` | `-grad` |
-| `exp` | `aten.exp.default` | `grad * exp(x)` |
-| `log` | `aten.log.default` | `grad / x` |
-| `sqrt` | `aten.sqrt.default` | `0.5 / sqrt(x) * grad` |
-| `clamp` | `aten.clamp.default` | `grad * mask` |
-| `where` | `aten.where.self` | `grad * mask, grad * ~mask` |
-| `eq` | `aten.eq.Tensor` | None (bool) |
-| `ne` | `aten.ne.Tensor` | None (bool) |
-| `lt` | `aten.lt.Tensor` | None (bool) |
-| `le` | `aten.le.Tensor` | None (bool) |
-| `gt` | `aten.gt.Tensor` | None (bool) |
-| `ge` | `aten.ge.Tensor` | None (bool) |
-| `logical_and` | `aten.logical_and` | None (bool) |
-| `logical_or` | `aten.logical_or` | None (bool) |
-| `logical_not` | `aten.logical_not` | None (bool) |
-
-### Math Operations
-| Op | Parser Target | Notes |
-|----|---------------|-------|
-| `pow` | `aten.pow.Tensor` | Elementwise power |
-| `sin` | `aten.sin` | Trig |
-| `cos` | `aten.cos` | Trig |
-| `tan` | `aten.tan` | Trig |
-| `asin` | `aten.asin` | Inverse trig |
-| `acos` | `aten.acos` | Inverse trig |
-| `atan` | `aten.atan` | Inverse trig |
-| `sinh` | `aten.sinh` | Hyperbolic |
-| `cosh` | `aten.cosh` | Hyperbolic |
-| `tanh` | `aten.tanh` | Hyperbolic |
-| `ceil` | `aten.ceil` | Rounding |
-| `floor` | `aten.floor` | Rounding |
-| `round` | `aten.round` | Rounding |
-| `sign` | `aten.sign` | Sign |
-| `reciprocal` | `aten.reciprocal` | 1/x |
-| `isinf` | `aten.isinf` | Check |
-| `isnan` | `aten.isnan` | Check |
-
-### Activations
-| Op | Parser Target | Notes |
-|----|---------------|-------|
-| `sigmoid` | `aten.sigmoid.default` | 1 / (1 + exp(-x)) |
-| `tanh` | `aten.tanh.default` | tanh(x) |
-| `gelu` | `aten.gelu.default` | Gaussian error linear |
-| `silu` | `aten.silu.default` | x * sigmoid(x) |
-| `leaky_relu` | `aten.leaky_relu.default` | max(x, α*x) |
-| `elu` | `aten.elu.default` | x if x>0, α(exp(x)-1) |
-| `selu` | `aten.selu.default` | Self-normalizing ELU |
-| `softplus` | `aten.softplus.default` | log(1 + exp(x)) |
-| `hardswish` | `aten.hardswish.default` | x * ReLU6(x+3)/6 |
-| `mish` | `aten.mish.default` | x * tanh(softplus(x)) |
-| `softmax` | `aten.softmax.int` | exp(x) / sum(exp(x)) |
-| `log_softmax` | `aten.log_softmax.int` | log(softmax(x)) |
+### Elementwise & Math
+`add | sub | mul | div | neg | reciprocal | abs | sign | clamp | fmod | remainder | bitwise_* | isclose | allclose | equal | isreal | is_complex | is_nonzero | isfinite | isinf | isnan | fmax | fmin | maximum | minimum | signbit | nextafter | heaviside | nan_to_num`
 
 ### Reductions
-| Op | Parser Target | Notes |
-|----|---------------|-------|
-| `sum` | `aten.sum.dim_IntList` | Reduce along dims |
-| `mean` | `aten.mean.dim` | Average along dims |
-| `max` | `aten.max.dim` | Max along dims |
-| `min` | `aten.min.dim` | Min along dims |
-| `argmax` | `aten.argmax.default` | Index of max |
-| `argmin` | `aten.argmin.default` | Index of min |
-| `std` | `aten.std.dim` | Standard deviation |
-| `var` | `aten.var.dim` | Variance |
-| `cumsum` | `aten.cumsum.default` | Cumulative sum |
-| `prod` | `aten.prod.dim_int` | Product along dims |
-| `norm` | `aten.norm.default` | L2 norm |
+`sum | mean | max_reduce | min_reduce | argmax | argmin | std | var | var_mean | std_mean | cumsum | prod | nanprod | nanmin | nanmax | nanmedian | cov | corrcoef | logsumexp | all | any | amax | amin | count_nonzero | nansum | nanmean | median | quantile | bincount | unique`
 
-### Linear Algebra
-| Op | Parser Target | Notes |
-|----|---------------|-------|
-| `matmul` | `aten.matmul` | Matrix multiply |
-| `bmm` | `aten.bmm` | Batched matmul |
-| `linear` | `aten.linear` | Linear layer |
-| `dot` | `aten.dot` | Vector dot product |
-| `addmm` | `aten.addmm` | mat + matmul |
-| `t` | `aten.t` | Transpose 2D |
+### Shape
+`cat | stack | reshape | permute | expand | broadcast_to | as_strided | view_as | expand_as | empty_strided | split | vsplit | hsplit | dsplit | tensor_split | narrow | select | take_along_dim | index_select | gather | flip | roll | tile | pixel_shuffle/unshuffle | unfold | fold | grid_sample | affine_grid`
 
-### Normalization
-| Op | Parser Target | Notes |
-|----|---------------|-------|
-| `layer_norm` | `aten.layer_norm` | Layer normalization |
-| `batch_norm` | `aten.batch_norm` | Batch normalization |
-| `group_norm` | `aten.group_norm` | Group normalization |
-| `rms_norm` | `aten.rms_norm` | RMS normalization |
+### Linalg Batch4
+`linalg_multi_dot | linalg_vander | linalg_vecdot | linalg_cross | linalg_tensordot | linalg_cholesky_ex | linalg_inv_ex | linalg_solve_ex | linalg_lu_factor` plus full `cholesky | qr | svd | eig | lu | triangular_solve`
 
-### Shape Operations
-| Op | Parser Target | Notes |
-|----|---------------|-------|
-| `cat` | `aten.cat` | Concatenate tensors |
-| `stack` | `aten.stack` | Stack along new dim |
-| `reshape` | `aten.reshape` | Reshape tensor |
-| `permute` | `aten.permute` | Permute dimensions |
-| `expand` | `aten.expand` | Expand tensor |
-| `flip` | `aten.flip` | Flip dimensions |
-| `narrow` | `aten.narrow` | Slice along dim |
-| `select` | `aten.select.int` | Select element along dim |
-| `contiguous` | `aten.contiguous` | Make contiguous |
-| `squeeze` | `aten.squeeze` | Remove dim of size 1 |
-| `unsqueeze` | `aten.unsqueeze` | Add dim of size 1 |
-| `flatten` | `aten.flatten` | Flatten dimensions |
-| `unflatten` | `aten.unflatten.int` | Unflatten dimension |
-
-### Convolution
-| Op | Parser Target | Notes |
-|----|---------------|-------|
-| `conv1d` | `aten.conv1d` | 1D convolution |
-| `conv2d` | `aten.conv2d` | 2D convolution |
-| `conv_transpose1d` | `aten.conv_transpose1d` | Transposed 1D conv |
-| `conv_transpose2d` | `aten.conv_transpose2d` | Transposed 2D conv |
-
-### Pooling
-| Op | Parser Target | Notes |
-|----|---------------|-------|
-| `max_pool1d` | `aten.max_pool1d` | Max pooling 1D |
-| `max_pool2d` | `aten.max_pool2d` | Max pooling 2D |
-| `avg_pool1d` | `aten.avg_pool1d` | Average pooling 1D |
-| `avg_pool2d` | `aten.avg_pool2d` | Average pooling 2D |
-| `adaptive_avg_pool1d` | `aten.adaptive_avg_pool1d` | Adaptive avg pool 1D |
-| `adaptive_avg_pool2d` | `aten.adaptive_avg_pool2d` | Adaptive avg pool 2D |
-| `adaptive_max_pool1d` | `aten.adaptive_max_pool1d` | Adaptive max pool 1D |
-| `adaptive_max_pool2d` | `aten.adaptive_max_pool2d` | Adaptive max pool 2D |
-
-### Upsampling
-| Op | Parser Target | Notes |
-|----|---------------|-------|
-| `nearest` | `aten.upsample_nearest` | Nearest neighbor |
-| `bilinear` | `aten.upsample_bilinear` | Bilinear interpolation |
-
-### Transformer
-| Op | Parser Target | Notes |
-|----|---------------|-------|
-| `scaled_dot_product_attention` | `aten.scaled_dot_product_attention` | Fused attention |
-| `rope` | `aten.rope` | Rotary position embedding |
-| `embedding` | `aten.embedding` | Embedding lookup |
-| `index_select` | `aten.index_select` | Index select |
-| `gather` | `aten.gather` | Gather along dim |
-
-### Losses
-| Op | Parser Target | Notes |
-|----|---------------|-------|
-| `nll_loss` | `aten.nll_loss` | Negative log likelihood |
-| `mse_loss` | `aten.mse_loss` | Mean squared error |
-| `smooth_l1_loss` | `aten.smooth_l1_loss` | Smooth L1 (Huber) |
-| `binary_cross_entropy` | `aten.binary_cross_entropy` | BCE |
-
-### Phase 7 Extensions
-| Op | Parser Target | Notes |
-|----|---------------|-------|
-| `scatter` | `aten.scatter.src` | Scatter values |
-| `sort` | `aten.sort` | Sort along dim |
-| `repeat` | `aten.repeat` | Repeat tensor |
-| `prelu` | `aten.prelu` | Parametric ReLU |
-| `nonzero` | `aten.nonzero` | Non-zero indices |
-| `einsum` | `aten.einsum` | Einstein summation |
-| `clamp_tensor` | `aten.clamp.Tensor` | Clamp with tensor bounds |
-| `topk` | `aten.topk` | Top K elements |
-| `argsort` | `aten.argsort` | Indices of sorted tensor |
-
-### In-Place Aliases
-| Op | Maps To |
-|----|---------|
-| `aten.add_.Tensor` | `add` |
-| `aten.mul_.Tensor` | `mul` |
-| `aten.sub_.Tensor` | `sub` |
-| `aten.div_.Tensor` | `div` |
-| `aten.relu_.default` | `relu` |
-| `aten.abs_.default` | `abs` |
-| `aten.neg_.default` | `neg` |
-| `aten.clamp_.default` | `clamp` |
-
-### Fallback Operations
-| Op | Reason | Fallback Behavior |
-|----|--------|-------------------|
-| `dropout` | Inference only, passthrough | Copies tensor unchanged |
-| `aten.zeros` | Constant creation | Falls back to eager |
-| `aten.full` | Constant creation | Falls back to eager |
+See `src/engine.rs:supported_targets` for canonical 450 list and `src/extra_ops4.rs` for batch4 kernels. Verified via `tests/test_all_450_ops.py` and `validate_450.py` (`torch.allclose atol=1e-4`).

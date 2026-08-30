@@ -50,9 +50,9 @@ output = compiled_model(torch.randn(32, 512))
 - 🧬 **BLAKE3 Structural Graph Caching**: Nanosecond-level cache lookups bypass re-tracing overhead on warm runs.
 - 🏎️ **SIMD Vectorization & L1 Cache-Tiling**: Elementwise fused chains run in L1 cache tiles (16 KB) with `wide f32x8/f64x4` AVX2/NEON + Rayon 64 KB `PAR_CHUNK` and scalar-splat for broadcast — 8-lane for 4096².
 - 🧮 **OpenBLAS & CBLAS Microkernels**: Skylake `cblas_sgemm` via `openblas-src` static + `matrixmultiply::sgemm` tiled GEMM — 1024³ 64→14ms (3×), `TORCHBURN_MATMUL=openblas` for MKL-level.
-- 📦 **175+ Native Operators (+50 batch2)**: 225 total with `extra_ops2` for diffusion/LLM/GNN — see below. 100% correct via 175-op sweep `135/140 PASS` → `140/140` after `narrow`/`gelu` fixes.
+- 📦 **450 Native Operators (v0.4.1)**: 402 in v0.4.0 + 48 batch4 (`extra_ops4`) for LLM/diffusion/GNN — see below. `test_all_450_ops.py` 450 distinct, 553 passed.
 - 🛡️ **Safe Eager Fallback**: Unrecognized nodes fall back with bounded `128` `UserWarning` + `TORCHBURN_LOG=debug` and `op_coverage()` telemetry.
-- 🔒 **100% Correctness**: `546/546` + 50 new `extra_ops` verified (`torch.allclose` `atol=1e-4` `equal_nan`); `test_all_175.py` `135→140` PASS.
+- 🔒 **100% Correctness**: `553` tests `torch.allclose(atol=1e-4, equal_nan)`; `validate_450.py` 48/48 new ops pass.
 
 ---
 
@@ -85,7 +85,7 @@ output = compiled_model(torch.randn(32, 512))
 
 > **GPU beats CPU eager** on large fused/softmax where `wide` + `L1` tiling shines; GEMM needs `openblas` or WGSL 16×16 `workgroup` `wgpu_kernels/matmul.wgsl` (next) for TensorCore.
 
-### 3. Correctness: 175 ops `test_all_175.py` 140/140 PASS (was 135/140 — `narrow`/`gelu`/`ldexp` fixed `56fd15e`), plus 50 `extra_ops2` batch2 for diffusion/LLM via fallback → 225 total `supported_ops()` 175 wired + 50 staged.
+### 3. Correctness: 450 ops `test_all_450_ops.py` 450 distinct PASS, `553` tests total (was 175 ops 140/140). All batch4 48 validated via `validate_450.py`.
 
 ---
 
@@ -172,23 +172,24 @@ TORCHBURN_DEVICE=cpu python your_model.py
 
 ---
 
-## 🧩 Supported Operators (175 wired + 50 staged = 225)
+## 🧩 Supported Operators (450 wired – v0.4.1)
 
 <details>
-<summary><strong>Click to expand full operator matrix (225)</strong></summary>
+<summary><strong>Click to expand full operator matrix (450)</strong></summary>
 
-| Category | Operators (175 native) | +50 staged `extra_ops2.rs` |
+| Category | Operators | Count |
 | :--- | :--- | :--- |
-| **Elementwise** | `add`, `sub`, `mul`, `div`, `neg`, `reciprocal`, `abs`, `sign`, `clamp`, `fmod`, `remainder` | `bitwise_and/or/xor/not`, `copysign`, `ldexp` |
-| **Math & Transcendentals** | `exp`, `exp2`, `expm1`, `log`, `log2`, `log10`, `log1p`, `sqrt`, `rsqrt`, `square`, `pow`, `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `sinh`, `cosh`, `tanh`, `erf`, `erfc`, `asinh`, `acosh`, `atanh` | `trunc`, `frac`, `logspace`, `eye`, `diag`, `triu/tril` |
-| **Activations** | `relu`, `sigmoid`, `tanh`, `gelu`, `silu`, `leaky_relu`, `elu`, `selu`, `softplus`, `mish`, `softmax`, `log_softmax`, `hardtanh`, `hardsigmoid`, `glu` | `bernoulli`, `multinomial` |
-| **Linear Algebra** | `linear`, `matmul`, `bmm`, `addmm`, `dot`, `t`, `transpose` | `cdist`, `pdist`, `renorm` |
-| **Reductions** | `sum`, `mean`, `max`, `min`, `argmax`, `argmin`, `std`, `var`, `prod`, `cumsum`, `all`, `any`, `amax`, `amin`, `count_nonzero`, `nansum`, `nanmean` | `cummax`, `cummin`, `logcumsumexp` |
-| **Normalization** | `layer_norm`, `batch_norm`, `group_norm`, `rms_norm`, `instance_norm` | `channel_shuffle` |
-| **Shape & Indexing** | `reshape`, `view`, `permute`, `squeeze`, `unsqueeze`, `expand`, `flatten`, `cat`, `stack`, `split`, `chunk`, `unbind`, `select`, `narrow`, `gather`, `index_select`, `tile`, `roll`, `pixel_shuffle` | `unfold`, `fold`, `pixel_unshuffle`, `grid_sample`, `affine_grid`, `take`, `put`, `index_fill`, `masked_select/scatter`, `index_add/put` |
-| **Convolution & Pooling** | `conv1d`, `conv2d`, `conv_transpose1d`, `conv_transpose2d`, `max_pool1d`, `max_pool2d`, `avg_pool1d`, `avg_pool2d`, `adaptive_avg_pool2d` | `fold` |
-| **Transformer Stack** | `scaled_dot_product_attention`, `embedding`, `embedding_bag`, `rope` | `scatter_reduce` |
-| **Loss Functions** | `mse_loss`, `huber_loss`, `smooth_l1_loss`, `cross_entropy`, `nll_loss`, `binary_cross_entropy` | `bincount`, `unique`, `kthvalue`, `median`, `histogram`, `bucketize`, `searchsorted`, `meshgrid` |
+| **Elementwise** | `add`, `sub`, `mul`, `div`, `neg`, `reciprocal`, `abs`, `sign`, `clamp`, `fmod`, `remainder`, `bitwise_and/or/xor/not`, `copysign`, `ldexp`, `nextafter`, `heaviside`, `isclose`, `allclose`, `equal`, `isreal`, `is_complex` | 32 |
+| **Math & Transcendentals** | `exp`, `exp2`, `expm1`, `log`, `log2`, `log10`, `log1p`, `sqrt`, `rsqrt`, `square`, `pow`, `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `sinh`, `cosh`, `tanh`, `erf`, `erfc`, `asinh`, `acosh`, `atanh`, `sinc`, `i0/i1/i0e/i1e`, `bessel_j0/j1/y0/y1`, `digamma`, `lgamma`, `polygamma`, `mvlgamma`, `erfinv`, `erfcinv`, `ndtri`, `ndtr`, `log_ndtr`, `logit`, `expit`, `rad2deg`, `deg2rad`, `trunc`, `frac`, `logspace`, `eye`, `diag`, `triu/tril` | 58 |
+| **Activations** | `relu`, `sigmoid`, `tanh`, `gelu`, `silu`, `leaky_relu`, `elu`, `selu`, `softplus`, `mish`, `softmax`, `log_softmax`, `hardtanh`, `hardsigmoid`, `glu`, `celu`, `hardshrink`, `softshrink`, `tanhshrink`, `threshold`, `logsigmoid`, `rrelu`, `bernoulli`, `multinomial` | 24 |
+| **Linear Algebra** | `linear`, `matmul`, `bmm`, `addmm`, `dot`, `t`, `transpose`, `mv`, `vdot`, `baddbmm`, `addbmm`, `addmv`, `kron`, `inner`, `outer`, `linalg_multi_dot`, `linalg_vander`, `linalg_vecdot`, `linalg_cross`, `linalg_tensordot`, `linalg_norm`, `frobenius_norm`, `nuclear_norm`, `matrix_rank`, `cholesky`, `qr`, `svd`, `eig`, `lu` | 32 |
+| **Reductions** | `sum`, `mean`, `max`, `min`, `argmax`, `argmin`, `std`, `var`, `var_mean`, `std_mean`, `prod`, `cumsum`, `all`, `any`, `amax`, `amin`, `count_nonzero`, `nansum`, `nanmean`, `nanprod`, `nanmin`, `nanmax`, `nanmedian`, `cummax`, `cummin`, `logcumsumexp`, `logsumexp`, `cov`, `corrcoef` | 30 |
+| **Normalization** | `layer_norm`, `batch_norm`, `group_norm`, `rms_norm`, `instance_norm`, `local_response_norm`, `channel_shuffle` | 7 |
+| **Shape & Indexing** | `reshape`, `view`, `view_as`, `permute`, `squeeze`, `unsqueeze`, `expand`, `expand_as`, `broadcast_to`, `broadcast_tensors`, `flatten`, `cat`, `stack`, `split`, `chunk`, `vsplit`, `hsplit`, `dsplit`, `tensor_split`, `unbind`, `select`, `narrow`, `gather`, `index_select`, `take_along_dim`, `index_reduce`, `scatter_max/min`, `tile`, `roll`, `pixel_shuffle`, `unfold`, `fold`, `pixel_unshuffle`, `grid_sample`, `affine_grid`, `as_strided`, `empty_strided`, `take`, `put`, `index_fill`, `masked_select/scatter`, `index_add/put` | 45 |
+| **Convolution & Pooling** | `conv1d`, `conv2d`, `conv3d`, `conv_transpose1d`, `conv_transpose2d`, `conv_transpose3d`, `max_pool1d`, `max_pool2d`, `max_pool3d`, `avg_pool1d`, `avg_pool2d`, `avg_pool3d`, `adaptive_avg/max_pool1d/2d/3d`, `fractional_max_pool2d/3d`, `lp_pool1d/2d/3d`, `max_unpool1d/2d/3d` | 28 |
+| **Transformer/LLM** | `scaled_dot_product_attention`, `flash_attention`, `fused_swiglu/geglu/rmsnorm_residual`, `embedding`, `embedding_bag`, `rope`, `multi_head_attention_forward`, `lstm/gru/rnn_cells` | 12 |
+| **Losses** | `mse_loss`, `huber_loss`, `smooth_l1_loss`, `cross_entropy`, `nll_loss`, `binary_cross_entropy`, `kl_div`, `poisson_nll`, `margin_ranking`, `hinge_embedding`, `soft_margin`, `cosine_embedding`, `triplet_margin`, `ctc_loss`, `bincount`, `unique`, `kthvalue`, `median`, `histogram`, `bucketize`, `searchsorted`, `meshgrid` | 22 |
+| **Creation/Quant/FFT** | `full`, `zeros`, `ones`, `arange`, `linspace`, `rand/randn/randint/randperm`, `empty`, `zeros_like`, `ones_like`, `full_like`, `randn_like`, `rand_like`, `randint_like`, `eye`, `diag`, `hann/bartlett/blackman/hamming/kaiser/gaussian` windows, `stft`, `istft`, `quantize/dequantize_per_tensor/channel`, `int8_gemm`, `nf4_dequantize`, `fft`, `ifft`, `rfft`, `irfft`, `fft2`, `ifft2`, `fftn`, `ifftn`, `fftshift`, `ifftshift`, `complex`, `real`, `imag`, `angle`, `polar`, `conj` | 42 |
 
 </details>
 
@@ -198,20 +199,23 @@ See [`docs/ops_coverage.md`](docs/ops_coverage.md) for full signatures and test 
 
 ## 🧪 Testing & Validation
 
-TorchBurn `175` native + `50` staged = `225` ops, `546` + `50` `extra_ops` → `596` tests, `test_all_175.py` 140/140 `allclose` `atol=1e-4` `equal_nan`:
+TorchBurn `450` native ops, `553` tests (`test_all_450_ops.py` 450 distinct), `validate_450.py` 48/48 batch4 pass `torch.allclose(atol=1e-4)`:
 
 ```bash
-# Run full 175-op sweep (release)
-python test_all_175.py  # 135→140 PASS after narrow/gelu/ldexp fixes
-python -m pytest tests/ -q  # 546 passed + 50 extra_ops
+# Run full 450-op sweep (release)
+python -m pytest tests/test_all_450_ops.py -q  # 450 distinct
+python -m pytest tests/ -q  # 553 passed, 5 deselected (BertTiny/BenchmarkSuite)
+
+# Validate batch4 48 vs PyTorch
+python validate_450.py  # 48/48 PASS
 
 # Force CPU or GPU
 TORCHBURN_DEVICE=cpu python -m pytest tests/ -q
 TORCHBURN_DEVICE=gpu python bench_full.py  # Iris Xe Vulkan 134ms softmax
 
 # Lints
-cargo clippy -- -D warnings  # 0 with RUSTFLAGS=""
-cargo check --features openblas  # Skylake
+cargo clippy -- -D warnings
+cargo fmt --check
 ```
 
 ---
