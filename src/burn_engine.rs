@@ -258,19 +258,12 @@ where
         }
 
         // Phase 2: comparisons (Bool -> f32)
+        // Delegated to the native engine: burn 0.18's Wgpu/Metal backend
+        // returns garbage for equal()/lower()/... bool-to-f32 readback (seen
+        // on macOS CI). Native comparison is correct on every platform and
+        // zero-copy, so the superset fallback handles it.
         "eq" | "ne" | "lt" | "le" | "gt" | "ge" => {
-            let a = binary(0)?;
-            let b = binary(1)?;
-            let (a, b) = broadcast_pair(&a, &b)?;
-            let mask = match node.target.as_str() {
-                "eq" => a.equal(b),
-                "ne" => a.not_equal(b),
-                "lt" => a.lower(b),
-                "le" => a.lower_equal(b),
-                "gt" => a.greater(b),
-                _ => a.greater_equal(b),
-            };
-            Ok(mask.float())
+            return Err(unsupported("comparisons run on the native engine"));
         }
 
         // Phase 2: unary math
