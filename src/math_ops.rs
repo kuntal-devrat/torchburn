@@ -4,7 +4,7 @@
 //! (1.0 for true, 0.0 for false) to stay within the f32/f64 engine.
 //! Unary math ops (abs, neg, sign, sqrt, exp, log, etc.) are elementwise.
 
-use crate::dlpack::{BorrowedTensor, DType, OwnedTensor, contiguous_strides, unsupported};
+use crate::dlpack::{contiguous_strides, unsupported, BorrowedTensor, DType, OwnedTensor};
 use crate::ops::Scalar;
 use pyo3::prelude::*;
 use std::f64;
@@ -41,7 +41,11 @@ fn run_cmp<T: Scalar + PartialOrd>(
         .for_each(|(ci, chunk)| {
             let start = ci * PAR_CHUNK;
             for (i, o) in chunk.iter_mut().enumerate() {
-                *o = if cmp_fn(a_data[start + i], b_data[start + i]) { 1.0 } else { 0.0 };
+                *o = if cmp_fn(a_data[start + i], b_data[start + i]) {
+                    1.0
+                } else {
+                    0.0
+                };
             }
         });
 }
@@ -80,13 +84,21 @@ fn run_cmp_broadcast<T: Scalar + PartialOrd>(
                 bi += off * b.strides[d - b_pad] as usize;
             }
         }
-        out_data[oi] = if cmp_fn(a_data[ai], b_data[bi]) { 1.0 } else { 0.0 };
+        out_data[oi] = if cmp_fn(a_data[ai], b_data[bi]) {
+            1.0
+        } else {
+            0.0
+        };
     }
 }
 
 pub fn comparison(op: &str, a: &BorrowedTensor, b: &BorrowedTensor) -> PyResult<OwnedTensor> {
     if a.dtype != b.dtype {
-        return Err(unsupported(&format!("dtype mismatch in comparison: {} vs {}", a.dtype.name(), b.dtype.name())));
+        return Err(unsupported(&format!(
+            "dtype mismatch in comparison: {} vs {}",
+            a.dtype.name(),
+            b.dtype.name()
+        )));
     }
     let out_shape = crate::ops::broadcast_shape(&a.shape, &b.shape)?;
     let mut out = OwnedTensor::new(DType::F32, out_shape);
@@ -173,14 +185,19 @@ fn run_logical_binary(
                 bi += off * b.strides[d - b_pad] as usize;
             }
         }
-        out_data[oi] = if op(a_data[ai] != 0.0, b_data[bi] != 0.0) { 1.0 } else { 0.0 };
+        out_data[oi] = if op(a_data[ai] != 0.0, b_data[bi] != 0.0) {
+            1.0
+        } else {
+            0.0
+        };
     }
 }
 
 pub fn logical_and(a: &BorrowedTensor, b: &BorrowedTensor) -> PyResult<OwnedTensor> {
     let out_shape = crate::ops::broadcast_shape(&a.shape, &b.shape)?;
     let mut out = OwnedTensor::new(DType::F32, out_shape);
-    let same_shape = a.shape == b.shape && a.strides == contiguous_strides(&a.shape)
+    let same_shape = a.shape == b.shape
+        && a.strides == contiguous_strides(&a.shape)
         && b.strides == contiguous_strides(&b.shape);
     if same_shape {
         let n = out.elem_count();
@@ -188,7 +205,11 @@ pub fn logical_and(a: &BorrowedTensor, b: &BorrowedTensor) -> PyResult<OwnedTens
         let b_data = unsafe { typed_slice::<f32>(b) };
         let out_data = unsafe { typed_mut_slice::<f32>(&mut out) };
         for i in 0..n {
-            out_data[i] = if a_data[i] != 0.0 && b_data[i] != 0.0 { 1.0 } else { 0.0 };
+            out_data[i] = if a_data[i] != 0.0 && b_data[i] != 0.0 {
+                1.0
+            } else {
+                0.0
+            };
         }
     } else {
         run_logical_binary(a, b, &mut out, |x, y| x && y);
@@ -199,7 +220,8 @@ pub fn logical_and(a: &BorrowedTensor, b: &BorrowedTensor) -> PyResult<OwnedTens
 pub fn logical_or(a: &BorrowedTensor, b: &BorrowedTensor) -> PyResult<OwnedTensor> {
     let out_shape = crate::ops::broadcast_shape(&a.shape, &b.shape)?;
     let mut out = OwnedTensor::new(DType::F32, out_shape);
-    let same_shape = a.shape == b.shape && a.strides == contiguous_strides(&a.shape)
+    let same_shape = a.shape == b.shape
+        && a.strides == contiguous_strides(&a.shape)
         && b.strides == contiguous_strides(&b.shape);
     if same_shape {
         let n = out.elem_count();
@@ -207,7 +229,11 @@ pub fn logical_or(a: &BorrowedTensor, b: &BorrowedTensor) -> PyResult<OwnedTenso
         let b_data = unsafe { typed_slice::<f32>(b) };
         let out_data = unsafe { typed_mut_slice::<f32>(&mut out) };
         for i in 0..n {
-            out_data[i] = if a_data[i] != 0.0 || b_data[i] != 0.0 { 1.0 } else { 0.0 };
+            out_data[i] = if a_data[i] != 0.0 || b_data[i] != 0.0 {
+                1.0
+            } else {
+                0.0
+            };
         }
     } else {
         run_logical_binary(a, b, &mut out, |x, y| x || y);
@@ -250,28 +276,42 @@ pub fn logical_not(a: &BorrowedTensor) -> PyResult<OwnedTensor> {
 // Unary math ops — elementwise, contiguous fast path + general stride path
 // ---------------------------------------------------------------------------
 
-fn run_unary_contig_f32(a: &BorrowedTensor, out: &mut OwnedTensor, f: impl Fn(f32) -> f32 + Sync + Send) {
+fn run_unary_contig_f32(
+    a: &BorrowedTensor,
+    out: &mut OwnedTensor,
+    f: impl Fn(f32) -> f32 + Sync + Send,
+) {
     let a_data = unsafe { typed_slice::<f32>(a) };
     let out_data = unsafe { typed_mut_slice::<f32>(out) };
     use rayon::prelude::*;
-    out_data.par_chunks_mut(PAR_CHUNK).enumerate().for_each(|(ci, chunk)| {
-        let start = ci * PAR_CHUNK;
-        for (i, o) in chunk.iter_mut().enumerate() {
-            *o = f(a_data[start + i]);
-        }
-    });
+    out_data
+        .par_chunks_mut(PAR_CHUNK)
+        .enumerate()
+        .for_each(|(ci, chunk)| {
+            let start = ci * PAR_CHUNK;
+            for (i, o) in chunk.iter_mut().enumerate() {
+                *o = f(a_data[start + i]);
+            }
+        });
 }
 
-fn run_unary_contig_f64(a: &BorrowedTensor, out: &mut OwnedTensor, f: impl Fn(f64) -> f64 + Sync + Send) {
+fn run_unary_contig_f64(
+    a: &BorrowedTensor,
+    out: &mut OwnedTensor,
+    f: impl Fn(f64) -> f64 + Sync + Send,
+) {
     let a_data = unsafe { typed_slice::<f64>(a) };
     let out_data = unsafe { typed_mut_slice::<f64>(out) };
     use rayon::prelude::*;
-    out_data.par_chunks_mut(PAR_CHUNK).enumerate().for_each(|(ci, chunk)| {
-        let start = ci * PAR_CHUNK;
-        for (i, o) in chunk.iter_mut().enumerate() {
-            *o = f(a_data[start + i]);
-        }
-    });
+    out_data
+        .par_chunks_mut(PAR_CHUNK)
+        .enumerate()
+        .for_each(|(ci, chunk)| {
+            let start = ci * PAR_CHUNK;
+            for (i, o) in chunk.iter_mut().enumerate() {
+                *o = f(a_data[start + i]);
+            }
+        });
 }
 
 fn run_unary_general_f32(a: &BorrowedTensor, out: &mut OwnedTensor, f: impl Fn(f32) -> f32) {
@@ -346,7 +386,6 @@ pub fn abs(a: &BorrowedTensor) -> PyResult<OwnedTensor> {
         DType::I64 | DType::I32 | DType::Bool => {
             return Err(unsupported("this kernel only supports f32/f64 tensors"));
         }
-
     }
 }
 
@@ -358,7 +397,6 @@ pub fn neg(a: &BorrowedTensor) -> PyResult<OwnedTensor> {
         DType::I64 | DType::I32 | DType::Bool => {
             return Err(unsupported("this kernel only supports f32/f64 tensors"));
         }
-
     }
 }
 
@@ -370,7 +408,6 @@ pub fn sign(a: &BorrowedTensor) -> PyResult<OwnedTensor> {
         DType::I64 | DType::I32 | DType::Bool => {
             return Err(unsupported("this kernel only supports f32/f64 tensors"));
         }
-
     }
 }
 
@@ -382,7 +419,6 @@ pub fn sqrt(a: &BorrowedTensor) -> PyResult<OwnedTensor> {
         DType::I64 | DType::I32 | DType::Bool => {
             return Err(unsupported("this kernel only supports f32/f64 tensors"));
         }
-
     }
 }
 
@@ -394,7 +430,6 @@ pub fn rsqrt(a: &BorrowedTensor) -> PyResult<OwnedTensor> {
         DType::I64 | DType::I32 | DType::Bool => {
             return Err(unsupported("this kernel only supports f32/f64 tensors"));
         }
-
     }
 }
 
@@ -406,7 +441,6 @@ pub fn exp(a: &BorrowedTensor) -> PyResult<OwnedTensor> {
         DType::I64 | DType::I32 | DType::Bool => {
             return Err(unsupported("this kernel only supports f32/f64 tensors"));
         }
-
     }
 }
 
@@ -418,7 +452,6 @@ pub fn log(a: &BorrowedTensor) -> PyResult<OwnedTensor> {
         DType::I64 | DType::I32 | DType::Bool => {
             return Err(unsupported("this kernel only supports f32/f64 tensors"));
         }
-
     }
 }
 
@@ -430,7 +463,6 @@ pub fn reciprocal(a: &BorrowedTensor) -> PyResult<OwnedTensor> {
         DType::I64 | DType::I32 | DType::Bool => {
             return Err(unsupported("this kernel only supports f32/f64 tensors"));
         }
-
     }
 }
 
@@ -442,7 +474,6 @@ pub fn ceil(a: &BorrowedTensor) -> PyResult<OwnedTensor> {
         DType::I64 | DType::I32 | DType::Bool => {
             return Err(unsupported("this kernel only supports f32/f64 tensors"));
         }
-
     }
 }
 
@@ -454,7 +485,6 @@ pub fn floor(a: &BorrowedTensor) -> PyResult<OwnedTensor> {
         DType::I64 | DType::I32 | DType::Bool => {
             return Err(unsupported("this kernel only supports f32/f64 tensors"));
         }
-
     }
 }
 
@@ -466,26 +496,32 @@ fn run_clamp_f32(a: &BorrowedTensor, out: &mut OwnedTensor, min: f32, max: f32) 
     let a_data = unsafe { typed_slice::<f32>(a) };
     let out_data = unsafe { typed_mut_slice::<f32>(out) };
     use rayon::prelude::*;
-    out_data.par_chunks_mut(PAR_CHUNK).enumerate().for_each(|(ci, chunk)| {
-        let start = ci * PAR_CHUNK;
-        for (i, o) in chunk.iter_mut().enumerate() {
-            let v = a_data[start + i];
-            *o = v.max(min).min(max);
-        }
-    });
+    out_data
+        .par_chunks_mut(PAR_CHUNK)
+        .enumerate()
+        .for_each(|(ci, chunk)| {
+            let start = ci * PAR_CHUNK;
+            for (i, o) in chunk.iter_mut().enumerate() {
+                let v = a_data[start + i];
+                *o = v.max(min).min(max);
+            }
+        });
 }
 
 fn run_clamp_f64(a: &BorrowedTensor, out: &mut OwnedTensor, min: f64, max: f64) {
     let a_data = unsafe { typed_slice::<f64>(a) };
     let out_data = unsafe { typed_mut_slice::<f64>(out) };
     use rayon::prelude::*;
-    out_data.par_chunks_mut(PAR_CHUNK).enumerate().for_each(|(ci, chunk)| {
-        let start = ci * PAR_CHUNK;
-        for (i, o) in chunk.iter_mut().enumerate() {
-            let v = a_data[start + i];
-            *o = v.max(min).min(max);
-        }
-    });
+    out_data
+        .par_chunks_mut(PAR_CHUNK)
+        .enumerate()
+        .for_each(|(ci, chunk)| {
+            let start = ci * PAR_CHUNK;
+            for (i, o) in chunk.iter_mut().enumerate() {
+                let v = a_data[start + i];
+                *o = v.max(min).min(max);
+            }
+        });
 }
 
 pub fn clamp(a: &BorrowedTensor, min: f64, max: f64) -> PyResult<OwnedTensor> {
@@ -497,7 +533,6 @@ pub fn clamp(a: &BorrowedTensor, min: f64, max: f64) -> PyResult<OwnedTensor> {
         DType::I64 | DType::I32 | DType::Bool => {
             return Err(unsupported("this kernel only supports f32/f64 tensors"));
         }
-
     }
     Ok(out)
 }
@@ -532,7 +567,11 @@ pub fn round(a: &BorrowedTensor) -> PyResult<OwnedTensor> {
             if (frac - 0.5).abs() < 1e-6 {
                 // Half case: round to even
                 let f = floor as i64;
-                if f % 2 == 0 { floor } else { floor + 1.0 }
+                if f % 2 == 0 {
+                    floor
+                } else {
+                    floor + 1.0
+                }
             } else {
                 r.round()
             }
@@ -543,7 +582,11 @@ pub fn round(a: &BorrowedTensor) -> PyResult<OwnedTensor> {
             let frac = r - floor;
             if (frac - 0.5).abs() < 1e-9 {
                 let f = floor as i64;
-                if f % 2 == 0 { floor } else { floor + 1.0 }
+                if f % 2 == 0 {
+                    floor
+                } else {
+                    floor + 1.0
+                }
             } else {
                 r.round()
             }
@@ -562,48 +605,60 @@ fn run_clamp_min_f32(a: &BorrowedTensor, out: &mut OwnedTensor, min: f32) {
     let a_data = unsafe { typed_slice::<f32>(a) };
     let out_data = unsafe { typed_mut_slice::<f32>(out) };
     use rayon::prelude::*;
-    out_data.par_chunks_mut(PAR_CHUNK).enumerate().for_each(|(ci, chunk)| {
-        let start = ci * PAR_CHUNK;
-        for (i, o) in chunk.iter_mut().enumerate() {
-            *o = a_data[start + i].max(min);
-        }
-    });
+    out_data
+        .par_chunks_mut(PAR_CHUNK)
+        .enumerate()
+        .for_each(|(ci, chunk)| {
+            let start = ci * PAR_CHUNK;
+            for (i, o) in chunk.iter_mut().enumerate() {
+                *o = a_data[start + i].max(min);
+            }
+        });
 }
 
 fn run_clamp_min_f64(a: &BorrowedTensor, out: &mut OwnedTensor, min: f64) {
     let a_data = unsafe { typed_slice::<f64>(a) };
     let out_data = unsafe { typed_mut_slice::<f64>(out) };
     use rayon::prelude::*;
-    out_data.par_chunks_mut(PAR_CHUNK).enumerate().for_each(|(ci, chunk)| {
-        let start = ci * PAR_CHUNK;
-        for (i, o) in chunk.iter_mut().enumerate() {
-            *o = a_data[start + i].max(min);
-        }
-    });
+    out_data
+        .par_chunks_mut(PAR_CHUNK)
+        .enumerate()
+        .for_each(|(ci, chunk)| {
+            let start = ci * PAR_CHUNK;
+            for (i, o) in chunk.iter_mut().enumerate() {
+                *o = a_data[start + i].max(min);
+            }
+        });
 }
 
 fn run_clamp_max_f32(a: &BorrowedTensor, out: &mut OwnedTensor, max: f32) {
     let a_data = unsafe { typed_slice::<f32>(a) };
     let out_data = unsafe { typed_mut_slice::<f32>(out) };
     use rayon::prelude::*;
-    out_data.par_chunks_mut(PAR_CHUNK).enumerate().for_each(|(ci, chunk)| {
-        let start = ci * PAR_CHUNK;
-        for (i, o) in chunk.iter_mut().enumerate() {
-            *o = a_data[start + i].min(max);
-        }
-    });
+    out_data
+        .par_chunks_mut(PAR_CHUNK)
+        .enumerate()
+        .for_each(|(ci, chunk)| {
+            let start = ci * PAR_CHUNK;
+            for (i, o) in chunk.iter_mut().enumerate() {
+                *o = a_data[start + i].min(max);
+            }
+        });
 }
 
 fn run_clamp_max_f64(a: &BorrowedTensor, out: &mut OwnedTensor, max: f64) {
     let a_data = unsafe { typed_slice::<f64>(a) };
     let out_data = unsafe { typed_mut_slice::<f64>(out) };
     use rayon::prelude::*;
-    out_data.par_chunks_mut(PAR_CHUNK).enumerate().for_each(|(ci, chunk)| {
-        let start = ci * PAR_CHUNK;
-        for (i, o) in chunk.iter_mut().enumerate() {
-            *o = a_data[start + i].min(max);
-        }
-    });
+    out_data
+        .par_chunks_mut(PAR_CHUNK)
+        .enumerate()
+        .for_each(|(ci, chunk)| {
+            let start = ci * PAR_CHUNK;
+            for (i, o) in chunk.iter_mut().enumerate() {
+                *o = a_data[start + i].min(max);
+            }
+        });
 }
 
 pub fn clamp_min(a: &BorrowedTensor, min: f64) -> PyResult<OwnedTensor> {
@@ -642,7 +697,6 @@ pub fn pow_scalar(a: &BorrowedTensor, exp: f64) -> PyResult<OwnedTensor> {
         DType::I64 | DType::I32 | DType::Bool => {
             return Err(unsupported("this kernel only supports f32/f64 tensors"));
         }
-
     }
 }
 
@@ -734,7 +788,12 @@ pub fn to_dtype(a: &BorrowedTensor, target: DType) -> PyResult<OwnedTensor> {
                 dst[i] = src[i] as i32;
             }
         }
-        _ => return Err(unsupported(&format!("unsupported cast from {:?} to {:?}", a.dtype, target))),
+        _ => {
+            return Err(unsupported(&format!(
+                "unsupported cast from {:?} to {:?}",
+                a.dtype, target
+            )))
+        }
     }
     Ok(out)
 }

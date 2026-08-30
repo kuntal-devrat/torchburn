@@ -7,8 +7,7 @@
 fn main() {
     #[cfg(feature = "openblas")]
     {
-        let manifest_dir =
-            std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set");
+        let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set");
 
         // Try MSVC-built static lib first (preferred — no DLL overhead).
         let msvc_lib = std::path::PathBuf::from(&manifest_dir)

@@ -25,7 +25,7 @@
 //! engine falls back to the classic per-node path — fusion never changes
 //! observable behaviour.
 
-use crate::dlpack::{DType, OwnedTensor, elem_count, unsupported};
+use crate::dlpack::{elem_count, unsupported, DType, OwnedTensor};
 use crate::engine::{ArgRef, Node, Slot};
 use pyo3::prelude::*;
 use serde_json::Value;
@@ -424,7 +424,11 @@ pub enum Step {
     /// Fused elementwise chain.
     Chain(ChainPlan),
     /// `linear`/`addmm` node with a single-consumer activation absorbed.
-    Gemm { linear: usize, act: usize, spec: ActSpec },
+    Gemm {
+        linear: usize,
+        act: usize,
+        spec: ActSpec,
+    },
     /// `conv2d → batch_norm(training=false) → relu` fused into a single pass.
     ConvBnRelu(ConvBnReluSpec),
 }
@@ -528,7 +532,8 @@ pub fn plan(nodes: &[Node], base: usize) -> FusionPlan {
         // The BN parameters (running_mean, running_var, weight, bias) are
         // precomputed into fused per-channel scale/bias at plan time, so the
         // runtime kernel is a single multiply+add+relu per output element.
-        if false && node.target == "conv2d"
+        if false
+            && node.target == "conv2d"
             && i + 2 < n
             && nodes[i + 1].target == "batch_norm"
             && nodes[i + 2].target == "relu"
@@ -539,8 +544,11 @@ pub fn plan(nodes: &[Node], base: usize) -> FusionPlan {
         {
             // Check that BN is in inference mode (training=false).
             let bn_node = &nodes[i + 1];
-            let training = bn_node.kwargs.get("training")
-                .and_then(|v| v.as_bool()).unwrap_or(false);
+            let training = bn_node
+                .kwargs
+                .get("training")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
             if !training {
                 // Try to precompute fused BN scale/bias from the plan's
                 // constant slots.  The BN node args are:
@@ -567,12 +575,17 @@ pub fn plan(nodes: &[Node], base: usize) -> FusionPlan {
             && single_consumer(nodes, i, base) == Some(i + 1)
         {
             let act = &nodes[i + 1];
-            let kind = UnaryKind::from_target(&act.target).expect("fusable unary target already validated");
+            let kind = UnaryKind::from_target(&act.target)
+                .expect("fusable unary target already validated");
             let spec = ActSpec {
                 kind,
                 params: kind.params(&act.kwargs),
             };
-            steps.push(Step::Gemm { linear: i, act: i + 1, spec });
+            steps.push(Step::Gemm {
+                linear: i,
+                act: i + 1,
+                spec,
+            });
             node_step[i] = steps.len() - 1;
             node_step[i + 1] = steps.len() - 1;
             i += 2;
@@ -595,7 +608,10 @@ pub fn plan(nodes: &[Node], base: usize) -> FusionPlan {
             if chain.len() >= 2 {
                 match build_chain_exprs(nodes, &chain, base) {
                     Ok(exprs) => {
-                        let cplan = ChainPlan { nodes: chain.clone(), exprs };
+                        let cplan = ChainPlan {
+                            nodes: chain.clone(),
+                            exprs,
+                        };
                         steps.push(Step::Chain(cplan));
                         for &m in &chain {
                             node_step[m] = steps.len() - 1;
@@ -645,17 +661,18 @@ fn build_chain_exprs(nodes: &[Node], chain: &[usize], base: usize) -> PyResult<V
             }
         } else if let Some(bk) = BinaryKind::from_target(&node.target) {
             match (node.args.get(0), node.args.get(1)) {
-                (Some(aa), Some(bb)) => (
-                    ChainOp::Binary(bk),
-                    classify(aa),
-                    Some(classify(bb)),
-                ),
+                (Some(aa), Some(bb)) => (ChainOp::Binary(bk), classify(aa), Some(classify(bb))),
                 _ => return Err(fusion_skip("chain binary missing its arguments")),
             }
         } else {
             return Err(fusion_skip("chain member is not elementwise"));
         };
-        exprs.push(ChainExpr { op, a, b, node: idx });
+        exprs.push(ChainExpr {
+            op,
+            a,
+            b,
+            node: idx,
+        });
     }
     Ok(exprs)
 }
@@ -680,9 +697,7 @@ fn build_conv_bn_relu_spec(
     // We need weight (1), bias (2), running_mean (3), running_var (4)
     // as constant input slots whose values we can read at plan time.
     // In practice these are model parameters — input slots (indices < base).
-    let get_slot = |pos: usize| -> Option<usize> {
-        bn.args.get(pos).and_then(|a| a.index)
-    };
+    let get_slot = |pos: usize| -> Option<usize> { bn.args.get(pos).and_then(|a| a.index) };
 
     let weight_slot = get_slot(1)?;
     let bias_slot = get_slot(2)?;
@@ -695,8 +710,11 @@ fn build_conv_bn_relu_spec(
         return None;
     }
 
-    let eps = bn.kwargs.get("eps")
-        .and_then(|v| v.as_f64()).unwrap_or(1e-5) as f32;
+    let eps = bn
+        .kwargs
+        .get("eps")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(1e-5) as f32;
 
     // We can't read the actual tensor values at plan time (they live in
     // DLPack capsules that only exist at runtime).  Instead, store the
@@ -864,9 +882,12 @@ pub fn run_chain(
         match arg {
             Arg::Chain(m) => Ok(shapes[m].clone()),
             Arg::Leaf(slot) => {
-                let li = leaf_slots.iter().position(|&s| s == slot)
-                    .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err(
-                        format!("fusion: slot {} not in leaf_slots", slot)))?;
+                let li = leaf_slots.iter().position(|&s| s == slot).ok_or_else(|| {
+                    pyo3::exceptions::PyRuntimeError::new_err(format!(
+                        "fusion: slot {} not in leaf_slots",
+                        slot
+                    ))
+                })?;
                 Ok(leaf_shapes[li].clone())
             }
         }
@@ -910,7 +931,9 @@ pub fn run_chain(
                 match a {
                     Arg::Chain(m) => RArg::Chain(m),
                     Arg::Leaf(slot) => {
-                        let li = leaves.iter().position(|l| l.slot == slot)
+                        let li = leaves
+                            .iter()
+                            .position(|l| l.slot == slot)
                             .expect("fusion: slot not in leaves");
                         RArg::Leaf(li)
                     }
@@ -932,8 +955,24 @@ pub fn run_chain(
     let out_shape_rt = out_shape.clone();
     let mut out = OwnedTensor::new(dtype, out_shape);
     match dtype {
-        DType::F32 => run_chain_typed::<f32>(&rexprs, &leaves, slots, capsules, &mut out, out_n, &out_shape_rt)?,
-        DType::F64 => run_chain_typed::<f64>(&rexprs, &leaves, slots, capsules, &mut out, out_n, &out_shape_rt)?,
+        DType::F32 => run_chain_typed::<f32>(
+            &rexprs,
+            &leaves,
+            slots,
+            capsules,
+            &mut out,
+            out_n,
+            &out_shape_rt,
+        )?,
+        DType::F64 => run_chain_typed::<f64>(
+            &rexprs,
+            &leaves,
+            slots,
+            capsules,
+            &mut out,
+            out_n,
+            &out_shape_rt,
+        )?,
         _ => unreachable!(),
     }
     Ok(out)
@@ -1066,11 +1105,7 @@ fn run_chunk_vectorized<T: Fp>(
     for (k, e) in rexprs.iter().enumerate() {
         let is_last = k == rexprs.len() - 1;
         let (prior, rest) = scratch.split_at_mut(k);
-        let dst: &mut [T] = if is_last {
-            chunk
-        } else {
-            &mut rest[0][..len]
-        };
+        let dst: &mut [T] = if is_last { chunk } else { &mut rest[0][..len] };
 
         match e.op {
             ChainOp::Unary(u) => {
@@ -1137,11 +1172,11 @@ fn run_chain_typed<T: Fp>(
         let view = crate::engine::slot_view(slots, capsules, leaf.slot)?;
         // SAFETY: `run_chain` verified every leaf is T; buffers are alive for
         // the whole execute_native call.
-        leaf_data.push(unsafe { std::slice::from_raw_parts(view.data as *const T, view.buffer_len()) });
+        leaf_data
+            .push(unsafe { std::slice::from_raw_parts(view.data as *const T, view.buffer_len()) });
     }
-    let out_data = unsafe {
-        std::slice::from_raw_parts_mut(out.data.as_mut_ptr() as *mut T, out_n)
-    };
+    let out_data =
+        unsafe { std::slice::from_raw_parts_mut(out.data.as_mut_ptr() as *mut T, out_n) };
     let needs_coords = leaves
         .iter()
         .any(|l| matches!(l.map, LeafMap::General { .. }));

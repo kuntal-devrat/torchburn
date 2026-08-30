@@ -2,7 +2,7 @@
 //!
 //! Provides native, memory-safe, hardware-agnostic low-bit tensor processing.
 
-use crate::dlpack::{BorrowedTensor, DType, OwnedTensor, elem_count, unsupported};
+use crate::dlpack::{elem_count, unsupported, BorrowedTensor, DType, OwnedTensor};
 use pyo3::prelude::*;
 
 unsafe fn typed_slice<T>(t: &BorrowedTensor) -> &[T] {
@@ -57,7 +57,11 @@ pub fn quantize_per_tensor(
                 dst[i] = q as i64;
             }
         }
-        _ => return Err(unsupported("quantize_per_tensor unsupported dtype combination")),
+        _ => {
+            return Err(unsupported(
+                "quantize_per_tensor unsupported dtype combination",
+            ))
+        }
     }
     Ok(out)
 }
@@ -221,10 +225,22 @@ pub fn int8_gemm(
 
 /// NormalFloat4 (NF4) codebook lookup table as specified in QLoRA.
 const NF4_CODEBOOK: [f32; 16] = [
-    -1.0, -0.6961928009986877, -0.5250730514526367, -0.39491748809814453,
-    -0.28444138169288635, -0.18477343022823334, -0.09105003625154495, 0.0,
-    0.07958029955625534, 0.16093020141124725, 0.24611230194568634, 0.33791524171829224,
-    0.44070982933044434, 0.5626170039176941, 0.7229568362236023, 1.0,
+    -1.0,
+    -0.6961928009986877,
+    -0.5250730514526367,
+    -0.39491748809814453,
+    -0.28444138169288635,
+    -0.18477343022823334,
+    -0.09105003625154495,
+    0.0,
+    0.07958029955625534,
+    0.16093020141124725,
+    0.24611230194568634,
+    0.33791524171829224,
+    0.44070982933044434,
+    0.5626170039176941,
+    0.7229568362236023,
+    1.0,
 ];
 
 /// Unpack packed 4-bit NormalFloat4 (2 elements per byte) and dequantize with per-group absmax.
@@ -254,8 +270,16 @@ pub fn nf4_dequantize(
         let g0 = elem0 / group_size.max(1);
         let g1 = elem1 / group_size.max(1);
 
-        let scale0 = if g0 < absmax_slice.len() { absmax_slice[g0] } else { 1.0 };
-        let scale1 = if g1 < absmax_slice.len() { absmax_slice[g1] } else { 1.0 };
+        let scale0 = if g0 < absmax_slice.len() {
+            absmax_slice[g0]
+        } else {
+            1.0
+        };
+        let scale1 = if g1 < absmax_slice.len() {
+            absmax_slice[g1]
+        } else {
+            1.0
+        };
 
         dst[elem0] = NF4_CODEBOOK[nibble0] * scale0;
         dst[elem1] = NF4_CODEBOOK[nibble1] * scale1;
@@ -293,10 +317,26 @@ pub fn int4_unpack_dequantize(
         let g0 = elem0 / group_size.max(1);
         let g1 = elem1 / group_size.max(1);
 
-        let s0 = if g0 < scale_slice.len() { scale_slice[g0] } else { 1.0 };
-        let s1 = if g1 < scale_slice.len() { scale_slice[g1] } else { 1.0 };
-        let z0 = if g0 < zero_slice.len() { zero_slice[g0] } else { 0.0 };
-        let z1 = if g1 < zero_slice.len() { zero_slice[g1] } else { 0.0 };
+        let s0 = if g0 < scale_slice.len() {
+            scale_slice[g0]
+        } else {
+            1.0
+        };
+        let s1 = if g1 < scale_slice.len() {
+            scale_slice[g1]
+        } else {
+            1.0
+        };
+        let z0 = if g0 < zero_slice.len() {
+            zero_slice[g0]
+        } else {
+            0.0
+        };
+        let z1 = if g1 < zero_slice.len() {
+            zero_slice[g1]
+        } else {
+            0.0
+        };
 
         dst[elem0] = (n0 - z0) * s0;
         dst[elem1] = (n1 - z1) * s1;

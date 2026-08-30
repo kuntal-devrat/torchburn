@@ -7,7 +7,7 @@
 //! Requires indices in range `[0, num_embeddings)`; out-of-range indices
 //! raise `TB_UNSUPPORTED` (delegates to eager, mirroring torch's error).
 
-use crate::dlpack::{BorrowedTensor, DType, OwnedTensor, unsupported};
+use crate::dlpack::{unsupported, BorrowedTensor, DType, OwnedTensor};
 use pyo3::prelude::*;
 
 /// Read a tensor's elements as a typed slice.
@@ -25,7 +25,9 @@ pub fn embedding(weight: &BorrowedTensor, indices: &BorrowedTensor) -> PyResult<
         return Err(unsupported("embedding weight must be f32/f64"));
     }
     if weight.shape.len() != 2 {
-        return Err(unsupported("embedding weight must be 2D [num_embeddings, D]"));
+        return Err(unsupported(
+            "embedding weight must be 2D [num_embeddings, D]",
+        ));
     }
     if indices.dtype != DType::I64 && indices.dtype != DType::I32 {
         return Err(unsupported("embedding indices must be int64/int32"));

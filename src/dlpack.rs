@@ -226,7 +226,10 @@ impl BorrowedTensor {
                 return Err(PyValueError::new_err("negative ndim in DLPack tensor"));
             }
             if dl.ndim as usize > 32 {
-                return Err(PyValueError::new_err(format!("ndim too large in DLPack tensor: {}", dl.ndim)));
+                return Err(PyValueError::new_err(format!(
+                    "ndim too large in DLPack tensor: {}",
+                    dl.ndim
+                )));
             }
             let ndim = dl.ndim as usize;
             if ndim > 0 && dl.shape.is_null() {
@@ -357,11 +360,7 @@ impl OwnedTensor {
         let bytes = elem_count(&shape) * dtype.elem_size();
         let words = bytes.div_ceil(8);
         let data = crate::pool::take_buffer(dtype, words);
-        OwnedTensor {
-            data,
-            shape,
-            dtype,
-        }
+        OwnedTensor { data, shape, dtype }
     }
 
     pub fn elem_count(&self) -> usize {
@@ -485,9 +484,16 @@ pub fn owned_to_capsule_owned(py: Python<'_>, tensor: OwnedTensor) -> PyResult<P
         dl: DLManagedTensor {
             dl_tensor: DLTensor {
                 data: data_ptr,
-                device: DLDevice { device_type: DL_DEVICE_CPU, device_id: 0 },
+                device: DLDevice {
+                    device_type: DL_DEVICE_CPU,
+                    device_id: 0,
+                },
                 ndim: shape.len() as i32,
-                dtype: DLDataType { code: dtype.dl_code(), bits: dtype.dl_bits(), lanes: 1 },
+                dtype: DLDataType {
+                    code: dtype.dl_code(),
+                    bits: dtype.dl_bits(),
+                    lanes: 1,
+                },
                 shape: shape_ptr,
                 strides: std::ptr::null_mut(),
                 byte_offset: 0,
@@ -500,7 +506,11 @@ pub fn owned_to_capsule_owned(py: Python<'_>, tensor: OwnedTensor) -> PyResult<P
     };
     let raw = Box::into_raw(Box::new(buffer)) as *mut DLManagedTensor;
     let capsule_ptr = unsafe {
-        pyo3::ffi::PyCapsule_New(raw as *mut c_void, c"dltensor".as_ptr(), Some(dlpack_capsule_destructor))
+        pyo3::ffi::PyCapsule_New(
+            raw as *mut c_void,
+            c"dltensor".as_ptr(),
+            Some(dlpack_capsule_destructor),
+        )
     };
     let capsule: Bound<'_, PyCapsule> =
         unsafe { Bound::from_owned_ptr_or_err(py, capsule_ptr)?.downcast_into_unchecked() };

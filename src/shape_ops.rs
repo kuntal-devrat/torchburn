@@ -1,7 +1,9 @@
 //! Shape and indexing operations: cat, stack, reshape, permute, expand,
 //! index_select, gather, where, masked_fill, repeat, flip, narrow.
 
-use crate::dlpack::{BorrowedTensor, DType, OwnedTensor, contiguous_strides, elem_count, unsupported};
+use crate::dlpack::{
+    contiguous_strides, elem_count, unsupported, BorrowedTensor, DType, OwnedTensor,
+};
 use pyo3::prelude::*;
 
 unsafe fn typed_slice<T>(t: &BorrowedTensor) -> &[T] {
@@ -21,9 +23,16 @@ pub fn cat(tensors: &[BorrowedTensor], dim: isize) -> PyResult<OwnedTensor> {
         return Err(unsupported("cat: no tensors provided"));
     }
     let rank = tensors[0].shape.len();
-    let d = if dim < 0 { (rank as isize + dim) as usize } else { dim as usize };
+    let d = if dim < 0 {
+        (rank as isize + dim) as usize
+    } else {
+        dim as usize
+    };
     if d >= rank {
-        return Err(unsupported(&format!("cat: dim {} out of range for rank {}", d, rank)));
+        return Err(unsupported(&format!(
+            "cat: dim {} out of range for rank {}",
+            d, rank
+        )));
     }
 
     // Verify all tensors have same shape except along dim, and same dtype
@@ -50,7 +59,10 @@ pub fn cat(tensors: &[BorrowedTensor], dim: isize) -> PyResult<OwnedTensor> {
     // outer = product of dims 0..d
     // inner = product of dims d+1..rank
     let outer: usize = out_shape[..d].iter().map(|&s| s.max(0) as usize).product();
-    let inner: usize = out_shape[d+1..].iter().map(|&s| s.max(0) as usize).product();
+    let inner: usize = out_shape[d + 1..]
+        .iter()
+        .map(|&s| s.max(0) as usize)
+        .product();
 
     // For each outer index, copy slices from each tensor one after another along dim d
     let mut dim_offset = 0usize; // cumulative offset in the output along dim d
@@ -77,7 +89,8 @@ pub fn cat(tensors: &[BorrowedTensor], dim: isize) -> PyResult<OwnedTensor> {
             for o in 0..outer {
                 for t_i in 0..t_dim_size {
                     for inn in 0..inner {
-                        let out_idx = o * out_shape[d] as usize * inner + (dim_offset + t_i) * inner + inn;
+                        let out_idx =
+                            o * out_shape[d] as usize * inner + (dim_offset + t_i) * inner + inn;
                         // Compute strided source index using the tensor's actual strides.
                         // Decompose o → outer per-dim coords, t_i → dim-d coord, inn → inner per-dim coords.
                         let mut src_flat = 0usize;
@@ -127,7 +140,11 @@ pub fn stack(tensors: &[BorrowedTensor], dim: isize) -> PyResult<OwnedTensor> {
         return Err(unsupported("stack: no tensors provided"));
     }
     let rank = tensors[0].shape.len();
-    let d = if dim < 0 { (rank as isize + dim + 1) as usize } else { dim as usize };
+    let d = if dim < 0 {
+        (rank as isize + dim + 1) as usize
+    } else {
+        dim as usize
+    };
 
     // Unsqueeze each tensor, then cat
     let mut unsqueezed = Vec::with_capacity(tensors.len());
@@ -150,7 +167,11 @@ pub fn stack(tensors: &[BorrowedTensor], dim: isize) -> PyResult<OwnedTensor> {
 // ---------------------------------------------------------------------------
 
 fn norm_dim(dim: isize, rank: usize) -> usize {
-    if dim < 0 { (rank as isize + dim).max(0) as usize } else { dim as usize }
+    if dim < 0 {
+        (rank as isize + dim).max(0) as usize
+    } else {
+        dim as usize
+    }
 }
 
 pub fn flatten(a: &BorrowedTensor, start_dim: isize, end_dim: isize) -> PyResult<OwnedTensor> {
@@ -188,7 +209,9 @@ pub fn resolve_shape(old_shape: &[i64], new_shape: &[i64]) -> PyResult<Vec<i64>>
     let resolved: Vec<i64> = if neg_count == 1 {
         let known: i64 = new_shape.iter().filter(|&&d| d >= 0).product();
         if known == 0 {
-            return Err(unsupported("reshape: cannot infer -1 dim when other dims include 0"));
+            return Err(unsupported(
+                "reshape: cannot infer -1 dim when other dims include 0",
+            ));
         }
         if old_size % known != 0 {
             return Err(unsupported(&format!(
@@ -196,7 +219,10 @@ pub fn resolve_shape(old_shape: &[i64], new_shape: &[i64]) -> PyResult<Vec<i64>>
                 old_size, known
             )));
         }
-        new_shape.iter().map(|&d| if d < 0 { old_size / known } else { d }).collect()
+        new_shape
+            .iter()
+            .map(|&d| if d < 0 { old_size / known } else { d })
+            .collect()
     } else {
         new_shape.to_vec()
     };
@@ -237,7 +263,9 @@ pub fn reshape(a: &BorrowedTensor, new_shape: &[i64]) -> PyResult<OwnedTensor> {
                         rem /= a.shape[d].max(1) as usize;
                     }
                     let mut ai = 0usize;
-                    for d in 0..rank { ai += coords[d] * a.strides[d] as usize; }
+                    for d in 0..rank {
+                        ai += coords[d] * a.strides[d] as usize;
+                    }
                     dst[i] = src[ai];
                 }
             }
@@ -254,7 +282,9 @@ pub fn reshape(a: &BorrowedTensor, new_shape: &[i64]) -> PyResult<OwnedTensor> {
                         rem /= a.shape[d].max(1) as usize;
                     }
                     let mut ai = 0usize;
-                    for d in 0..rank { ai += coords[d] * a.strides[d] as usize; }
+                    for d in 0..rank {
+                        ai += coords[d] * a.strides[d] as usize;
+                    }
                     dst[i] = src[ai];
                 }
             }
@@ -262,7 +292,6 @@ pub fn reshape(a: &BorrowedTensor, new_shape: &[i64]) -> PyResult<OwnedTensor> {
             DType::I64 | DType::I32 | DType::Bool => {
                 return Err(unsupported("this kernel only supports f32/f64 tensors"));
             }
-
         }
     }
     Ok(out)
@@ -281,16 +310,34 @@ pub fn to_contiguous(a: &BorrowedTensor) -> PyResult<OwnedTensor> {
 pub fn permute_view(a: &BorrowedTensor, dims: &[isize]) -> PyResult<(Vec<i64>, Vec<i64>)> {
     let rank = a.shape.len();
     if dims.len() != rank {
-        return Err(unsupported(&format!("permute: dims length {} != rank {}", dims.len(), rank)));
+        return Err(unsupported(&format!(
+            "permute: dims length {} != rank {}",
+            dims.len(),
+            rank
+        )));
     }
-    let new_shape: Vec<i64> = dims.iter().map(|&d| {
-        let dd = if d < 0 { (rank as isize + d) as usize } else { d as usize };
-        a.shape[dd]
-    }).collect();
-    let new_strides: Vec<i64> = dims.iter().map(|&d| {
-        let dd = if d < 0 { (rank as isize + d) as usize } else { d as usize };
-        a.strides[dd]
-    }).collect();
+    let new_shape: Vec<i64> = dims
+        .iter()
+        .map(|&d| {
+            let dd = if d < 0 {
+                (rank as isize + d) as usize
+            } else {
+                d as usize
+            };
+            a.shape[dd]
+        })
+        .collect();
+    let new_strides: Vec<i64> = dims
+        .iter()
+        .map(|&d| {
+            let dd = if d < 0 {
+                (rank as isize + d) as usize
+            } else {
+                d as usize
+            };
+            a.strides[dd]
+        })
+        .collect();
     Ok((new_shape, new_strides))
 }
 
@@ -315,9 +362,16 @@ pub fn squeeze_view(a: &BorrowedTensor, dim: isize) -> PyResult<(Vec<i64>, Vec<i
     if rank == 0 {
         return Ok((a.shape.clone(), a.strides.clone()));
     }
-    let norm_dim = if dim < 0 { (rank as isize + dim) as usize } else { dim as usize };
+    let norm_dim = if dim < 0 {
+        (rank as isize + dim) as usize
+    } else {
+        dim as usize
+    };
     if norm_dim >= rank {
-        return Err(unsupported(&format!("squeeze: dim {} out of range for rank {}", dim, rank)));
+        return Err(unsupported(&format!(
+            "squeeze: dim {} out of range for rank {}",
+            dim, rank
+        )));
     }
     if a.shape[norm_dim] == 1 {
         let mut new_shape = a.shape.clone();
@@ -333,9 +387,16 @@ pub fn squeeze_view(a: &BorrowedTensor, dim: isize) -> PyResult<(Vec<i64>, Vec<i
 /// Compute (shape, strides) for an unsqueeze view without data copying.
 pub fn unsqueeze_view(a: &BorrowedTensor, dim: isize) -> PyResult<(Vec<i64>, Vec<i64>)> {
     let rank = a.shape.len();
-    let norm_dim = if dim < 0 { ((rank + 1) as isize + dim) as usize } else { dim as usize };
+    let norm_dim = if dim < 0 {
+        ((rank + 1) as isize + dim) as usize
+    } else {
+        dim as usize
+    };
     if norm_dim > rank {
-        return Err(unsupported(&format!("unsqueeze: dim {} out of range for rank {}", dim, rank)));
+        return Err(unsupported(&format!(
+            "unsqueeze: dim {} out of range for rank {}",
+            dim, rank
+        )));
     }
     let mut new_shape = a.shape.clone();
     let mut new_strides = a.strides.clone();
@@ -367,18 +428,36 @@ pub fn transpose(a: &BorrowedTensor, d0: isize, d1: isize) -> PyResult<OwnedTens
 pub fn permute(a: &BorrowedTensor, dims: &[isize]) -> PyResult<OwnedTensor> {
     let rank = a.shape.len();
     if dims.len() != rank {
-        return Err(unsupported(&format!("permute: dims length {} != rank {}", dims.len(), rank)));
+        return Err(unsupported(&format!(
+            "permute: dims length {} != rank {}",
+            dims.len(),
+            rank
+        )));
     }
 
-    let new_shape: Vec<i64> = dims.iter().map(|&d| {
-        let dd = if d < 0 { (rank as isize + d) as usize } else { d as usize };
-        a.shape[dd]
-    }).collect();
+    let new_shape: Vec<i64> = dims
+        .iter()
+        .map(|&d| {
+            let dd = if d < 0 {
+                (rank as isize + d) as usize
+            } else {
+                d as usize
+            };
+            a.shape[dd]
+        })
+        .collect();
 
-    let new_strides: Vec<i64> = dims.iter().map(|&d| {
-        let dd = if d < 0 { (rank as isize + d) as usize } else { d as usize };
-        a.strides[dd]
-    }).collect();
+    let new_strides: Vec<i64> = dims
+        .iter()
+        .map(|&d| {
+            let dd = if d < 0 {
+                (rank as isize + d) as usize
+            } else {
+                d as usize
+            };
+            a.strides[dd]
+        })
+        .collect();
 
     // Copy data with new stride layout
     let n = elem_count(&a.shape);
@@ -419,7 +498,6 @@ pub fn permute(a: &BorrowedTensor, dims: &[isize]) -> PyResult<OwnedTensor> {
         DType::I64 | DType::I32 | DType::Bool => {
             return Err(unsupported("this kernel only supports f32/f64 tensors"));
         }
-
     }
     Ok(out)
 }
@@ -431,7 +509,10 @@ pub fn permute(a: &BorrowedTensor, dims: &[isize]) -> PyResult<OwnedTensor> {
 pub fn t(a: &BorrowedTensor) -> PyResult<OwnedTensor> {
     let rank = a.shape.len();
     if rank != 2 {
-        return Err(unsupported(&format!("t: expected 2D tensor, got rank {}", rank)));
+        return Err(unsupported(&format!(
+            "t: expected 2D tensor, got rank {}",
+            rank
+        )));
     }
     permute(a, &[1, 0])
 }
@@ -444,7 +525,9 @@ pub fn expand(a: &BorrowedTensor, target_shape: &[i64]) -> PyResult<OwnedTensor>
     let rank = a.shape.len();
     let target_rank = target_shape.len();
     if target_rank < rank {
-        return Err(unsupported("expand: target shape has fewer dims than input"));
+        return Err(unsupported(
+            "expand: target shape has fewer dims than input",
+        ));
     }
 
     // Pad input shape with 1s on the left
@@ -452,13 +535,11 @@ pub fn expand(a: &BorrowedTensor, target_shape: &[i64]) -> PyResult<OwnedTensor>
     padded_shape.extend_from_slice(&a.shape);
 
     // Resolve -1 dimensions: -1 means "keep the source size"
-    let resolved_shape: Vec<i64> = target_shape.iter().enumerate().map(|(i, &d)| {
-        if d == -1 {
-            padded_shape[i]
-        } else {
-            d
-        }
-    }).collect();
+    let resolved_shape: Vec<i64> = target_shape
+        .iter()
+        .enumerate()
+        .map(|(i, &d)| if d == -1 { padded_shape[i] } else { d })
+        .collect();
 
     // Verify broadcast compatibility
     for i in 0..target_rank {
@@ -525,9 +606,16 @@ pub fn expand(a: &BorrowedTensor, target_shape: &[i64]) -> PyResult<OwnedTensor>
 // Where — elementwise select between two tensors by a condition
 // ---------------------------------------------------------------------------
 
-pub fn where_op(condition: &BorrowedTensor, x: &BorrowedTensor, y: &BorrowedTensor) -> PyResult<OwnedTensor> {
+pub fn where_op(
+    condition: &BorrowedTensor,
+    x: &BorrowedTensor,
+    y: &BorrowedTensor,
+) -> PyResult<OwnedTensor> {
     // condition is f32 (1.0 = true, 0.0 = false) OR bool (0/1 bytes)
-    let out_shape = crate::ops::broadcast_shape(&crate::ops::broadcast_shape(&condition.shape, &x.shape)?, &y.shape)?;
+    let out_shape = crate::ops::broadcast_shape(
+        &crate::ops::broadcast_shape(&condition.shape, &x.shape)?,
+        &y.shape,
+    )?;
     let mut out = OwnedTensor::new(x.dtype, out_shape.clone());
     let n = elem_count(&out_shape);
 
@@ -637,9 +725,15 @@ pub fn flip(a: &BorrowedTensor, dims: &[isize]) -> PyResult<OwnedTensor> {
     let rank = a.shape.len();
     let mut flip_dims = Vec::new();
     for &d in dims {
-        let dd = if d < 0 { (rank as isize + d) as usize } else { d as usize };
+        let dd = if d < 0 {
+            (rank as isize + d) as usize
+        } else {
+            d as usize
+        };
         if dd >= rank {
-            return Err(unsupported(&format!("flip: dim {d} out of range for rank {rank}")));
+            return Err(unsupported(&format!(
+                "flip: dim {d} out of range for rank {rank}"
+            )));
         }
         flip_dims.push(dd);
     }
@@ -684,7 +778,12 @@ pub fn flip(a: &BorrowedTensor, dims: &[isize]) -> PyResult<OwnedTensor> {
 // Narrow — extract a slice along a dim
 // ---------------------------------------------------------------------------
 
-pub fn narrow(a: &BorrowedTensor, dim: isize, start: usize, length: usize) -> PyResult<OwnedTensor> {
+pub fn narrow(
+    a: &BorrowedTensor,
+    dim: isize,
+    start: usize,
+    length: usize,
+) -> PyResult<OwnedTensor> {
     let a_contig;
     let a = if a.strides == contiguous_strides(&a.shape) {
         a
@@ -693,7 +792,11 @@ pub fn narrow(a: &BorrowedTensor, dim: isize, start: usize, length: usize) -> Py
         &a_contig.as_view()
     };
     let rank = a.shape.len();
-    let d = if dim < 0 { (rank as isize + dim) as usize } else { dim as usize };
+    let d = if dim < 0 {
+        (rank as isize + dim) as usize
+    } else {
+        dim as usize
+    };
     if d >= rank {
         return Err(unsupported("narrow: dim out of range"));
     }
@@ -705,7 +808,10 @@ pub fn narrow(a: &BorrowedTensor, dim: isize, start: usize, length: usize) -> Py
     let mut out = OwnedTensor::new(a.dtype, out_shape);
     let elem_size = a.dtype.elem_size();
     let outer: usize = a.shape[..d].iter().map(|&s| s.max(0) as usize).product();
-    let inner: usize = a.shape[d+1..].iter().map(|&s| s.max(0) as usize).product();
+    let inner: usize = a.shape[d + 1..]
+        .iter()
+        .map(|&s| s.max(0) as usize)
+        .product();
 
     for o in 0..outer {
         for i in 0..length {
@@ -736,7 +842,11 @@ pub fn select(a: &BorrowedTensor, dim: isize, index: usize) -> PyResult<OwnedTen
         &a_contig.as_view()
     };
     let rank = a.shape.len();
-    let d = if dim < 0 { (rank as isize + dim) as usize } else { dim as usize };
+    let d = if dim < 0 {
+        (rank as isize + dim) as usize
+    } else {
+        dim as usize
+    };
     if d >= rank {
         return Err(unsupported("select: dim out of range"));
     }
@@ -749,7 +859,10 @@ pub fn select(a: &BorrowedTensor, dim: isize, index: usize) -> PyResult<OwnedTen
     let mut out = OwnedTensor::new(a.dtype, out_shape);
     let elem_size = a.dtype.elem_size();
     let outer: usize = a.shape[..d].iter().map(|&s| s.max(0) as usize).product();
-    let inner: usize = a.shape[d + 1..].iter().map(|&s| s.max(0) as usize).product();
+    let inner: usize = a.shape[d + 1..]
+        .iter()
+        .map(|&s| s.max(0) as usize)
+        .product();
     let dim_len = a.shape[d] as usize;
 
     for o in 0..outer {
@@ -772,7 +885,11 @@ pub fn select(a: &BorrowedTensor, dim: isize, index: usize) -> PyResult<OwnedTen
 // index_select: select along a dim at int64 index positions (Phase 4)
 // ---------------------------------------------------------------------------
 
-pub fn index_select(a: &BorrowedTensor, dim: isize, index: &BorrowedTensor) -> PyResult<OwnedTensor> {
+pub fn index_select(
+    a: &BorrowedTensor,
+    dim: isize,
+    index: &BorrowedTensor,
+) -> PyResult<OwnedTensor> {
     let a_contig;
     let a = if a.strides == contiguous_strides(&a.shape) {
         a
@@ -787,14 +904,21 @@ pub fn index_select(a: &BorrowedTensor, dim: isize, index: &BorrowedTensor) -> P
         return Err(unsupported("index_select index must be 1D"));
     }
     let rank = a.shape.len();
-    let d = if dim < 0 { (rank as isize + dim) as usize } else { dim as usize };
+    let d = if dim < 0 {
+        (rank as isize + dim) as usize
+    } else {
+        dim as usize
+    };
     if d >= rank {
         return Err(unsupported("index_select dim out of range"));
     }
     let idx_len = index.shape[0] as usize;
     let dim_size = a.shape[d] as usize;
     let outer: usize = a.shape[..d].iter().map(|&s| s.max(0) as usize).product();
-    let inner: usize = a.shape[d + 1..].iter().map(|&s| s.max(0) as usize).product();
+    let inner: usize = a.shape[d + 1..]
+        .iter()
+        .map(|&s| s.max(0) as usize)
+        .product();
 
     let mut out_shape = a.shape.clone();
     out_shape[d] = idx_len as i64;
@@ -864,7 +988,11 @@ pub fn gather(a: &BorrowedTensor, dim: isize, index: &BorrowedTensor) -> PyResul
             index.shape.len()
         )));
     }
-    let d = if dim < 0 { (rank as isize + dim) as usize } else { dim as usize };
+    let d = if dim < 0 {
+        (rank as isize + dim) as usize
+    } else {
+        dim as usize
+    };
     if d >= rank {
         return Err(unsupported("gather dim out of range"));
     }
@@ -971,7 +1099,12 @@ pub fn ones(shape: &[i64], dtype: crate::dlpack::DType) -> PyResult<OwnedTensor>
 }
 
 /// Create a 1-D tensor of evenly spaced values.
-pub fn arange(start: f64, end: f64, step: f64, dtype: crate::dlpack::DType) -> PyResult<OwnedTensor> {
+pub fn arange(
+    start: f64,
+    end: f64,
+    step: f64,
+    dtype: crate::dlpack::DType,
+) -> PyResult<OwnedTensor> {
     if step == 0.0 {
         return Err(unsupported("arange: step must be non-zero"));
     }
@@ -1003,21 +1136,32 @@ pub fn arange(start: f64, end: f64, step: f64, dtype: crate::dlpack::DType) -> P
 }
 
 /// Create a 1-D tensor of evenly spaced values between start and end (inclusive).
-pub fn linspace(start: f64, end: f64, steps: usize, dtype: crate::dlpack::DType) -> PyResult<OwnedTensor> {
+pub fn linspace(
+    start: f64,
+    end: f64,
+    steps: usize,
+    dtype: crate::dlpack::DType,
+) -> PyResult<OwnedTensor> {
     if steps == 0 {
         return Err(unsupported("linspace: steps must be > 0"));
     }
     let mut out = OwnedTensor::new(dtype, vec![steps as i64]);
-    let incr = if steps > 1 { (end - start) / (steps - 1) as f64 } else { 0.0 };
+    let incr = if steps > 1 {
+        (end - start) / (steps - 1) as f64
+    } else {
+        0.0
+    };
     match dtype {
         DType::F32 => {
-            let d = unsafe { std::slice::from_raw_parts_mut(out.data.as_mut_ptr() as *mut f32, steps) };
+            let d =
+                unsafe { std::slice::from_raw_parts_mut(out.data.as_mut_ptr() as *mut f32, steps) };
             for i in 0..steps {
                 d[i] = (start + i as f64 * incr) as f32;
             }
         }
         DType::F64 => {
-            let d = unsafe { std::slice::from_raw_parts_mut(out.data.as_mut_ptr() as *mut f64, steps) };
+            let d =
+                unsafe { std::slice::from_raw_parts_mut(out.data.as_mut_ptr() as *mut f64, steps) };
             for i in 0..steps {
                 d[i] = start + i as f64 * incr;
             }
@@ -1031,9 +1175,17 @@ pub fn linspace(start: f64, end: f64, steps: usize, dtype: crate::dlpack::DType)
 
 /// Split a tensor into chunks along a dimension.
 pub fn chunk(a: &BorrowedTensor, chunks: usize, dim: isize) -> PyResult<Vec<OwnedTensor>> {
-    let d = if dim < 0 { (a.shape.len() as isize + dim) as usize } else { dim as usize };
+    let d = if dim < 0 {
+        (a.shape.len() as isize + dim) as usize
+    } else {
+        dim as usize
+    };
     if d >= a.shape.len() {
-        return Err(unsupported(&format!("chunk: dim {} out of range for rank {}", dim, a.shape.len())));
+        return Err(unsupported(&format!(
+            "chunk: dim {} out of range for rank {}",
+            dim,
+            a.shape.len()
+        )));
     }
     let dim_size = a.shape[d] as usize;
     let chunk_size = (dim_size + chunks - 1) / chunks;
@@ -1047,15 +1199,16 @@ pub fn chunk(a: &BorrowedTensor, chunks: usize, dim: isize) -> PyResult<Vec<Owne
         // Copy elements — for each slice along dim d, copy contiguous blocks
         let elem = a.dtype.elem_size();
         let outer: usize = a.shape[..d].iter().map(|&s| s.max(1) as usize).product();
-        let inner: usize = a.shape[d+1..].iter().map(|&s| s.max(1) as usize).product();
+        let inner: usize = a.shape[d + 1..]
+            .iter()
+            .map(|&s| s.max(1) as usize)
+            .product();
         let src_offset = start * inner;
         let count = (end - start) * inner;
         for o in 0..outer {
             unsafe {
-                let src = (a.data as *const u8)
-                    .add((o * dim_size * inner + src_offset) * elem);
-                let dst = (out.data.as_mut_ptr() as *mut u8)
-                    .add(o * count * elem);
+                let src = (a.data as *const u8).add((o * dim_size * inner + src_offset) * elem);
+                let dst = (out.data.as_mut_ptr() as *mut u8).add(o * count * elem);
                 std::ptr::copy_nonoverlapping(src, dst, count * elem);
             }
         }
@@ -1074,10 +1227,16 @@ pub fn squeeze(a: &BorrowedTensor, dim: isize) -> PyResult<OwnedTensor> {
     let rank = a.shape.len() as isize;
     let d = if dim < 0 { rank + dim } else { dim };
     if d < 0 || d as usize >= a.shape.len() {
-        return Err(unsupported(&format!("squeeze: dim {dim} out of range for rank {}", a.shape.len())));
+        return Err(unsupported(&format!(
+            "squeeze: dim {dim} out of range for rank {}",
+            a.shape.len()
+        )));
     }
     if a.shape[d as usize] != 1 {
-        return Err(unsupported(&format!("squeeze: dim {dim} has size {}, not 1", a.shape[d as usize])));
+        return Err(unsupported(&format!(
+            "squeeze: dim {dim} has size {}, not 1",
+            a.shape[d as usize]
+        )));
     }
     let mut new_shape = Vec::with_capacity(a.shape.len() - 1);
     for (i, &s) in a.shape.iter().enumerate() {
@@ -1093,7 +1252,10 @@ pub fn unsqueeze(a: &BorrowedTensor, dim: isize) -> PyResult<OwnedTensor> {
     let rank = a.shape.len() as isize;
     let d = if dim < 0 { rank + dim + 1 } else { dim };
     if d < 0 || d as usize > a.shape.len() {
-        return Err(unsupported(&format!("unsqueeze: dim {dim} out of range for rank {}", a.shape.len())));
+        return Err(unsupported(&format!(
+            "unsqueeze: dim {dim} out of range for rank {}",
+            a.shape.len()
+        )));
     }
     let mut new_shape = Vec::with_capacity(a.shape.len() + 1);
     for (i, &s) in a.shape.iter().enumerate() {
@@ -1113,7 +1275,10 @@ pub fn unflatten(a: &BorrowedTensor, dim: isize, sizes: &[i64]) -> PyResult<Owne
     let rank = a.shape.len() as isize;
     let d = if dim < 0 { rank + dim } else { dim };
     if d < 0 || d as usize >= a.shape.len() {
-        return Err(unsupported(&format!("unflatten: dim {dim} out of range for rank {}", a.shape.len())));
+        return Err(unsupported(&format!(
+            "unflatten: dim {dim} out of range for rank {}",
+            a.shape.len()
+        )));
     }
     let dim_size = a.shape[d as usize];
     let expected: i64 = sizes.iter().product();

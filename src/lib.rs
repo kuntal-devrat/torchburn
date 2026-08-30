@@ -65,32 +65,32 @@
 #![allow(clippy::pedantic)]
 #![allow(clippy::nursery)]
 
-mod cache;
-mod dlpack;
-mod engine;
-mod ops;
 mod activations;
-mod math_ops;
-mod reductions;
-mod linalg;
-mod norm;
-mod shape_ops;
-mod convolution;
-mod pooling;
-mod upsample;
-mod embedding;
-mod losses;
 mod attention;
-mod fusion;
-mod ops_phase7;
+pub mod autograd;
+mod cache;
+mod convolution;
+mod dlpack;
+mod embedding;
+mod engine;
 mod extra_ops;
 mod extra_ops2;
 mod extra_ops3;
 mod extra_ops4;
-mod quantization;
 mod fft_complex;
+mod fusion;
+mod linalg;
+mod losses;
+mod math_ops;
+mod norm;
+mod ops;
+mod ops_phase7;
 mod pool;
-pub mod autograd;
+mod pooling;
+mod quantization;
+mod reductions;
+mod shape_ops;
+mod upsample;
 
 #[cfg(feature = "openblas")]
 pub mod blas;
@@ -185,7 +185,10 @@ fn gpu_info(py: Python<'_>) -> PyResult<pyo3::PyObject> {
         dict.set_item("adapter_name", &name)?;
         dict.set_item("backend", &backend)?;
         dict.set_item("vram_bytes", vram)?;
-        dict.set_item("device_override", crate::wgpu_backend::device_override().unwrap_or_default())?;
+        dict.set_item(
+            "device_override",
+            crate::wgpu_backend::device_override().unwrap_or_default(),
+        )?;
         Ok(dict.into())
     }
     #[cfg(not(feature = "burn-wgpu"))]
@@ -195,7 +198,10 @@ fn gpu_info(py: Python<'_>) -> PyResult<pyo3::PyObject> {
         dict.set_item("adapter_name", "burn-wgpu feature not compiled")?;
         dict.set_item("backend", "none")?;
         dict.set_item("vram_bytes", 0u64)?;
-        dict.set_item("device_override", std::env::var("TORCHBURN_DEVICE").unwrap_or_default())?;
+        dict.set_item(
+            "device_override",
+            std::env::var("TORCHBURN_DEVICE").unwrap_or_default(),
+        )?;
         Ok(dict.into())
     }
 }
@@ -378,42 +384,46 @@ fn backward_single(
     let kwargs: std::collections::HashMap<String, serde_json::Value> =
         serde_json::from_str(kwargs_json).unwrap_or_default();
 
-    let saved_borrowed: Vec<dlpack::BorrowedTensor> = saved_inputs.iter()
+    let saved_borrowed: Vec<dlpack::BorrowedTensor> = saved_inputs
+        .iter()
         .map(|c| unsafe { dlpack::BorrowedTensor::from_capsule(c) })
         .collect::<PyResult<_>>()?;
     // Convert BorrowedTensor → OwnedTensor for the backward functions
-    let saved_owned: Vec<dlpack::OwnedTensor> = saved_borrowed.iter().map(|b| unsafe {
-        let n = dlpack::elem_count(&b.shape);
-        let mut o = dlpack::OwnedTensor::new(b.dtype, b.shape.clone());
-        match b.dtype {
-            dlpack::DType::F32 => {
-                let src = std::slice::from_raw_parts(b.data as *const f32, n);
-                let dst = std::slice::from_raw_parts_mut(o.data.as_mut_ptr() as *mut f32, n);
-                dst.copy_from_slice(src);
+    let saved_owned: Vec<dlpack::OwnedTensor> = saved_borrowed
+        .iter()
+        .map(|b| unsafe {
+            let n = dlpack::elem_count(&b.shape);
+            let mut o = dlpack::OwnedTensor::new(b.dtype, b.shape.clone());
+            match b.dtype {
+                dlpack::DType::F32 => {
+                    let src = std::slice::from_raw_parts(b.data as *const f32, n);
+                    let dst = std::slice::from_raw_parts_mut(o.data.as_mut_ptr() as *mut f32, n);
+                    dst.copy_from_slice(src);
+                }
+                dlpack::DType::F64 => {
+                    let src = std::slice::from_raw_parts(b.data as *const f64, n);
+                    let dst = std::slice::from_raw_parts_mut(o.data.as_mut_ptr() as *mut f64, n);
+                    dst.copy_from_slice(src);
+                }
+                dlpack::DType::I64 => {
+                    let src = std::slice::from_raw_parts(b.data as *const i64, n);
+                    let dst = std::slice::from_raw_parts_mut(o.data.as_mut_ptr() as *mut i64, n);
+                    dst.copy_from_slice(src);
+                }
+                dlpack::DType::I32 => {
+                    let src = std::slice::from_raw_parts(b.data as *const i32, n);
+                    let dst = std::slice::from_raw_parts_mut(o.data.as_mut_ptr() as *mut i32, n);
+                    dst.copy_from_slice(src);
+                }
+                dlpack::DType::Bool => {
+                    let src = std::slice::from_raw_parts(b.data as *const u8, n);
+                    let dst = std::slice::from_raw_parts_mut(o.data.as_mut_ptr() as *mut u8, n);
+                    dst.copy_from_slice(src);
+                }
             }
-            dlpack::DType::F64 => {
-                let src = std::slice::from_raw_parts(b.data as *const f64, n);
-                let dst = std::slice::from_raw_parts_mut(o.data.as_mut_ptr() as *mut f64, n);
-                dst.copy_from_slice(src);
-            }
-            dlpack::DType::I64 => {
-                let src = std::slice::from_raw_parts(b.data as *const i64, n);
-                let dst = std::slice::from_raw_parts_mut(o.data.as_mut_ptr() as *mut i64, n);
-                dst.copy_from_slice(src);
-            }
-            dlpack::DType::I32 => {
-                let src = std::slice::from_raw_parts(b.data as *const i32, n);
-                let dst = std::slice::from_raw_parts_mut(o.data.as_mut_ptr() as *mut i32, n);
-                dst.copy_from_slice(src);
-            }
-            dlpack::DType::Bool => {
-                let src = std::slice::from_raw_parts(b.data as *const u8, n);
-                let dst = std::slice::from_raw_parts_mut(o.data.as_mut_ptr() as *mut u8, n);
-                dst.copy_from_slice(src);
-            }
-        }
-        o
-    }).collect();
+            o
+        })
+        .collect();
     let saved_refs: Vec<&dlpack::OwnedTensor> = saved_owned.iter().collect();
 
     let grads = crate::autograd::backward_single(target, &upstream, &saved_refs, &kwargs);
@@ -558,7 +568,8 @@ fn dropout_forward(
     match view.dtype {
         DType::F32 => {
             let src = unsafe { std::slice::from_raw_parts(view.data as *const f32, n) };
-            let dst = unsafe { std::slice::from_raw_parts_mut(out.data.as_mut_ptr() as *mut f32, n) };
+            let dst =
+                unsafe { std::slice::from_raw_parts_mut(out.data.as_mut_ptr() as *mut f32, n) };
             for i in 0..n {
                 let keep: bool = rand::random::<f64>() >= p;
                 mask.push(keep);
@@ -567,7 +578,8 @@ fn dropout_forward(
         }
         DType::F64 => {
             let src = unsafe { std::slice::from_raw_parts(view.data as *const f64, n) };
-            let dst = unsafe { std::slice::from_raw_parts_mut(out.data.as_mut_ptr() as *mut f64, n) };
+            let dst =
+                unsafe { std::slice::from_raw_parts_mut(out.data.as_mut_ptr() as *mut f64, n) };
             for i in 0..n {
                 let keep: bool = rand::random::<f64>() >= p;
                 mask.push(keep);
@@ -575,7 +587,9 @@ fn dropout_forward(
             }
         }
         _ => {
-            return Err(pyo3::exceptions::PyRuntimeError::new_err("dropout only supports f32/f64"));
+            return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                "dropout only supports f32/f64",
+            ));
         }
     }
 

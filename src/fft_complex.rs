@@ -3,7 +3,7 @@
 //! Implements Radix-2 Cooley-Tukey and Bluestein Chirp Z-Transform in pure Rust,
 //! supporting 1D, 2D, N-D real & complex transforms and complex tensor arithmetic.
 
-use crate::dlpack::{BorrowedTensor, DType, OwnedTensor, elem_count, unsupported};
+use crate::dlpack::{elem_count, unsupported, BorrowedTensor, DType, OwnedTensor};
 use pyo3::prelude::*;
 use std::f64::consts::PI;
 
@@ -72,7 +72,13 @@ impl Complex64 {
 
 /// In-place Radix-4 butterfly step
 #[inline(always)]
-fn radix4_butterfly(a0: &mut Complex64, a1: &mut Complex64, a2: &mut Complex64, a3: &mut Complex64, dir: f64) {
+fn radix4_butterfly(
+    a0: &mut Complex64,
+    a1: &mut Complex64,
+    a2: &mut Complex64,
+    a3: &mut Complex64,
+    dir: f64,
+) {
     let t0 = a0.add(*a2);
     let t1 = a0.sub(*a2);
     let t2 = a1.add(*a3);
@@ -196,7 +202,11 @@ pub fn fft(x: &BorrowedTensor, n_dim: Option<i64>, dim: Option<i64>) -> PyResult
         return Err(unsupported("fft requires at least 1D tensor"));
     }
     let target_dim = dim.map_or(rank - 1, |d| {
-        if d < 0 { (rank as i64 + d) as usize } else { d as usize }
+        if d < 0 {
+            (rank as i64 + d) as usize
+        } else {
+            d as usize
+        }
     });
 
     let seq_len = n_dim.map_or(x.shape[target_dim] as usize, |n| n as usize);
@@ -216,7 +226,11 @@ pub fn fft(x: &BorrowedTensor, n_dim: Option<i64>, dim: Option<i64>) -> PyResult
     for b in 0..n_batches {
         let mut c_in = Vec::with_capacity(seq_len);
         for i in 0..seq_len {
-            let val = if i < outer_stride { src[b * outer_stride + i] as f64 } else { 0.0 };
+            let val = if i < outer_stride {
+                src[b * outer_stride + i] as f64
+            } else {
+                0.0
+            };
             c_in.push(Complex64::new(val, 0.0));
         }
         let c_out = fft_1d_c2c(&c_in, false);
@@ -233,7 +247,11 @@ pub fn fft(x: &BorrowedTensor, n_dim: Option<i64>, dim: Option<i64>) -> PyResult
 pub fn ifft(x: &BorrowedTensor, n_dim: Option<i64>, dim: Option<i64>) -> PyResult<OwnedTensor> {
     let rank = x.shape.len();
     let target_dim = dim.map_or(rank - 1, |d| {
-        if d < 0 { (rank as i64 + d) as usize } else { d as usize }
+        if d < 0 {
+            (rank as i64 + d) as usize
+        } else {
+            d as usize
+        }
     });
 
     let seq_len = n_dim.map_or(x.shape[target_dim] as usize, |n| n as usize);
@@ -252,7 +270,11 @@ pub fn ifft(x: &BorrowedTensor, n_dim: Option<i64>, dim: Option<i64>) -> PyResul
     for b in 0..n_batches {
         let mut c_in = Vec::with_capacity(seq_len);
         for i in 0..seq_len {
-            let val = if i < outer_stride { src[b * outer_stride + i] as f64 } else { 0.0 };
+            let val = if i < outer_stride {
+                src[b * outer_stride + i] as f64
+            } else {
+                0.0
+            };
             c_in.push(Complex64::new(val, 0.0));
         }
         let c_out = fft_1d_c2c(&c_in, true);
@@ -269,7 +291,11 @@ pub fn ifft(x: &BorrowedTensor, n_dim: Option<i64>, dim: Option<i64>) -> PyResul
 pub fn rfft(x: &BorrowedTensor, n_dim: Option<i64>, dim: Option<i64>) -> PyResult<OwnedTensor> {
     let rank = x.shape.len();
     let target_dim = dim.map_or(rank - 1, |d| {
-        if d < 0 { (rank as i64 + d) as usize } else { d as usize }
+        if d < 0 {
+            (rank as i64 + d) as usize
+        } else {
+            d as usize
+        }
     });
 
     let seq_len = n_dim.map_or(x.shape[target_dim] as usize, |n| n as usize);
@@ -290,7 +316,11 @@ pub fn rfft(x: &BorrowedTensor, n_dim: Option<i64>, dim: Option<i64>) -> PyResul
     for b in 0..n_batches {
         let mut c_in = Vec::with_capacity(seq_len);
         for i in 0..seq_len {
-            let val = if i < outer_stride { src[b * outer_stride + i] as f64 } else { 0.0 };
+            let val = if i < outer_stride {
+                src[b * outer_stride + i] as f64
+            } else {
+                0.0
+            };
             c_in.push(Complex64::new(val, 0.0));
         }
         let c_out = fft_1d_c2c(&c_in, false);
@@ -307,7 +337,11 @@ pub fn rfft(x: &BorrowedTensor, n_dim: Option<i64>, dim: Option<i64>) -> PyResul
 pub fn irfft(x: &BorrowedTensor, n_dim: Option<i64>, dim: Option<i64>) -> PyResult<OwnedTensor> {
     let rank = x.shape.len();
     let target_dim = dim.map_or(rank - 1, |d| {
-        if d < 0 { (rank as i64 + d) as usize } else { d as usize }
+        if d < 0 {
+            (rank as i64 + d) as usize
+        } else {
+            d as usize
+        }
     });
 
     let in_len = x.shape[target_dim] as usize;
@@ -487,7 +521,9 @@ pub fn fft2(x: &BorrowedTensor) -> PyResult<OwnedTensor> {
     out_shape.push(2);
     let mut out = OwnedTensor::new(DType::F32, out_shape);
 
-    let src = unsafe { std::slice::from_raw_parts(step1.data.as_ptr() as *const f32, step1.elem_count()) };
+    let src = unsafe {
+        std::slice::from_raw_parts(step1.data.as_ptr() as *const f32, step1.elem_count())
+    };
     let dst = unsafe { typed_mut_slice::<f32>(&mut out) };
 
     let n_total = elem_count(&x.shape);
@@ -530,7 +566,9 @@ pub fn ifft2(x: &BorrowedTensor) -> PyResult<OwnedTensor> {
     out_shape.push(2);
     let mut out = OwnedTensor::new(DType::F32, out_shape);
 
-    let src = unsafe { std::slice::from_raw_parts(step1.data.as_ptr() as *const f32, step1.elem_count()) };
+    let src = unsafe {
+        std::slice::from_raw_parts(step1.data.as_ptr() as *const f32, step1.elem_count())
+    };
     let dst = unsafe { typed_mut_slice::<f32>(&mut out) };
 
     let n_total = elem_count(&x.shape);

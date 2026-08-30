@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-08-30
+
+### Added
+- **OpenBLAS default wheels (Linux/macOS):** `ci.yml` `CIBW_ENVIRONMENT_*` `MATURIN_PEP517_ARGS="--features openblas"` – manylinux/macos wheels Skylake `cblas_sgemm` `64→14ms 3×` GEMM `1024³` (Windows stays `matrixmultiply`; `TORCHBURN_MATMUL` runtime switch ready via `src/linalg.rs:use_openblas()` for future default). Cargo `default` remains `["matrixmultiply","burn-wgpu"]` for Windows `openblas-src` compat.
+- **CI Production Hardening:** `ci.yml` `cargo fmt -- --check` blocking, `cargo audit` blocking, `pip-audit` + `mypy --ignore-missing-imports` + `py.typed` version-sync checks.
+
+### Changed
+- Version bump `0.4.1→0.5.0` – openblas default is performance-breaking change (wheel size ~2×, 3× GEMM).
+
 ## [0.4.1] - 2026-08-30
 
 ### Added

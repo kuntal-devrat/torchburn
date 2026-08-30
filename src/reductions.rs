@@ -3,7 +3,7 @@
 //! Supports sum, mean, max, min, argmax, argmin, std, var, cumsum, prod, norm.
 //! All reductions support optional `dim` and `keepdim` parameters.
 
-use crate::dlpack::{BorrowedTensor, DType, OwnedTensor, elem_count, unsupported};
+use crate::dlpack::{elem_count, unsupported, BorrowedTensor, DType, OwnedTensor};
 use pyo3::prelude::*;
 
 unsafe fn typed_slice<T>(t: &BorrowedTensor) -> &[T] {
@@ -16,7 +16,11 @@ unsafe fn typed_mut_slice<T>(t: &mut OwnedTensor) -> &mut [T] {
 
 /// Normalize a dim argument (handle negative dims).
 fn norm_dim(dim: isize, rank: usize) -> usize {
-    if dim < 0 { (rank as isize + dim) as usize } else { dim as usize }
+    if dim < 0 {
+        (rank as isize + dim) as usize
+    } else {
+        dim as usize
+    }
 }
 
 /// Compute output shape after reducing along `dim` with optional `keepdim`.
@@ -26,7 +30,12 @@ fn reduce_shape(shape: &[i64], dim: usize, keepdim: bool) -> Vec<i64> {
         out[dim] = 1;
         out
     } else {
-        shape.iter().enumerate().filter(|&(i, _)| i != dim).map(|(_, &s)| s).collect()
+        shape
+            .iter()
+            .enumerate()
+            .filter(|&(i, _)| i != dim)
+            .map(|(_, &s)| s)
+            .collect()
     }
 }
 
@@ -46,9 +55,13 @@ fn sum_f32(a: &BorrowedTensor, dim: usize, keepdim: bool) -> OwnedTensor {
 
     // Compute strides for iterating over all dimensions except dim
     let mut outer_stride = 1i64;
-    for i in 0..dim { outer_stride *= shape[i]; }
+    for i in 0..dim {
+        outer_stride *= shape[i];
+    }
     let mut inner_stride = 1i64;
-    for i in (dim + 1)..rank { inner_stride *= shape[i]; }
+    for i in (dim + 1)..rank {
+        inner_stride *= shape[i];
+    }
 
     let outer_size = outer_stride as usize;
     let inner_size = inner_stride as usize;
@@ -77,9 +90,13 @@ fn sum_f64(a: &BorrowedTensor, dim: usize, keepdim: bool) -> OwnedTensor {
     let rank = shape.len();
     let dim_size = shape[dim] as usize;
     let mut outer_stride = 1i64;
-    for i in 0..dim { outer_stride *= shape[i]; }
+    for i in 0..dim {
+        outer_stride *= shape[i];
+    }
     let mut inner_stride = 1i64;
-    for i in (dim + 1)..rank { inner_stride *= shape[i]; }
+    for i in (dim + 1)..rank {
+        inner_stride *= shape[i];
+    }
 
     let outer_size = outer_stride as usize;
     let inner_size = inner_stride as usize;
@@ -117,7 +134,10 @@ pub fn sum(a: &BorrowedTensor, dim: Option<isize>, keepdim: bool) -> PyResult<Ow
         None => {
             // Reduce all dims — scalar output
             let total: f64 = match a.dtype {
-                DType::F32 => unsafe { typed_slice::<f32>(a) }.iter().map(|&x| x as f64).sum(),
+                DType::F32 => unsafe { typed_slice::<f32>(a) }
+                    .iter()
+                    .map(|&x| x as f64)
+                    .sum(),
                 DType::F64 => unsafe { typed_slice::<f64>(a) }.iter().copied().sum(),
                 DType::I64 | DType::I32 | DType::Bool => {
                     return Err(unsupported("this kernel only supports f32/f64 tensors"))
@@ -125,16 +145,20 @@ pub fn sum(a: &BorrowedTensor, dim: Option<isize>, keepdim: bool) -> PyResult<Ow
             };
             let mut out = OwnedTensor::new(a.dtype, vec![]);
             match a.dtype {
-                DType::F32 => { let d = unsafe { typed_mut_slice::<f32>(&mut out) }; d[0] = total as f32; }
-                DType::F64 => { let d = unsafe { typed_mut_slice::<f64>(&mut out) }; d[0] = total; }
+                DType::F32 => {
+                    let d = unsafe { typed_mut_slice::<f32>(&mut out) };
+                    d[0] = total as f32;
+                }
+                DType::F64 => {
+                    let d = unsafe { typed_mut_slice::<f64>(&mut out) };
+                    d[0] = total;
+                }
                 DType::I64 | DType::I32 | DType::Bool => {
                     return Err(unsupported("this kernel only supports f32/f64 tensors"));
                 }
-
             }
             Ok(out)
         }
-
     }
 }
 
@@ -152,23 +176,29 @@ pub fn mean(a: &BorrowedTensor, dim: Option<isize>, keepdim: bool) -> PyResult<O
             match a.dtype {
                 DType::F32 => {
                     let data = unsafe { typed_mut_slice::<f32>(&mut out) };
-                    for v in data.iter_mut() { *v /= dim_size as f32; }
+                    for v in data.iter_mut() {
+                        *v /= dim_size as f32;
+                    }
                 }
                 DType::F64 => {
                     let data = unsafe { typed_mut_slice::<f64>(&mut out) };
-                    for v in data.iter_mut() { *v /= dim_size; }
+                    for v in data.iter_mut() {
+                        *v /= dim_size;
+                    }
                 }
                 DType::I64 | DType::I32 | DType::Bool => {
                     return Err(unsupported("this kernel only supports f32/f64 tensors"));
                 }
-
             }
             Ok(out)
         }
         None => {
             let total_elems = elem_count(&a.shape) as f64;
             let total: f64 = match a.dtype {
-                DType::F32 => unsafe { typed_slice::<f32>(a) }.iter().map(|&x| x as f64).sum(),
+                DType::F32 => unsafe { typed_slice::<f32>(a) }
+                    .iter()
+                    .map(|&x| x as f64)
+                    .sum(),
                 DType::F64 => unsafe { typed_slice::<f64>(a) }.iter().copied().sum(),
                 DType::I64 | DType::I32 | DType::Bool => {
                     return Err(unsupported("this kernel only supports f32/f64 tensors"))
@@ -177,16 +207,20 @@ pub fn mean(a: &BorrowedTensor, dim: Option<isize>, keepdim: bool) -> PyResult<O
             let mean_val = total / total_elems;
             let mut out = OwnedTensor::new(a.dtype, vec![]);
             match a.dtype {
-                DType::F32 => { let d = unsafe { typed_mut_slice::<f32>(&mut out) }; d[0] = mean_val as f32; }
-                DType::F64 => { let d = unsafe { typed_mut_slice::<f64>(&mut out) }; d[0] = mean_val; }
+                DType::F32 => {
+                    let d = unsafe { typed_mut_slice::<f32>(&mut out) };
+                    d[0] = mean_val as f32;
+                }
+                DType::F64 => {
+                    let d = unsafe { typed_mut_slice::<f64>(&mut out) };
+                    d[0] = mean_val;
+                }
                 DType::I64 | DType::I32 | DType::Bool => {
                     return Err(unsupported("this kernel only supports f32/f64 tensors"));
                 }
-
             }
             Ok(out)
         }
-
     }
 }
 
@@ -206,9 +240,13 @@ fn max_f32(a: &BorrowedTensor, dim: usize, keepdim: bool) -> (OwnedTensor, Owned
     let rank = shape.len();
     let dim_size = shape[dim] as usize;
     let mut outer_stride = 1i64;
-    for i in 0..dim { outer_stride *= shape[i]; }
+    for i in 0..dim {
+        outer_stride *= shape[i];
+    }
     let mut inner_stride = 1i64;
-    for i in (dim + 1)..rank { inner_stride *= shape[i]; }
+    for i in (dim + 1)..rank {
+        inner_stride *= shape[i];
+    }
 
     let outer_size = outer_stride as usize;
     let inner_size = inner_stride as usize;
@@ -244,9 +282,13 @@ fn max_f64(a: &BorrowedTensor, dim: usize, keepdim: bool) -> (OwnedTensor, Owned
     let rank = shape.len();
     let dim_size = shape[dim] as usize;
     let mut outer_stride = 1i64;
-    for i in 0..dim { outer_stride *= shape[i]; }
+    for i in 0..dim {
+        outer_stride *= shape[i];
+    }
     let mut inner_stride = 1i64;
-    for i in (dim + 1)..rank { inner_stride *= shape[i]; }
+    for i in (dim + 1)..rank {
+        inner_stride *= shape[i];
+    }
 
     let outer_size = outer_stride as usize;
     let inner_size = inner_stride as usize;
@@ -270,7 +312,11 @@ fn max_f64(a: &BorrowedTensor, dim: usize, keepdim: bool) -> (OwnedTensor, Owned
     (out_val, out_idx)
 }
 
-pub fn max_reduce(a: &BorrowedTensor, dim: Option<isize>, keepdim: bool) -> PyResult<(OwnedTensor, OwnedTensor)> {
+pub fn max_reduce(
+    a: &BorrowedTensor,
+    dim: Option<isize>,
+    keepdim: bool,
+) -> PyResult<(OwnedTensor, OwnedTensor)> {
     match dim {
         Some(d) => {
             let d = norm_dim(d, a.shape.len());
@@ -290,7 +336,10 @@ pub fn max_reduce(a: &BorrowedTensor, dim: Option<isize>, keepdim: bool) -> PyRe
                     let mut max_val = f32::NEG_INFINITY;
                     let mut max_i = 0usize;
                     for (i, &v) in data.iter().enumerate() {
-                        if v > max_val { max_val = v; max_i = i; }
+                        if v > max_val {
+                            max_val = v;
+                            max_i = i;
+                        }
                     }
                     let mut out_val = OwnedTensor::new(DType::F32, vec![]);
                     let mut out_idx = OwnedTensor::new(DType::I64, vec![]);
@@ -309,7 +358,10 @@ pub fn max_reduce(a: &BorrowedTensor, dim: Option<isize>, keepdim: bool) -> PyRe
                     let mut max_val = f64::NEG_INFINITY;
                     let mut max_i = 0usize;
                     for (i, &v) in data.iter().enumerate() {
-                        if v > max_val { max_val = v; max_i = i; }
+                        if v > max_val {
+                            max_val = v;
+                            max_i = i;
+                        }
                     }
                     let mut out_val = OwnedTensor::new(DType::F64, vec![]);
                     let mut out_idx = OwnedTensor::new(DType::I64, vec![]);
@@ -326,10 +378,8 @@ pub fn max_reduce(a: &BorrowedTensor, dim: Option<isize>, keepdim: bool) -> PyRe
                 DType::I64 | DType::I32 | DType::Bool => {
                     return Err(unsupported("this kernel only supports f32/f64 tensors"));
                 }
-
             }
         }
-
     }
 }
 
@@ -349,9 +399,13 @@ fn min_f32(a: &BorrowedTensor, dim: usize, keepdim: bool) -> (OwnedTensor, Owned
     let rank = shape.len();
     let dim_size = shape[dim] as usize;
     let mut outer_stride = 1i64;
-    for i in 0..dim { outer_stride *= shape[i]; }
+    for i in 0..dim {
+        outer_stride *= shape[i];
+    }
     let mut inner_stride = 1i64;
-    for i in (dim + 1)..rank { inner_stride *= shape[i]; }
+    for i in (dim + 1)..rank {
+        inner_stride *= shape[i];
+    }
     let outer_size = outer_stride as usize;
     let inner_size = inner_stride as usize;
 
@@ -361,7 +415,10 @@ fn min_f32(a: &BorrowedTensor, dim: usize, keepdim: bool) -> (OwnedTensor, Owned
             let mut min_i = 0usize;
             for i in 0..dim_size {
                 let idx = outer * (dim_size * inner_size) + i * inner_size + inner;
-                if a_data[idx] < min_val { min_val = a_data[idx]; min_i = i; }
+                if a_data[idx] < min_val {
+                    min_val = a_data[idx];
+                    min_i = i;
+                }
             }
             let out_pos = outer * inner_size + inner;
             out_val_data[out_pos] = min_val;
@@ -383,9 +440,13 @@ fn min_f64(a: &BorrowedTensor, dim: usize, keepdim: bool) -> (OwnedTensor, Owned
     let rank = shape.len();
     let dim_size = shape[dim] as usize;
     let mut outer_stride = 1i64;
-    for i in 0..dim { outer_stride *= shape[i]; }
+    for i in 0..dim {
+        outer_stride *= shape[i];
+    }
     let mut inner_stride = 1i64;
-    for i in (dim + 1)..rank { inner_stride *= shape[i]; }
+    for i in (dim + 1)..rank {
+        inner_stride *= shape[i];
+    }
     let outer_size = outer_stride as usize;
     let inner_size = inner_stride as usize;
 
@@ -395,7 +456,10 @@ fn min_f64(a: &BorrowedTensor, dim: usize, keepdim: bool) -> (OwnedTensor, Owned
             let mut min_i = 0usize;
             for i in 0..dim_size {
                 let idx = outer * (dim_size * inner_size) + i * inner_size + inner;
-                if a_data[idx] < min_val { min_val = a_data[idx]; min_i = i; }
+                if a_data[idx] < min_val {
+                    min_val = a_data[idx];
+                    min_i = i;
+                }
             }
             let out_pos = outer * inner_size + inner;
             out_val_data[out_pos] = min_val;
@@ -405,7 +469,11 @@ fn min_f64(a: &BorrowedTensor, dim: usize, keepdim: bool) -> (OwnedTensor, Owned
     (out_val, out_idx)
 }
 
-pub fn min_reduce(a: &BorrowedTensor, dim: Option<isize>, keepdim: bool) -> PyResult<(OwnedTensor, OwnedTensor)> {
+pub fn min_reduce(
+    a: &BorrowedTensor,
+    dim: Option<isize>,
+    keepdim: bool,
+) -> PyResult<(OwnedTensor, OwnedTensor)> {
     match dim {
         Some(d) => {
             let d = norm_dim(d, a.shape.len());
@@ -417,41 +485,55 @@ pub fn min_reduce(a: &BorrowedTensor, dim: Option<isize>, keepdim: bool) -> PyRe
                 }
             })
         }
-        None => {
-            match a.dtype {
-                DType::F32 => {
-                    let data = unsafe { typed_slice::<f32>(a) };
-                    let mut min_val = f32::INFINITY;
-                    let mut min_i = 0usize;
-                    for (i, &v) in data.iter().enumerate() {
-                        if v < min_val { min_val = v; min_i = i; }
+        None => match a.dtype {
+            DType::F32 => {
+                let data = unsafe { typed_slice::<f32>(a) };
+                let mut min_val = f32::INFINITY;
+                let mut min_i = 0usize;
+                for (i, &v) in data.iter().enumerate() {
+                    if v < min_val {
+                        min_val = v;
+                        min_i = i;
                     }
-                    let mut out_val = OwnedTensor::new(DType::F32, vec![]);
-                    let mut out_idx = OwnedTensor::new(DType::I64, vec![]);
-                    { let v = unsafe { typed_mut_slice::<f32>(&mut out_val) }; v[0] = min_val; }
-                    { let i = unsafe { typed_mut_slice::<i64>(&mut out_idx) }; i[0] = min_i as i64; }
-                    Ok((out_val, out_idx))
                 }
-                DType::F64 => {
-                    let data = unsafe { typed_slice::<f64>(a) };
-                    let mut min_val = f64::INFINITY;
-                    let mut min_i = 0usize;
-                    for (i, &v) in data.iter().enumerate() {
-                        if v < min_val { min_val = v; min_i = i; }
-                    }
-                    let mut out_val = OwnedTensor::new(DType::F64, vec![]);
-                    let mut out_idx = OwnedTensor::new(DType::I64, vec![]);
-                    { let v = unsafe { typed_mut_slice::<f64>(&mut out_val) }; v[0] = min_val; }
-                    { let i = unsafe { typed_mut_slice::<i64>(&mut out_idx) }; i[0] = min_i as i64; }
-                    Ok((out_val, out_idx))
+                let mut out_val = OwnedTensor::new(DType::F32, vec![]);
+                let mut out_idx = OwnedTensor::new(DType::I64, vec![]);
+                {
+                    let v = unsafe { typed_mut_slice::<f32>(&mut out_val) };
+                    v[0] = min_val;
                 }
-                DType::I64 | DType::I32 | DType::Bool => {
-                    return Err(unsupported("this kernel only supports f32/f64 tensors"));
+                {
+                    let i = unsafe { typed_mut_slice::<i64>(&mut out_idx) };
+                    i[0] = min_i as i64;
                 }
-
+                Ok((out_val, out_idx))
             }
-        }
-
+            DType::F64 => {
+                let data = unsafe { typed_slice::<f64>(a) };
+                let mut min_val = f64::INFINITY;
+                let mut min_i = 0usize;
+                for (i, &v) in data.iter().enumerate() {
+                    if v < min_val {
+                        min_val = v;
+                        min_i = i;
+                    }
+                }
+                let mut out_val = OwnedTensor::new(DType::F64, vec![]);
+                let mut out_idx = OwnedTensor::new(DType::I64, vec![]);
+                {
+                    let v = unsafe { typed_mut_slice::<f64>(&mut out_val) };
+                    v[0] = min_val;
+                }
+                {
+                    let i = unsafe { typed_mut_slice::<i64>(&mut out_idx) };
+                    i[0] = min_i as i64;
+                }
+                Ok((out_val, out_idx))
+            }
+            DType::I64 | DType::I32 | DType::Bool => {
+                return Err(unsupported("this kernel only supports f32/f64 tensors"));
+            }
+        },
     }
 }
 
@@ -472,14 +554,18 @@ pub fn argmin(a: &BorrowedTensor, dim: Option<isize>, keepdim: bool) -> PyResult
             let data = unsafe { typed_slice::<f32>(a) };
             let mut out = OwnedTensor::new(DType::F32, a.shape.clone());
             let out_data = unsafe { typed_mut_slice::<f32>(&mut out) };
-            for (i, &v) in data.iter().enumerate() { out_data[i] = -v; }
+            for (i, &v) in data.iter().enumerate() {
+                out_data[i] = -v;
+            }
             out
         }
         DType::F64 => {
             let data = unsafe { typed_slice::<f64>(a) };
             let mut out = OwnedTensor::new(DType::F64, a.shape.clone());
             let out_data = unsafe { typed_mut_slice::<f64>(&mut out) };
-            for (i, &v) in data.iter().enumerate() { out_data[i] = -v; }
+            for (i, &v) in data.iter().enumerate() {
+                out_data[i] = -v;
+            }
             out
         }
         DType::I64 | DType::I32 | DType::Bool => {
@@ -494,7 +580,12 @@ pub fn argmin(a: &BorrowedTensor, dim: Option<isize>, keepdim: bool) -> PyResult
 // Std / Var
 // ---------------------------------------------------------------------------
 
-pub fn std_dev(a: &BorrowedTensor, dim: Option<isize>, keepdim: bool, unbiased: bool) -> PyResult<OwnedTensor> {
+pub fn std_dev(
+    a: &BorrowedTensor,
+    dim: Option<isize>,
+    keepdim: bool,
+    unbiased: bool,
+) -> PyResult<OwnedTensor> {
     let var = variance(a, dim, keepdim, unbiased)?;
     // sqrt(var)
     match var.dtype {
@@ -503,7 +594,9 @@ pub fn std_dev(a: &BorrowedTensor, dim: Option<isize>, keepdim: bool, unbiased: 
             let data = unsafe { typed_slice::<f32>(&view) };
             let mut out = OwnedTensor::new(DType::F32, var.shape.clone());
             let out_data = unsafe { typed_mut_slice::<f32>(&mut out) };
-            for (i, &v) in data.iter().enumerate() { out_data[i] = v.sqrt(); }
+            for (i, &v) in data.iter().enumerate() {
+                out_data[i] = v.sqrt();
+            }
             Ok(out)
         }
         DType::F64 => {
@@ -511,33 +604,47 @@ pub fn std_dev(a: &BorrowedTensor, dim: Option<isize>, keepdim: bool, unbiased: 
             let data = unsafe { typed_slice::<f64>(&view) };
             let mut out = OwnedTensor::new(DType::F64, var.shape.clone());
             let out_data = unsafe { typed_mut_slice::<f64>(&mut out) };
-            for (i, &v) in data.iter().enumerate() { out_data[i] = v.sqrt(); }
+            for (i, &v) in data.iter().enumerate() {
+                out_data[i] = v.sqrt();
+            }
             Ok(out)
         }
 
         DType::I64 | DType::I32 | DType::Bool => {
             return Err(unsupported("this kernel only supports f32/f64 tensors"));
         }
-
     }
 }
 
-fn variance(a: &BorrowedTensor, dim: Option<isize>, keepdim: bool, unbiased: bool) -> PyResult<OwnedTensor> {
+fn variance(
+    a: &BorrowedTensor,
+    dim: Option<isize>,
+    keepdim: bool,
+    unbiased: bool,
+) -> PyResult<OwnedTensor> {
     let m = mean(a, dim, keepdim)?;
     // var = mean((x - mean)^2), then divide by n or n-1
     match dim {
         Some(d) => {
             let d = norm_dim(d, a.shape.len());
             let dim_size = a.shape[d] as f64;
-            let n = if unbiased { (dim_size - 1.0).max(1.0) } else { dim_size };
+            let n = if unbiased {
+                (dim_size - 1.0).max(1.0)
+            } else {
+                dim_size
+            };
             let out_shape = reduce_shape(&a.shape, d, keepdim);
             let mut out = OwnedTensor::new(a.dtype, out_shape.clone());
             let shape = &a.shape;
             let rank = shape.len();
             let mut outer_stride = 1i64;
-            for i in 0..d { outer_stride *= shape[i]; }
+            for i in 0..d {
+                outer_stride *= shape[i];
+            }
             let mut inner_stride = 1i64;
-            for i in (d + 1)..rank { inner_stride *= shape[i]; }
+            for i in (d + 1)..rank {
+                inner_stride *= shape[i];
+            }
             let outer_size = outer_stride as usize;
             let inner_size = inner_stride as usize;
 
@@ -552,7 +659,9 @@ fn variance(a: &BorrowedTensor, dim: Option<isize>, keepdim: bool, unbiased: boo
                             let mean_val = m_data[outer * inner_size + inner];
                             let mut sum_sq = 0.0f32;
                             for i in 0..dim_size as usize {
-                                let idx = outer * (dim_size as usize * inner_size) + i * inner_size + inner;
+                                let idx = outer * (dim_size as usize * inner_size)
+                                    + i * inner_size
+                                    + inner;
                                 let diff = a_data[idx] - mean_val;
                                 sum_sq += diff * diff;
                             }
@@ -570,7 +679,9 @@ fn variance(a: &BorrowedTensor, dim: Option<isize>, keepdim: bool, unbiased: boo
                             let mean_val = m_data[outer * inner_size + inner];
                             let mut sum_sq = 0.0f64;
                             for i in 0..dim_size as usize {
-                                let idx = outer * (dim_size as usize * inner_size) + i * inner_size + inner;
+                                let idx = outer * (dim_size as usize * inner_size)
+                                    + i * inner_size
+                                    + inner;
                                 let diff = a_data[idx] - mean_val;
                                 sum_sq += diff * diff;
                             }
@@ -581,13 +692,16 @@ fn variance(a: &BorrowedTensor, dim: Option<isize>, keepdim: bool, unbiased: boo
                 DType::I64 | DType::I32 | DType::Bool => {
                     return Err(unsupported("this kernel only supports f32/f64 tensors"));
                 }
-
             }
             Ok(out)
         }
         None => {
             let total_elems = elem_count(&a.shape) as f64;
-            let n = if unbiased { (total_elems - 1.0).max(1.0) } else { total_elems };
+            let n = if unbiased {
+                (total_elems - 1.0).max(1.0)
+            } else {
+                total_elems
+            };
             let mut out = OwnedTensor::new(a.dtype, vec![]);
             match a.dtype {
                 DType::F32 => {
@@ -617,15 +731,18 @@ fn variance(a: &BorrowedTensor, dim: Option<isize>, keepdim: bool, unbiased: boo
                 DType::I64 | DType::I32 | DType::Bool => {
                     return Err(unsupported("this kernel only supports f32/f64 tensors"));
                 }
-
             }
             Ok(out)
         }
-
     }
 }
 
-pub fn var(a: &BorrowedTensor, dim: Option<isize>, keepdim: bool, unbiased: bool) -> PyResult<OwnedTensor> {
+pub fn var(
+    a: &BorrowedTensor,
+    dim: Option<isize>,
+    keepdim: bool,
+    unbiased: bool,
+) -> PyResult<OwnedTensor> {
     variance(a, dim, keepdim, unbiased)
 }
 
@@ -645,9 +762,13 @@ pub fn cumsum(a: &BorrowedTensor, dim: isize) -> PyResult<OwnedTensor> {
             let rank = shape.len();
             let dim_size = shape[d] as usize;
             let mut outer_stride = 1i64;
-            for i in 0..d { outer_stride *= shape[i]; }
+            for i in 0..d {
+                outer_stride *= shape[i];
+            }
             let mut inner_stride = 1i64;
-            for i in (d + 1)..rank { inner_stride *= shape[i]; }
+            for i in (d + 1)..rank {
+                inner_stride *= shape[i];
+            }
 
             let outer_size = outer_stride as usize;
             let inner_size = inner_stride as usize;
@@ -670,9 +791,13 @@ pub fn cumsum(a: &BorrowedTensor, dim: isize) -> PyResult<OwnedTensor> {
             let rank = shape.len();
             let dim_size = shape[d] as usize;
             let mut outer_stride = 1i64;
-            for i in 0..d { outer_stride *= shape[i]; }
+            for i in 0..d {
+                outer_stride *= shape[i];
+            }
             let mut inner_stride = 1i64;
-            for i in (d + 1)..rank { inner_stride *= shape[i]; }
+            for i in (d + 1)..rank {
+                inner_stride *= shape[i];
+            }
 
             let outer_size = outer_stride as usize;
             let inner_size = inner_stride as usize;
@@ -692,7 +817,6 @@ pub fn cumsum(a: &BorrowedTensor, dim: isize) -> PyResult<OwnedTensor> {
         DType::I64 | DType::I32 | DType::Bool => {
             return Err(unsupported("this kernel only supports f32/f64 tensors"));
         }
-
     }
     Ok(out)
 }
@@ -716,9 +840,13 @@ pub fn prod(a: &BorrowedTensor, dim: Option<isize>, keepdim: bool) -> PyResult<O
                     let rank = shape.len();
                     let dim_size = shape[d] as usize;
                     let mut outer_stride = 1i64;
-                    for i in 0..d { outer_stride *= shape[i]; }
+                    for i in 0..d {
+                        outer_stride *= shape[i];
+                    }
                     let mut inner_stride = 1i64;
-                    for i in (d + 1)..rank { inner_stride *= shape[i]; }
+                    for i in (d + 1)..rank {
+                        inner_stride *= shape[i];
+                    }
                     let outer_size = outer_stride as usize;
                     let inner_size = inner_stride as usize;
                     for outer in 0..outer_size {
@@ -739,9 +867,13 @@ pub fn prod(a: &BorrowedTensor, dim: Option<isize>, keepdim: bool) -> PyResult<O
                     let rank = shape.len();
                     let dim_size = shape[d] as usize;
                     let mut outer_stride = 1i64;
-                    for i in 0..d { outer_stride *= shape[i]; }
+                    for i in 0..d {
+                        outer_stride *= shape[i];
+                    }
                     let mut inner_stride = 1i64;
-                    for i in (d + 1)..rank { inner_stride *= shape[i]; }
+                    for i in (d + 1)..rank {
+                        inner_stride *= shape[i];
+                    }
                     let outer_size = outer_stride as usize;
                     let inner_size = inner_stride as usize;
                     for outer in 0..outer_size {
@@ -758,13 +890,15 @@ pub fn prod(a: &BorrowedTensor, dim: Option<isize>, keepdim: bool) -> PyResult<O
                 DType::I64 | DType::I32 | DType::Bool => {
                     return Err(unsupported("this kernel only supports f32/f64 tensors"));
                 }
-
             }
             Ok(out)
         }
         None => {
             let total: f64 = match a.dtype {
-                DType::F32 => unsafe { typed_slice::<f32>(a) }.iter().map(|&x| x as f64).product(),
+                DType::F32 => unsafe { typed_slice::<f32>(a) }
+                    .iter()
+                    .map(|&x| x as f64)
+                    .product(),
                 DType::F64 => unsafe { typed_slice::<f64>(a) }.iter().copied().product(),
                 DType::I64 | DType::I32 | DType::Bool => {
                     return Err(unsupported("this kernel only supports f32/f64 tensors"))
@@ -772,16 +906,20 @@ pub fn prod(a: &BorrowedTensor, dim: Option<isize>, keepdim: bool) -> PyResult<O
             };
             let mut out = OwnedTensor::new(a.dtype, vec![]);
             match a.dtype {
-                DType::F32 => { let d = unsafe { typed_mut_slice::<f32>(&mut out) }; d[0] = total as f32; }
-                DType::F64 => { let d = unsafe { typed_mut_slice::<f64>(&mut out) }; d[0] = total; }
+                DType::F32 => {
+                    let d = unsafe { typed_mut_slice::<f32>(&mut out) };
+                    d[0] = total as f32;
+                }
+                DType::F64 => {
+                    let d = unsafe { typed_mut_slice::<f64>(&mut out) };
+                    d[0] = total;
+                }
                 DType::I64 | DType::I32 | DType::Bool => {
                     return Err(unsupported("this kernel only supports f32/f64 tensors"));
                 }
-
             }
             Ok(out)
         }
-
     }
 }
 
@@ -796,14 +934,18 @@ pub fn norm(a: &BorrowedTensor, dim: Option<isize>, keepdim: bool) -> PyResult<O
             let data = unsafe { typed_slice::<f32>(a) };
             let mut out = OwnedTensor::new(DType::F32, a.shape.clone());
             let out_data = unsafe { typed_mut_slice::<f32>(&mut out) };
-            for (i, &v) in data.iter().enumerate() { out_data[i] = v * v; }
+            for (i, &v) in data.iter().enumerate() {
+                out_data[i] = v * v;
+            }
             out
         }
         DType::F64 => {
             let data = unsafe { typed_slice::<f64>(a) };
             let mut out = OwnedTensor::new(DType::F64, a.shape.clone());
             let out_data = unsafe { typed_mut_slice::<f64>(&mut out) };
-            for (i, &v) in data.iter().enumerate() { out_data[i] = v * v; }
+            for (i, &v) in data.iter().enumerate() {
+                out_data[i] = v * v;
+            }
             out
         }
         DType::I64 | DType::I32 | DType::Bool => {
@@ -818,7 +960,9 @@ pub fn norm(a: &BorrowedTensor, dim: Option<isize>, keepdim: bool) -> PyResult<O
             let data = unsafe { typed_slice::<f32>(&view) };
             let mut out = OwnedTensor::new(DType::F32, summed.shape.clone());
             let out_data = unsafe { typed_mut_slice::<f32>(&mut out) };
-            for (i, &v) in data.iter().enumerate() { out_data[i] = v.sqrt(); }
+            for (i, &v) in data.iter().enumerate() {
+                out_data[i] = v.sqrt();
+            }
             Ok(out)
         }
         DType::F64 => {
@@ -826,14 +970,15 @@ pub fn norm(a: &BorrowedTensor, dim: Option<isize>, keepdim: bool) -> PyResult<O
             let data = unsafe { typed_slice::<f64>(&view) };
             let mut out = OwnedTensor::new(DType::F64, summed.shape.clone());
             let out_data = unsafe { typed_mut_slice::<f64>(&mut out) };
-            for (i, &v) in data.iter().enumerate() { out_data[i] = v.sqrt(); }
+            for (i, &v) in data.iter().enumerate() {
+                out_data[i] = v.sqrt();
+            }
             Ok(out)
         }
 
         DType::I64 | DType::I32 | DType::Bool => {
             return Err(unsupported("this kernel only supports f32/f64 tensors"));
         }
-
     }
 }
 
@@ -842,7 +987,12 @@ pub fn norm(a: &BorrowedTensor, dim: Option<isize>, keepdim: bool) -> PyResult<O
 // Supports p=1 (L1), p=2 (L2), p=infinity (Linf), and any positive float.
 // ---------------------------------------------------------------------------
 
-pub fn p_norm(a: &BorrowedTensor, p: f64, dim: Option<isize>, keepdim: bool) -> PyResult<OwnedTensor> {
+pub fn p_norm(
+    a: &BorrowedTensor,
+    p: f64,
+    dim: Option<isize>,
+    keepdim: bool,
+) -> PyResult<OwnedTensor> {
     // Handle special cases
     if (p - 1.0).abs() < 1e-9 {
         // L1 norm: sum(|x|)
@@ -851,14 +1001,18 @@ pub fn p_norm(a: &BorrowedTensor, p: f64, dim: Option<isize>, keepdim: bool) -> 
                 let data = unsafe { typed_slice::<f32>(a) };
                 let mut out = OwnedTensor::new(DType::F32, a.shape.clone());
                 let out_data = unsafe { typed_mut_slice::<f32>(&mut out) };
-                for (i, &v) in data.iter().enumerate() { out_data[i] = v.abs(); }
+                for (i, &v) in data.iter().enumerate() {
+                    out_data[i] = v.abs();
+                }
                 out
             }
             DType::F64 => {
                 let data = unsafe { typed_slice::<f64>(a) };
                 let mut out = OwnedTensor::new(DType::F64, a.shape.clone());
                 let out_data = unsafe { typed_mut_slice::<f64>(&mut out) };
-                for (i, &v) in data.iter().enumerate() { out_data[i] = v.abs(); }
+                for (i, &v) in data.iter().enumerate() {
+                    out_data[i] = v.abs();
+                }
                 out
             }
             _ => return Err(unsupported("p_norm: only f32/f64 supported")),
@@ -875,14 +1029,18 @@ pub fn p_norm(a: &BorrowedTensor, p: f64, dim: Option<isize>, keepdim: bool) -> 
                 let data = unsafe { typed_slice::<f32>(a) };
                 let mut out = OwnedTensor::new(DType::F32, a.shape.clone());
                 let out_data = unsafe { typed_mut_slice::<f32>(&mut out) };
-                for (i, &v) in data.iter().enumerate() { out_data[i] = v.abs(); }
+                for (i, &v) in data.iter().enumerate() {
+                    out_data[i] = v.abs();
+                }
                 out
             }
             DType::F64 => {
                 let data = unsafe { typed_slice::<f64>(a) };
                 let mut out = OwnedTensor::new(DType::F64, a.shape.clone());
                 let out_data = unsafe { typed_mut_slice::<f64>(&mut out) };
-                for (i, &v) in data.iter().enumerate() { out_data[i] = v.abs(); }
+                for (i, &v) in data.iter().enumerate() {
+                    out_data[i] = v.abs();
+                }
                 out
             }
             _ => return Err(unsupported("p_norm: only f32/f64 supported")),
@@ -897,14 +1055,18 @@ pub fn p_norm(a: &BorrowedTensor, p: f64, dim: Option<isize>, keepdim: bool) -> 
                 let data = unsafe { typed_slice::<f32>(a) };
                 let mut out = OwnedTensor::new(DType::F32, a.shape.clone());
                 let out_data = unsafe { typed_mut_slice::<f32>(&mut out) };
-                for (i, v) in data.iter().enumerate() { out_data[i] = if *v != 0.0 { 1.0 } else { 0.0 }; }
+                for (i, v) in data.iter().enumerate() {
+                    out_data[i] = if *v != 0.0 { 1.0 } else { 0.0 };
+                }
                 out
             }
             DType::F64 => {
                 let data = unsafe { typed_slice::<f64>(a) };
                 let mut out = OwnedTensor::new(DType::F64, a.shape.clone());
                 let out_data = unsafe { typed_mut_slice::<f64>(&mut out) };
-                for (i, v) in data.iter().enumerate() { out_data[i] = if *v != 0.0 { 1.0 } else { 0.0 }; }
+                for (i, v) in data.iter().enumerate() {
+                    out_data[i] = if *v != 0.0 { 1.0 } else { 0.0 };
+                }
                 out
             }
             _ => return Err(unsupported("p_norm: only f32/f64 supported")),
@@ -918,14 +1080,18 @@ pub fn p_norm(a: &BorrowedTensor, p: f64, dim: Option<isize>, keepdim: bool) -> 
             let data = unsafe { typed_slice::<f32>(a) };
             let mut out = OwnedTensor::new(DType::F32, a.shape.clone());
             let out_data = unsafe { typed_mut_slice::<f32>(&mut out) };
-            for (i, &v) in data.iter().enumerate() { out_data[i] = v.abs().powf(p as f32); }
+            for (i, &v) in data.iter().enumerate() {
+                out_data[i] = v.abs().powf(p as f32);
+            }
             out
         }
         DType::F64 => {
             let data = unsafe { typed_slice::<f64>(a) };
             let mut out = OwnedTensor::new(DType::F64, a.shape.clone());
             let out_data = unsafe { typed_mut_slice::<f64>(&mut out) };
-            for (i, &v) in data.iter().enumerate() { out_data[i] = v.abs().powf(p); }
+            for (i, &v) in data.iter().enumerate() {
+                out_data[i] = v.abs().powf(p);
+            }
             out
         }
         _ => return Err(unsupported("p_norm: only f32/f64 supported")),
@@ -937,7 +1103,9 @@ pub fn p_norm(a: &BorrowedTensor, p: f64, dim: Option<isize>, keepdim: bool) -> 
             let data = unsafe { typed_slice::<f32>(&view) };
             let mut out = OwnedTensor::new(DType::F32, summed.shape.clone());
             let out_data = unsafe { typed_mut_slice::<f32>(&mut out) };
-            for (i, &v) in data.iter().enumerate() { out_data[i] = v.powf(inv_p as f32); }
+            for (i, &v) in data.iter().enumerate() {
+                out_data[i] = v.powf(inv_p as f32);
+            }
             Ok(out)
         }
         DType::F64 => {
@@ -945,7 +1113,9 @@ pub fn p_norm(a: &BorrowedTensor, p: f64, dim: Option<isize>, keepdim: bool) -> 
             let data = unsafe { typed_slice::<f64>(&view) };
             let mut out = OwnedTensor::new(DType::F64, summed.shape.clone());
             let out_data = unsafe { typed_mut_slice::<f64>(&mut out) };
-            for (i, &v) in data.iter().enumerate() { out_data[i] = v.powf(inv_p); }
+            for (i, &v) in data.iter().enumerate() {
+                out_data[i] = v.powf(inv_p);
+            }
             Ok(out)
         }
         _ => Err(unsupported("p_norm: only f32/f64 supported")),

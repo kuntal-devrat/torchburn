@@ -37,13 +37,21 @@ struct GPUInfo {
 /// Backend type string for the active wgpu graphics API (fallback).
 fn wgpu_backend_name() -> &'static str {
     #[cfg(target_os = "macos")]
-    { "Metal" }
+    {
+        "Metal"
+    }
     #[cfg(target_os = "windows")]
-    { "Vulkan" }
+    {
+        "Vulkan"
+    }
     #[cfg(target_os = "linux")]
-    { "Vulkan" }
+    {
+        "Vulkan"
+    }
     #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
-    { "WebGPU" }
+    {
+        "WebGPU"
+    }
 }
 
 /// Map wgpu Backend enum to string (when wgpu crate is available).
@@ -97,7 +105,9 @@ pub fn gpu_info() -> (bool, String, String, u64) {
 
 /// Check if the user has requested a specific device via env var.
 pub fn device_override() -> Option<String> {
-    std::env::var("TORCHBURN_DEVICE").ok().map(|s| s.to_lowercase())
+    std::env::var("TORCHBURN_DEVICE")
+        .ok()
+        .map(|s| s.to_lowercase())
 }
 
 /// Should we force CPU execution?

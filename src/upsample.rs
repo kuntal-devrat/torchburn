@@ -4,7 +4,7 @@
 //! `F.interpolate(x, size=...)` lowers to these ops in compiled graphs).
 //! All kernels support f32/f64 and require contiguous inputs.
 
-use crate::dlpack::{BorrowedTensor, DType, OwnedTensor, unsupported};
+use crate::dlpack::{unsupported, BorrowedTensor, DType, OwnedTensor};
 use pyo3::prelude::*;
 
 unsafe fn typed_slice<T>(t: &BorrowedTensor) -> &[T] {
@@ -17,14 +17,18 @@ unsafe fn typed_mut_slice<T>(t: &mut OwnedTensor) -> &mut [T] {
 
 fn require_contiguous(t: &BorrowedTensor, what: &str) -> PyResult<()> {
     if !t.is_contiguous() {
-        return Err(unsupported(&format!("{what} must be contiguous for upsampling")));
+        return Err(unsupported(&format!(
+            "{what} must be contiguous for upsampling"
+        )));
     }
     Ok(())
 }
 
 /// Parse the `size` kwarg: an int, a 2-list, or a single 1-item list.
 fn size_pair(v: Option<&serde_json::Value>) -> PyResult<(usize, usize)> {
-    let Some(v) = v else { return Err(unsupported("upsample: missing size")) };
+    let Some(v) = v else {
+        return Err(unsupported("upsample: missing size"));
+    };
     if let Some(s) = v.as_i64() {
         if s <= 0 {
             return Err(unsupported("upsample: size must be positive"));
@@ -50,12 +54,19 @@ fn size_pair(v: Option<&serde_json::Value>) -> PyResult<(usize, usize)> {
 // Nearest neighbor
 // ---------------------------------------------------------------------------
 
-fn upsample_nearest2d_f32(input: &BorrowedTensor, out_h: usize, out_w: usize) -> PyResult<OwnedTensor> {
+fn upsample_nearest2d_f32(
+    input: &BorrowedTensor,
+    out_h: usize,
+    out_w: usize,
+) -> PyResult<OwnedTensor> {
     let b = input.shape[0] as usize;
     let c = input.shape[1] as usize;
     let h = input.shape[2] as usize;
     let w = input.shape[3] as usize;
-    let mut out = OwnedTensor::new(input.dtype, vec![b as i64, c as i64, out_h as i64, out_w as i64]);
+    let mut out = OwnedTensor::new(
+        input.dtype,
+        vec![b as i64, c as i64, out_h as i64, out_w as i64],
+    );
     let input_data = unsafe { typed_slice::<f32>(input) };
     let out_data = unsafe { typed_mut_slice::<f32>(&mut out) };
     // torch's nearest (align_corners ignored): src = floor(dst * in/out), clamped.
@@ -64,28 +75,38 @@ fn upsample_nearest2d_f32(input: &BorrowedTensor, out_h: usize, out_w: usize) ->
 
     let plane_elems = c * out_h * out_w;
     use rayon::prelude::*;
-    out_data.par_chunks_mut(plane_elems).enumerate().for_each(|(bi, out_plane)| {
-        for ci in 0..c {
-            let plane = (bi * c + ci) * h * w;
-            let out_plane = &mut out_plane[ci * out_h * out_w..(ci + 1) * out_h * out_w];
-            for oh in 0..out_h {
-                let ih = ((oh as f64) * sh).floor().min(max_h) as usize;
-                for ow in 0..out_w {
-                    let iw = ((ow as f64) * sw).floor().min(max_w) as usize;
-                    out_plane[oh * out_w + ow] = input_data[plane + ih * w + iw];
+    out_data
+        .par_chunks_mut(plane_elems)
+        .enumerate()
+        .for_each(|(bi, out_plane)| {
+            for ci in 0..c {
+                let plane = (bi * c + ci) * h * w;
+                let out_plane = &mut out_plane[ci * out_h * out_w..(ci + 1) * out_h * out_w];
+                for oh in 0..out_h {
+                    let ih = ((oh as f64) * sh).floor().min(max_h) as usize;
+                    for ow in 0..out_w {
+                        let iw = ((ow as f64) * sw).floor().min(max_w) as usize;
+                        out_plane[oh * out_w + ow] = input_data[plane + ih * w + iw];
+                    }
                 }
             }
-        }
-    });
+        });
     Ok(out)
 }
 
-fn upsample_nearest2d_f64(input: &BorrowedTensor, out_h: usize, out_w: usize) -> PyResult<OwnedTensor> {
+fn upsample_nearest2d_f64(
+    input: &BorrowedTensor,
+    out_h: usize,
+    out_w: usize,
+) -> PyResult<OwnedTensor> {
     let b = input.shape[0] as usize;
     let c = input.shape[1] as usize;
     let h = input.shape[2] as usize;
     let w = input.shape[3] as usize;
-    let mut out = OwnedTensor::new(input.dtype, vec![b as i64, c as i64, out_h as i64, out_w as i64]);
+    let mut out = OwnedTensor::new(
+        input.dtype,
+        vec![b as i64, c as i64, out_h as i64, out_w as i64],
+    );
     let input_data = unsafe { typed_slice::<f64>(input) };
     let out_data = unsafe { typed_mut_slice::<f64>(&mut out) };
     let (sh, sw) = (h as f64 / out_h as f64, w as f64 / out_w as f64);
@@ -93,27 +114,35 @@ fn upsample_nearest2d_f64(input: &BorrowedTensor, out_h: usize, out_w: usize) ->
 
     let plane_elems = c * out_h * out_w;
     use rayon::prelude::*;
-    out_data.par_chunks_mut(plane_elems).enumerate().for_each(|(bi, out_plane)| {
-        for ci in 0..c {
-            let plane = (bi * c + ci) * h * w;
-            let out_plane = &mut out_plane[ci * out_h * out_w..(ci + 1) * out_h * out_w];
-            for oh in 0..out_h {
-                let ih = ((oh as f64) * sh).floor().min(max_h) as usize;
-                for ow in 0..out_w {
-                    let iw = ((ow as f64) * sw).floor().min(max_w) as usize;
-                    out_plane[oh * out_w + ow] = input_data[plane + ih * w + iw];
+    out_data
+        .par_chunks_mut(plane_elems)
+        .enumerate()
+        .for_each(|(bi, out_plane)| {
+            for ci in 0..c {
+                let plane = (bi * c + ci) * h * w;
+                let out_plane = &mut out_plane[ci * out_h * out_w..(ci + 1) * out_h * out_w];
+                for oh in 0..out_h {
+                    let ih = ((oh as f64) * sh).floor().min(max_h) as usize;
+                    for ow in 0..out_w {
+                        let iw = ((ow as f64) * sw).floor().min(max_w) as usize;
+                        out_plane[oh * out_w + ow] = input_data[plane + ih * w + iw];
+                    }
                 }
             }
-        }
-    });
+        });
     Ok(out)
 }
 
 /// Nearest-neighbor 2-D upsample to an explicit output size.
-pub fn upsample_nearest2d(input: &BorrowedTensor, size: Option<&serde_json::Value>) -> PyResult<OwnedTensor> {
+pub fn upsample_nearest2d(
+    input: &BorrowedTensor,
+    size: Option<&serde_json::Value>,
+) -> PyResult<OwnedTensor> {
     require_contiguous(input, "upsample_nearest2d input")?;
     if input.shape.len() != 4 {
-        return Err(unsupported("upsample_nearest2d: input must be 4-D (B,C,H,W)"));
+        return Err(unsupported(
+            "upsample_nearest2d: input must be 4-D (B,C,H,W)",
+        ));
     }
     let (out_h, out_w) = size_pair(size)?;
     match input.dtype {
@@ -123,7 +152,6 @@ pub fn upsample_nearest2d(input: &BorrowedTensor, size: Option<&serde_json::Valu
         DType::I64 | DType::I32 | DType::Bool => {
             return Err(unsupported("this kernel only supports f32/f64 tensors"));
         }
-
     }
 }
 
@@ -131,14 +159,7 @@ pub fn upsample_nearest2d(input: &BorrowedTensor, size: Option<&serde_json::Valu
 // Bilinear (align_corners=false, the torch default for F.interpolate)
 // ---------------------------------------------------------------------------
 
-fn bilinear_sample(
-    data: &[f32],
-    plane: usize,
-    h: usize,
-    w: usize,
-    y: f64,
-    x: f64,
-) -> f32 {
+fn bilinear_sample(data: &[f32], plane: usize, h: usize, w: usize, y: f64, x: f64) -> f32 {
     let y = y.max(0.0).min((h - 1) as f64);
     let x = x.max(0.0).min((w - 1) as f64);
     let y0 = y.floor() as usize;
@@ -156,43 +177,46 @@ fn bilinear_sample(
     top * (1.0 - wy) + bottom * wy
 }
 
-fn upsample_bilinear2d_f32(input: &BorrowedTensor, out_h: usize, out_w: usize) -> PyResult<OwnedTensor> {
+fn upsample_bilinear2d_f32(
+    input: &BorrowedTensor,
+    out_h: usize,
+    out_w: usize,
+) -> PyResult<OwnedTensor> {
     let b = input.shape[0] as usize;
     let c = input.shape[1] as usize;
     let h = input.shape[2] as usize;
     let w = input.shape[3] as usize;
-    let mut out = OwnedTensor::new(input.dtype, vec![b as i64, c as i64, out_h as i64, out_w as i64]);
+    let mut out = OwnedTensor::new(
+        input.dtype,
+        vec![b as i64, c as i64, out_h as i64, out_w as i64],
+    );
     let input_data = unsafe { typed_slice::<f32>(input) };
     let out_data = unsafe { typed_mut_slice::<f32>(&mut out) };
     let (sy, sx) = (h as f64 / out_h as f64, w as f64 / out_w as f64);
 
     let plane_elems = c * out_h * out_w;
     use rayon::prelude::*;
-    out_data.par_chunks_mut(plane_elems).enumerate().for_each(|(bi, out_plane)| {
-        for ci in 0..c {
-            let out_plane = &mut out_plane[ci * out_h * out_w..(ci + 1) * out_h * out_w];
-            let plane = (bi * c + ci) * h * w;
-            for oh in 0..out_h {
-                // align_corners=false: src = (dst + 0.5) * scale - 0.5
-                let y = (oh as f64 + 0.5) * sy - 0.5;
-                for ow in 0..out_w {
-                    let x = (ow as f64 + 0.5) * sx - 0.5;
-                    out_plane[oh * out_w + ow] = bilinear_sample(input_data, plane, h, w, y, x);
+    out_data
+        .par_chunks_mut(plane_elems)
+        .enumerate()
+        .for_each(|(bi, out_plane)| {
+            for ci in 0..c {
+                let out_plane = &mut out_plane[ci * out_h * out_w..(ci + 1) * out_h * out_w];
+                let plane = (bi * c + ci) * h * w;
+                for oh in 0..out_h {
+                    // align_corners=false: src = (dst + 0.5) * scale - 0.5
+                    let y = (oh as f64 + 0.5) * sy - 0.5;
+                    for ow in 0..out_w {
+                        let x = (ow as f64 + 0.5) * sx - 0.5;
+                        out_plane[oh * out_w + ow] = bilinear_sample(input_data, plane, h, w, y, x);
+                    }
                 }
             }
-        }
-    });
+        });
     Ok(out)
 }
 
-fn bilinear_sample_f64(
-    data: &[f64],
-    plane: usize,
-    h: usize,
-    w: usize,
-    y: f64,
-    x: f64,
-) -> f64 {
+fn bilinear_sample_f64(data: &[f64], plane: usize, h: usize, w: usize, y: f64, x: f64) -> f64 {
     let y = y.max(0.0).min((h - 1) as f64);
     let x = x.max(0.0).min((w - 1) as f64);
     let y0 = y.floor() as usize;
@@ -210,39 +234,55 @@ fn bilinear_sample_f64(
     top * (1.0 - wy) + bottom * wy
 }
 
-fn upsample_bilinear2d_f64(input: &BorrowedTensor, out_h: usize, out_w: usize) -> PyResult<OwnedTensor> {
+fn upsample_bilinear2d_f64(
+    input: &BorrowedTensor,
+    out_h: usize,
+    out_w: usize,
+) -> PyResult<OwnedTensor> {
     let b = input.shape[0] as usize;
     let c = input.shape[1] as usize;
     let h = input.shape[2] as usize;
     let w = input.shape[3] as usize;
-    let mut out = OwnedTensor::new(input.dtype, vec![b as i64, c as i64, out_h as i64, out_w as i64]);
+    let mut out = OwnedTensor::new(
+        input.dtype,
+        vec![b as i64, c as i64, out_h as i64, out_w as i64],
+    );
     let input_data = unsafe { typed_slice::<f64>(input) };
     let out_data = unsafe { typed_mut_slice::<f64>(&mut out) };
     let (sy, sx) = (h as f64 / out_h as f64, w as f64 / out_w as f64);
 
     let plane_elems = c * out_h * out_w;
     use rayon::prelude::*;
-    out_data.par_chunks_mut(plane_elems).enumerate().for_each(|(bi, out_plane)| {
-        for ci in 0..c {
-            let out_plane = &mut out_plane[ci * out_h * out_w..(ci + 1) * out_h * out_w];
-            let plane = (bi * c + ci) * h * w;
-            for oh in 0..out_h {
-                let y = (oh as f64 + 0.5) * sy - 0.5;
-                for ow in 0..out_w {
-                    let x = (ow as f64 + 0.5) * sx - 0.5;
-                    out_plane[oh * out_w + ow] = bilinear_sample_f64(input_data, plane, h, w, y, x);
+    out_data
+        .par_chunks_mut(plane_elems)
+        .enumerate()
+        .for_each(|(bi, out_plane)| {
+            for ci in 0..c {
+                let out_plane = &mut out_plane[ci * out_h * out_w..(ci + 1) * out_h * out_w];
+                let plane = (bi * c + ci) * h * w;
+                for oh in 0..out_h {
+                    let y = (oh as f64 + 0.5) * sy - 0.5;
+                    for ow in 0..out_w {
+                        let x = (ow as f64 + 0.5) * sx - 0.5;
+                        out_plane[oh * out_w + ow] =
+                            bilinear_sample_f64(input_data, plane, h, w, y, x);
+                    }
                 }
             }
-        }
-    });
+        });
     Ok(out)
 }
 
 /// Bilinear 2-D upsample (align_corners=false) to an explicit output size.
-pub fn upsample_bilinear2d(input: &BorrowedTensor, size: Option<&serde_json::Value>) -> PyResult<OwnedTensor> {
+pub fn upsample_bilinear2d(
+    input: &BorrowedTensor,
+    size: Option<&serde_json::Value>,
+) -> PyResult<OwnedTensor> {
     require_contiguous(input, "upsample_bilinear2d input")?;
     if input.shape.len() != 4 {
-        return Err(unsupported("upsample_bilinear2d: input must be 4-D (B,C,H,W)"));
+        return Err(unsupported(
+            "upsample_bilinear2d: input must be 4-D (B,C,H,W)",
+        ));
     }
     let (out_h, out_w) = size_pair(size)?;
     match input.dtype {
@@ -252,6 +292,5 @@ pub fn upsample_bilinear2d(input: &BorrowedTensor, size: Option<&serde_json::Val
         DType::I64 | DType::I32 | DType::Bool => {
             return Err(unsupported("this kernel only supports f32/f64 tensors"));
         }
-
     }
 }

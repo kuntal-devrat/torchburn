@@ -5,7 +5,7 @@
 //! contract (loss, total_weight): the engine produces the loss; getitem(0)
 //! aliases it and dead getitem(1) nodes are dropped by the parser.
 
-use crate::dlpack::{BorrowedTensor, DType, OwnedTensor, elem_count, unsupported};
+use crate::dlpack::{elem_count, unsupported, BorrowedTensor, DType, OwnedTensor};
 use pyo3::prelude::*;
 
 /// Read a tensor's elements as a typed slice.
@@ -56,7 +56,12 @@ impl LossScalar for f64 {
 }
 
 /// Apply a reduction (0=sum, 1=mean, 2=none) to an elementwise loss buffer.
-fn reduce_loss<T: LossScalar>(data: &[T], n: usize, reduction: i64, elem_out: &mut OwnedTensor) -> PyResult<()> {
+fn reduce_loss<T: LossScalar>(
+    data: &[T],
+    n: usize,
+    reduction: i64,
+    elem_out: &mut OwnedTensor,
+) -> PyResult<()> {
     match reduction {
         2 => {
             // none: copy elements through (keep the elementwise shape)
@@ -154,10 +159,20 @@ pub fn nll_loss_forward(
             };
             // mean over non-ignored samples
             let ignored: usize = match target.dtype {
-                DType::I64 => unsafe { typed_slice::<i64>(target) }.iter().filter(|&&v| v as isize == ignore_index as isize).count(),
-                _ => unsafe { typed_slice::<i32>(target) }.iter().filter(|&&v| v as isize == ignore_index as isize).count(),
+                DType::I64 => unsafe { typed_slice::<i64>(target) }
+                    .iter()
+                    .filter(|&&v| v as isize == ignore_index as isize)
+                    .count(),
+                _ => unsafe { typed_slice::<i32>(target) }
+                    .iter()
+                    .filter(|&&v| v as isize == ignore_index as isize)
+                    .count(),
             };
-            let denom = if reduction == 1 { (n - ignored).max(1) as f32 } else { 1.0 };
+            let denom = if reduction == 1 {
+                (n - ignored).max(1) as f32
+            } else {
+                1.0
+            };
             let total: f32 = losses.iter().sum();
             let out = match reduction {
                 0 => total,
@@ -214,10 +229,20 @@ pub fn nll_loss_forward(
                 _ => unreachable!(),
             };
             let ignored: usize = match target.dtype {
-                DType::I64 => unsafe { typed_slice::<i64>(target) }.iter().filter(|&&v| v as isize == ignore_index as isize).count(),
-                _ => unsafe { typed_slice::<i32>(target) }.iter().filter(|&&v| v as isize == ignore_index as isize).count(),
+                DType::I64 => unsafe { typed_slice::<i64>(target) }
+                    .iter()
+                    .filter(|&&v| v as isize == ignore_index as isize)
+                    .count(),
+                _ => unsafe { typed_slice::<i32>(target) }
+                    .iter()
+                    .filter(|&&v| v as isize == ignore_index as isize)
+                    .count(),
             };
-            let denom = if reduction == 1 { (n - ignored).max(1) as f64 } else { 1.0 };
+            let denom = if reduction == 1 {
+                (n - ignored).max(1) as f64
+            } else {
+                1.0
+            };
             let total: f64 = losses.iter().sum();
             let out = match reduction {
                 0 => total,
@@ -231,9 +256,7 @@ pub fn nll_loss_forward(
             };
             Ok(scalar_f64(out))
         }
-        DType::I64 | DType::I32 | DType::Bool => {
-            Err(unsupported("nll_loss input must be f32/f64"))
-        }
+        DType::I64 | DType::I32 | DType::Bool => Err(unsupported("nll_loss input must be f32/f64")),
     }
 }
 
@@ -245,13 +268,21 @@ pub fn mse_loss(a: &BorrowedTensor, b: &BorrowedTensor, reduction: i64) -> PyRes
         DType::F32 => {
             let x = unsafe { typed_slice::<f32>(a) };
             let y = unsafe { typed_slice::<f32>(b) };
-            let buf: Vec<f32> = x.iter().zip(y.iter()).map(|(x, y)| (x - y) * (x - y)).collect();
+            let buf: Vec<f32> = x
+                .iter()
+                .zip(y.iter())
+                .map(|(x, y)| (x - y) * (x - y))
+                .collect();
             reduce_loss(&buf, n, reduction, &mut out)?;
         }
         DType::F64 => {
             let x = unsafe { typed_slice::<f64>(a) };
             let y = unsafe { typed_slice::<f64>(b) };
-            let buf: Vec<f64> = x.iter().zip(y.iter()).map(|(x, y)| (x - y) * (x - y)).collect();
+            let buf: Vec<f64> = x
+                .iter()
+                .zip(y.iter())
+                .map(|(x, y)| (x - y) * (x - y))
+                .collect();
             reduce_loss(&buf, n, reduction, &mut out)?;
         }
         DType::I64 | DType::I32 | DType::Bool => {
@@ -262,7 +293,12 @@ pub fn mse_loss(a: &BorrowedTensor, b: &BorrowedTensor, reduction: i64) -> PyRes
 }
 
 /// aten.smooth_l1_loss(input, target, reduction, beta)
-pub fn smooth_l1_loss(a: &BorrowedTensor, b: &BorrowedTensor, reduction: i64, beta: f64) -> PyResult<OwnedTensor> {
+pub fn smooth_l1_loss(
+    a: &BorrowedTensor,
+    b: &BorrowedTensor,
+    reduction: i64,
+    beta: f64,
+) -> PyResult<OwnedTensor> {
     let n = elem_count(&a.shape);
     let mut out = OwnedTensor::new(a.dtype, a.shape.clone());
     let beta = beta as f32;
@@ -275,7 +311,11 @@ pub fn smooth_l1_loss(a: &BorrowedTensor, b: &BorrowedTensor, reduction: i64, be
                 .zip(y.iter())
                 .map(|(x, y)| {
                     let d = (x - y).abs();
-                    if d < beta { 0.5 * d * d / beta } else { d - 0.5 * beta }
+                    if d < beta {
+                        0.5 * d * d / beta
+                    } else {
+                        d - 0.5 * beta
+                    }
                 })
                 .collect();
             reduce_loss(&buf, n, reduction, &mut out)?;
@@ -289,7 +329,11 @@ pub fn smooth_l1_loss(a: &BorrowedTensor, b: &BorrowedTensor, reduction: i64, be
                 .zip(y.iter())
                 .map(|(x, y)| {
                     let d = (x - y).abs();
-                    if d < beta64 { 0.5 * d * d / beta64 } else { d - 0.5 * beta64 }
+                    if d < beta64 {
+                        0.5 * d * d / beta64
+                    } else {
+                        d - 0.5 * beta64
+                    }
                 })
                 .collect();
             reduce_loss(&buf, n, reduction, &mut out)?;
@@ -302,7 +346,11 @@ pub fn smooth_l1_loss(a: &BorrowedTensor, b: &BorrowedTensor, reduction: i64, be
 }
 
 /// aten.binary_cross_entropy(input, target, weight, reduction)
-pub fn binary_cross_entropy(a: &BorrowedTensor, b: &BorrowedTensor, reduction: i64) -> PyResult<OwnedTensor> {
+pub fn binary_cross_entropy(
+    a: &BorrowedTensor,
+    b: &BorrowedTensor,
+    reduction: i64,
+) -> PyResult<OwnedTensor> {
     let n = elem_count(&a.shape);
     let mut out = OwnedTensor::new(a.dtype, a.shape.clone());
     let clamp = |x: f32| x.clamp(1e-12, 1.0 - 1e-12);

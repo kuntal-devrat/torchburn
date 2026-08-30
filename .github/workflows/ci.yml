@@ -45,13 +45,28 @@ jobs:
         run: cargo clippy --features burn-wgpu -- -D warnings
 
       - name: Cargo fmt check
-        run: cargo fmt -- --check || true
+        run: cargo fmt -- --check
 
       - name: Install cargo-audit
         run: cargo install cargo-audit --locked || true
 
       - name: Cargo audit
-        run: cargo audit || true
+        run: cargo audit
+
+      - name: Install pip-audit and mypy
+        run: pip install pip-audit mypy
+
+      - name: pip-audit
+        run: pip-audit --skip-editable || true
+
+      - name: mypy (strict)
+        run: mypy python/torchburn --ignore-missing-imports --no-implicit-optional || true
+
+      - name: Check py.typed and version sync
+        run: |
+          test -f python/torchburn/py.typed || (echo "py.typed missing" && exit 1)
+          python -c "import tomllib; p=open('pyproject.toml','rb'); d=tomllib.load(p); print(d['project']['version'])"
+          cargo --version
 
   # ── Test Matrix ────────────────────────────────────────────────────
   # Optimized: 9 jobs in parallel (max 8) vs 19 before — 50% faster, Swatinem cache
@@ -179,8 +194,8 @@ jobs:
           CIBW_ARCHS_LINUX: "x86_64"
           CIBW_ARCHS_WINDOWS: "AMD64"
           CIBW_BEFORE_ALL_LINUX: "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y"
-          CIBW_ENVIRONMENT_LINUX: 'PATH="$HOME/.cargo/bin:$PATH" RUSTFLAGS="" CARGO_BUILD_RUSTFLAGS=""'
-          CIBW_ENVIRONMENT_MACOS: 'MACOSX_DEPLOYMENT_TARGET="11.0" RUSTFLAGS="" CARGO_BUILD_RUSTFLAGS=""'
+          CIBW_ENVIRONMENT_LINUX: 'PATH="$HOME/.cargo/bin:$PATH" RUSTFLAGS="" CARGO_BUILD_RUSTFLAGS="" MATURIN_PEP517_ARGS="--features openblas"'
+          CIBW_ENVIRONMENT_MACOS: 'MACOSX_DEPLOYMENT_TARGET="11.0" RUSTFLAGS="" CARGO_BUILD_RUSTFLAGS="" MATURIN_PEP517_ARGS="--features openblas"'
           CIBW_ENVIRONMENT_WINDOWS: 'RUSTFLAGS="" CARGO_BUILD_RUSTFLAGS=""'
           CIBW_BEFORE_BUILD: "rm -f .cargo/config.toml"
           CIBW_TEST_REQUIRES: "pytest pytest-timeout numpy torch"

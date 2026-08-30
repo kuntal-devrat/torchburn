@@ -3,7 +3,9 @@
 //! Inputs are read directly from PyTorch-owned DLPack buffers (zero-copy),
 //! respecting arbitrary stride layouts. Outputs are fresh Rust allocations.
 
-use crate::dlpack::{BorrowedTensor, DType, OwnedTensor, contiguous_strides, elem_count, unsupported};
+use crate::dlpack::{
+    contiguous_strides, elem_count, unsupported, BorrowedTensor, DType, OwnedTensor,
+};
 use pyo3::prelude::*;
 use std::ops::{Add, Div, Mul, Sub};
 use wide::{f32x8, f64x4};
@@ -31,13 +33,13 @@ impl BinaryOp {
 /// Minimal numeric trait so the kernels can be written once for f32/f64.
 pub trait Scalar:
     Copy
-        + PartialOrd
-        + Send
-        + Sync
-        + Add<Output = Self>
-        + Sub<Output = Self>
-        + Mul<Output = Self>
-        + Div<Output = Self>
+    + PartialOrd
+    + Send
+    + Sync
+    + Add<Output = Self>
+    + Sub<Output = Self>
+    + Mul<Output = Self>
+    + Div<Output = Self>
 {
     fn zero() -> Self;
 }
@@ -57,8 +59,16 @@ pub fn broadcast_shape(a: &[i64], b: &[i64]) -> PyResult<Vec<i64>> {
     let rank = a.len().max(b.len());
     let mut out = vec![0i64; rank];
     for i in 0..rank {
-        let ai = if i < rank - a.len() { 1 } else { a[i - (rank - a.len())] };
-        let bi = if i < rank - b.len() { 1 } else { b[i - (rank - b.len())] };
+        let ai = if i < rank - a.len() {
+            1
+        } else {
+            a[i - (rank - a.len())]
+        };
+        let bi = if i < rank - b.len() {
+            1
+        } else {
+            b[i - (rank - b.len())]
+        };
         if ai == bi {
             out[i] = ai;
         } else if ai == 1 {
@@ -108,12 +118,14 @@ where
 {
     if n >= PAR_THRESHOLD {
         use rayon::prelude::*;
-        out.par_chunks_mut(PAR_CHUNK).enumerate().for_each(|(ci, chunk)| {
-            let start = ci * PAR_CHUNK;
-            for (i, o) in chunk.iter_mut().enumerate() {
-                *o = f(start + i);
-            }
-        });
+        out.par_chunks_mut(PAR_CHUNK)
+            .enumerate()
+            .for_each(|(ci, chunk)| {
+                let start = ci * PAR_CHUNK;
+                for (i, o) in chunk.iter_mut().enumerate() {
+                    *o = f(start + i);
+                }
+            });
     } else {
         for (i, o) in out.iter_mut().enumerate().take(n) {
             *o = f(i);
@@ -127,40 +139,78 @@ fn simd_binary_f32_contig(op: BinaryOp, a: &[f32], b: &[f32], out: &mut [f32]) {
     let n = out.len();
     if n >= PAR_THRESHOLD {
         use rayon::prelude::*;
-        out.par_chunks_mut(PAR_CHUNK).enumerate().for_each(|(ci, chunk)| {
-            let base = ci * PAR_CHUNK;
-            let mut j = 0;
-            while j + 8 <= chunk.len() {
-                let idx = base + j;
-                let av = f32x8::new([a[idx], a[idx+1], a[idx+2], a[idx+3], a[idx+4], a[idx+5], a[idx+6], a[idx+7]]);
-                let bv = f32x8::new([b[idx], b[idx+1], b[idx+2], b[idx+3], b[idx+4], b[idx+5], b[idx+6], b[idx+7]]);
-                let rv = match op {
-                    BinaryOp::Add => av + bv,
-                    BinaryOp::Sub => av - bv,
-                    BinaryOp::Mul => av * bv,
-                    BinaryOp::Div => av / bv,
-                };
-                chunk[j..j+8].copy_from_slice(&rv.to_array());
-                j += 8;
-            }
-            while j < chunk.len() {
-                let idx = base + j;
-                chunk[j] = apply(op, a[idx], b[idx]);
-                j += 1;
-            }
-        });
+        out.par_chunks_mut(PAR_CHUNK)
+            .enumerate()
+            .for_each(|(ci, chunk)| {
+                let base = ci * PAR_CHUNK;
+                let mut j = 0;
+                while j + 8 <= chunk.len() {
+                    let idx = base + j;
+                    let av = f32x8::new([
+                        a[idx],
+                        a[idx + 1],
+                        a[idx + 2],
+                        a[idx + 3],
+                        a[idx + 4],
+                        a[idx + 5],
+                        a[idx + 6],
+                        a[idx + 7],
+                    ]);
+                    let bv = f32x8::new([
+                        b[idx],
+                        b[idx + 1],
+                        b[idx + 2],
+                        b[idx + 3],
+                        b[idx + 4],
+                        b[idx + 5],
+                        b[idx + 6],
+                        b[idx + 7],
+                    ]);
+                    let rv = match op {
+                        BinaryOp::Add => av + bv,
+                        BinaryOp::Sub => av - bv,
+                        BinaryOp::Mul => av * bv,
+                        BinaryOp::Div => av / bv,
+                    };
+                    chunk[j..j + 8].copy_from_slice(&rv.to_array());
+                    j += 8;
+                }
+                while j < chunk.len() {
+                    let idx = base + j;
+                    chunk[j] = apply(op, a[idx], b[idx]);
+                    j += 1;
+                }
+            });
     } else {
         let mut i = 0;
         while i + 8 <= n {
-            let av = f32x8::new([a[i], a[i+1], a[i+2], a[i+3], a[i+4], a[i+5], a[i+6], a[i+7]]);
-            let bv = f32x8::new([b[i], b[i+1], b[i+2], b[i+3], b[i+4], b[i+5], b[i+6], b[i+7]]);
+            let av = f32x8::new([
+                a[i],
+                a[i + 1],
+                a[i + 2],
+                a[i + 3],
+                a[i + 4],
+                a[i + 5],
+                a[i + 6],
+                a[i + 7],
+            ]);
+            let bv = f32x8::new([
+                b[i],
+                b[i + 1],
+                b[i + 2],
+                b[i + 3],
+                b[i + 4],
+                b[i + 5],
+                b[i + 6],
+                b[i + 7],
+            ]);
             let rv = match op {
                 BinaryOp::Add => av + bv,
                 BinaryOp::Sub => av - bv,
                 BinaryOp::Mul => av * bv,
                 BinaryOp::Div => av / bv,
             };
-            out[i..i+8].copy_from_slice(&rv.to_array());
+            out[i..i + 8].copy_from_slice(&rv.to_array());
             i += 8;
         }
         while i < n {
@@ -174,40 +224,42 @@ fn simd_binary_f64_contig(op: BinaryOp, a: &[f64], b: &[f64], out: &mut [f64]) {
     let n = out.len();
     if n >= PAR_THRESHOLD {
         use rayon::prelude::*;
-        out.par_chunks_mut(PAR_CHUNK).enumerate().for_each(|(ci, chunk)| {
-            let base = ci * PAR_CHUNK;
-            let mut j = 0;
-            while j + 4 <= chunk.len() {
-                let idx = base + j;
-                let av = f64x4::new([a[idx], a[idx+1], a[idx+2], a[idx+3]]);
-                let bv = f64x4::new([b[idx], b[idx+1], b[idx+2], b[idx+3]]);
-                let rv = match op {
-                    BinaryOp::Add => av + bv,
-                    BinaryOp::Sub => av - bv,
-                    BinaryOp::Mul => av * bv,
-                    BinaryOp::Div => av / bv,
-                };
-                chunk[j..j+4].copy_from_slice(&rv.to_array());
-                j += 4;
-            }
-            while j < chunk.len() {
-                let idx = base + j;
-                chunk[j] = apply(op, a[idx], b[idx]);
-                j += 1;
-            }
-        });
+        out.par_chunks_mut(PAR_CHUNK)
+            .enumerate()
+            .for_each(|(ci, chunk)| {
+                let base = ci * PAR_CHUNK;
+                let mut j = 0;
+                while j + 4 <= chunk.len() {
+                    let idx = base + j;
+                    let av = f64x4::new([a[idx], a[idx + 1], a[idx + 2], a[idx + 3]]);
+                    let bv = f64x4::new([b[idx], b[idx + 1], b[idx + 2], b[idx + 3]]);
+                    let rv = match op {
+                        BinaryOp::Add => av + bv,
+                        BinaryOp::Sub => av - bv,
+                        BinaryOp::Mul => av * bv,
+                        BinaryOp::Div => av / bv,
+                    };
+                    chunk[j..j + 4].copy_from_slice(&rv.to_array());
+                    j += 4;
+                }
+                while j < chunk.len() {
+                    let idx = base + j;
+                    chunk[j] = apply(op, a[idx], b[idx]);
+                    j += 1;
+                }
+            });
     } else {
         let mut i = 0;
         while i + 4 <= n {
-            let av = f64x4::new([a[i], a[i+1], a[i+2], a[i+3]]);
-            let bv = f64x4::new([b[i], b[i+1], b[i+2], b[i+3]]);
+            let av = f64x4::new([a[i], a[i + 1], a[i + 2], a[i + 3]]);
+            let bv = f64x4::new([b[i], b[i + 1], b[i + 2], b[i + 3]]);
             let rv = match op {
                 BinaryOp::Add => av + bv,
                 BinaryOp::Sub => av - bv,
                 BinaryOp::Mul => av * bv,
                 BinaryOp::Div => av / bv,
             };
-            out[i..i+4].copy_from_slice(&rv.to_array());
+            out[i..i + 4].copy_from_slice(&rv.to_array());
             i += 4;
         }
         while i < n {
@@ -222,28 +274,48 @@ fn simd_relu_f32_contig(a: &[f32], out: &mut [f32]) {
     let zero = f32x8::splat(0.0);
     if n >= PAR_THRESHOLD {
         use rayon::prelude::*;
-        out.par_chunks_mut(PAR_CHUNK).enumerate().for_each(|(ci, chunk)| {
-            let base = ci * PAR_CHUNK;
-            let mut j = 0;
-            while j + 8 <= chunk.len() {
-                let idx = base + j;
-                let av = f32x8::new([a[idx], a[idx+1], a[idx+2], a[idx+3], a[idx+4], a[idx+5], a[idx+6], a[idx+7]]);
-                let rv = av.max(zero);
-                chunk[j..j+8].copy_from_slice(&rv.to_array());
-                j += 8;
-            }
-            while j < chunk.len() {
-                let idx = base + j;
-                chunk[j] = if a[idx] > 0.0 { a[idx] } else { 0.0 };
-                j += 1;
-            }
-        });
+        out.par_chunks_mut(PAR_CHUNK)
+            .enumerate()
+            .for_each(|(ci, chunk)| {
+                let base = ci * PAR_CHUNK;
+                let mut j = 0;
+                while j + 8 <= chunk.len() {
+                    let idx = base + j;
+                    let av = f32x8::new([
+                        a[idx],
+                        a[idx + 1],
+                        a[idx + 2],
+                        a[idx + 3],
+                        a[idx + 4],
+                        a[idx + 5],
+                        a[idx + 6],
+                        a[idx + 7],
+                    ]);
+                    let rv = av.max(zero);
+                    chunk[j..j + 8].copy_from_slice(&rv.to_array());
+                    j += 8;
+                }
+                while j < chunk.len() {
+                    let idx = base + j;
+                    chunk[j] = if a[idx] > 0.0 { a[idx] } else { 0.0 };
+                    j += 1;
+                }
+            });
     } else {
         let mut i = 0;
         while i + 8 <= n {
-            let av = f32x8::new([a[i], a[i+1], a[i+2], a[i+3], a[i+4], a[i+5], a[i+6], a[i+7]]);
+            let av = f32x8::new([
+                a[i],
+                a[i + 1],
+                a[i + 2],
+                a[i + 3],
+                a[i + 4],
+                a[i + 5],
+                a[i + 6],
+                a[i + 7],
+            ]);
             let rv = av.max(zero);
-            out[i..i+8].copy_from_slice(&rv.to_array());
+            out[i..i + 8].copy_from_slice(&rv.to_array());
             i += 8;
         }
         while i < n {
@@ -253,7 +325,12 @@ fn simd_relu_f32_contig(a: &[f32], out: &mut [f32]) {
     }
 }
 
-fn run_binary<T: Scalar>(op: BinaryOp, a: &BorrowedTensor, b: &BorrowedTensor, out: &mut OwnedTensor) {
+fn run_binary<T: Scalar>(
+    op: BinaryOp,
+    a: &BorrowedTensor,
+    b: &BorrowedTensor,
+    out: &mut OwnedTensor,
+) {
     // SAFETY: buffers sized by elem_count and dtype.
     let a_data = unsafe { typed_slice::<T>(a) };
     let b_data = unsafe { typed_slice::<T>(b) };
@@ -346,12 +423,16 @@ pub fn binary(op: BinaryOp, a: &BorrowedTensor, b: &BorrowedTensor) -> PyResult<
             match a.dtype {
                 DType::F32 => {
                     let src = unsafe { std::slice::from_raw_parts(a.data as *const f32, n) };
-                    let dst = unsafe { std::slice::from_raw_parts_mut(owned.data.as_mut_ptr() as *mut f32, n) };
+                    let dst = unsafe {
+                        std::slice::from_raw_parts_mut(owned.data.as_mut_ptr() as *mut f32, n)
+                    };
                     dst.copy_from_slice(src);
                 }
                 DType::F64 => {
                     let src = unsafe { std::slice::from_raw_parts(a.data as *const f64, n) };
-                    let dst = unsafe { std::slice::from_raw_parts_mut(owned.data.as_mut_ptr() as *mut f64, n) };
+                    let dst = unsafe {
+                        std::slice::from_raw_parts_mut(owned.data.as_mut_ptr() as *mut f64, n)
+                    };
                     dst.copy_from_slice(src);
                 }
                 _ => return Err(unsupported("binary promotion: cannot copy source dtype")),
@@ -366,12 +447,16 @@ pub fn binary(op: BinaryOp, a: &BorrowedTensor, b: &BorrowedTensor) -> PyResult<
             match b.dtype {
                 DType::F32 => {
                     let src = unsafe { std::slice::from_raw_parts(b.data as *const f32, n) };
-                    let dst = unsafe { std::slice::from_raw_parts_mut(owned.data.as_mut_ptr() as *mut f32, n) };
+                    let dst = unsafe {
+                        std::slice::from_raw_parts_mut(owned.data.as_mut_ptr() as *mut f32, n)
+                    };
                     dst.copy_from_slice(src);
                 }
                 DType::F64 => {
                     let src = unsafe { std::slice::from_raw_parts(b.data as *const f64, n) };
-                    let dst = unsafe { std::slice::from_raw_parts_mut(owned.data.as_mut_ptr() as *mut f64, n) };
+                    let dst = unsafe {
+                        std::slice::from_raw_parts_mut(owned.data.as_mut_ptr() as *mut f64, n)
+                    };
                     dst.copy_from_slice(src);
                 }
                 _ => return Err(unsupported("binary promotion: cannot copy source dtype")),
@@ -400,7 +485,10 @@ pub fn binary(op: BinaryOp, a: &BorrowedTensor, b: &BorrowedTensor) -> PyResult<
                 let a_data = unsafe { typed_slice::<f32>(a) };
                 let b_data = unsafe { typed_slice::<f32>(b) };
                 let out_data = unsafe {
-                    std::slice::from_raw_parts_mut(out.data.as_mut_ptr() as *mut f32, out.elem_count())
+                    std::slice::from_raw_parts_mut(
+                        out.data.as_mut_ptr() as *mut f32,
+                        out.elem_count(),
+                    )
                 };
                 simd_binary_f32_contig(op, a_data, b_data, out_data);
                 return Ok(out);
@@ -409,7 +497,10 @@ pub fn binary(op: BinaryOp, a: &BorrowedTensor, b: &BorrowedTensor) -> PyResult<
                 let a_data = unsafe { typed_slice::<f64>(a) };
                 let b_data = unsafe { typed_slice::<f64>(b) };
                 let out_data = unsafe {
-                    std::slice::from_raw_parts_mut(out.data.as_mut_ptr() as *mut f64, out.elem_count())
+                    std::slice::from_raw_parts_mut(
+                        out.data.as_mut_ptr() as *mut f64,
+                        out.elem_count(),
+                    )
                 };
                 simd_binary_f64_contig(op, a_data, b_data, out_data);
                 return Ok(out);
@@ -424,15 +515,24 @@ pub fn binary(op: BinaryOp, a: &BorrowedTensor, b: &BorrowedTensor) -> PyResult<
                 let scalar = unsafe { *typed_slice::<f32>(a).as_ptr() };
                 let b_data = unsafe { typed_slice::<f32>(b) };
                 let out_data = unsafe {
-                    std::slice::from_raw_parts_mut(out.data.as_mut_ptr() as *mut f32, out.elem_count())
+                    std::slice::from_raw_parts_mut(
+                        out.data.as_mut_ptr() as *mut f32,
+                        out.elem_count(),
+                    )
                 };
                 let splat = f32x8::splat(scalar);
                 let n = out_data.len();
                 let mut i = 0;
                 while i + 8 <= n {
                     let bv = f32x8::new([
-                        b_data[i], b_data[i+1], b_data[i+2], b_data[i+3],
-                        b_data[i+4], b_data[i+5], b_data[i+6], b_data[i+7],
+                        b_data[i],
+                        b_data[i + 1],
+                        b_data[i + 2],
+                        b_data[i + 3],
+                        b_data[i + 4],
+                        b_data[i + 5],
+                        b_data[i + 6],
+                        b_data[i + 7],
                     ]);
                     let rv = match op {
                         BinaryOp::Add => splat + bv,
@@ -440,7 +540,7 @@ pub fn binary(op: BinaryOp, a: &BorrowedTensor, b: &BorrowedTensor) -> PyResult<
                         BinaryOp::Mul => splat * bv,
                         BinaryOp::Div => splat / bv,
                     };
-                    out_data[i..i+8].copy_from_slice(&rv.to_array());
+                    out_data[i..i + 8].copy_from_slice(&rv.to_array());
                     i += 8;
                 }
                 while i < n {
@@ -453,20 +553,23 @@ pub fn binary(op: BinaryOp, a: &BorrowedTensor, b: &BorrowedTensor) -> PyResult<
                 let scalar = unsafe { *typed_slice::<f64>(a).as_ptr() };
                 let b_data = unsafe { typed_slice::<f64>(b) };
                 let out_data = unsafe {
-                    std::slice::from_raw_parts_mut(out.data.as_mut_ptr() as *mut f64, out.elem_count())
+                    std::slice::from_raw_parts_mut(
+                        out.data.as_mut_ptr() as *mut f64,
+                        out.elem_count(),
+                    )
                 };
                 let splat = f64x4::splat(scalar);
                 let n = out_data.len();
                 let mut i = 0;
                 while i + 4 <= n {
-                    let bv = f64x4::new([b_data[i], b_data[i+1], b_data[i+2], b_data[i+3]]);
+                    let bv = f64x4::new([b_data[i], b_data[i + 1], b_data[i + 2], b_data[i + 3]]);
                     let rv = match op {
                         BinaryOp::Add => splat + bv,
                         BinaryOp::Sub => splat - bv,
                         BinaryOp::Mul => splat * bv,
                         BinaryOp::Div => splat / bv,
                     };
-                    out_data[i..i+4].copy_from_slice(&rv.to_array());
+                    out_data[i..i + 4].copy_from_slice(&rv.to_array());
                     i += 4;
                 }
                 while i < n {
@@ -484,15 +587,24 @@ pub fn binary(op: BinaryOp, a: &BorrowedTensor, b: &BorrowedTensor) -> PyResult<
                 let scalar = unsafe { *typed_slice::<f32>(b).as_ptr() };
                 let a_data = unsafe { typed_slice::<f32>(a) };
                 let out_data = unsafe {
-                    std::slice::from_raw_parts_mut(out.data.as_mut_ptr() as *mut f32, out.elem_count())
+                    std::slice::from_raw_parts_mut(
+                        out.data.as_mut_ptr() as *mut f32,
+                        out.elem_count(),
+                    )
                 };
                 let splat = f32x8::splat(scalar);
                 let n = out_data.len();
                 let mut i = 0;
                 while i + 8 <= n {
                     let av = f32x8::new([
-                        a_data[i], a_data[i+1], a_data[i+2], a_data[i+3],
-                        a_data[i+4], a_data[i+5], a_data[i+6], a_data[i+7],
+                        a_data[i],
+                        a_data[i + 1],
+                        a_data[i + 2],
+                        a_data[i + 3],
+                        a_data[i + 4],
+                        a_data[i + 5],
+                        a_data[i + 6],
+                        a_data[i + 7],
                     ]);
                     let rv = match op {
                         BinaryOp::Add => av + splat,
@@ -500,7 +612,7 @@ pub fn binary(op: BinaryOp, a: &BorrowedTensor, b: &BorrowedTensor) -> PyResult<
                         BinaryOp::Mul => av * splat,
                         BinaryOp::Div => av / splat,
                     };
-                    out_data[i..i+8].copy_from_slice(&rv.to_array());
+                    out_data[i..i + 8].copy_from_slice(&rv.to_array());
                     i += 8;
                 }
                 while i < n {
@@ -513,20 +625,23 @@ pub fn binary(op: BinaryOp, a: &BorrowedTensor, b: &BorrowedTensor) -> PyResult<
                 let scalar = unsafe { *typed_slice::<f64>(b).as_ptr() };
                 let a_data = unsafe { typed_slice::<f64>(a) };
                 let out_data = unsafe {
-                    std::slice::from_raw_parts_mut(out.data.as_mut_ptr() as *mut f64, out.elem_count())
+                    std::slice::from_raw_parts_mut(
+                        out.data.as_mut_ptr() as *mut f64,
+                        out.elem_count(),
+                    )
                 };
                 let splat = f64x4::splat(scalar);
                 let n = out_data.len();
                 let mut i = 0;
                 while i + 4 <= n {
-                    let av = f64x4::new([a_data[i], a_data[i+1], a_data[i+2], a_data[i+3]]);
+                    let av = f64x4::new([a_data[i], a_data[i + 1], a_data[i + 2], a_data[i + 3]]);
                     let rv = match op {
                         BinaryOp::Add => av + splat,
                         BinaryOp::Sub => av - splat,
                         BinaryOp::Mul => av * splat,
                         BinaryOp::Div => av / splat,
                     };
-                    out_data[i..i+4].copy_from_slice(&rv.to_array());
+                    out_data[i..i + 4].copy_from_slice(&rv.to_array());
                     i += 4;
                 }
                 while i < n {
@@ -545,7 +660,6 @@ pub fn binary(op: BinaryOp, a: &BorrowedTensor, b: &BorrowedTensor) -> PyResult<
         DType::I64 | DType::I32 | DType::Bool => {
             return Err(unsupported("this kernel only supports f32/f64 tensors"));
         }
-
     }
     Ok(out)
 }
@@ -562,7 +676,11 @@ fn run_relu<T: Scalar>(a: &BorrowedTensor, out: &mut OwnedTensor) {
     // Fast path: contiguous input -> linear loop (serial below the threshold,
     // parallel above; autovectorizes in both cases).
     if a.strides == contiguous_strides(&a.shape) {
-        map_in_place(n, out_data, |i| if a_data[i] > zero { a_data[i] } else { zero });
+        map_in_place(
+            n,
+            out_data,
+            |i| if a_data[i] > zero { a_data[i] } else { zero },
+        );
         return;
     }
 
@@ -594,7 +712,10 @@ pub fn relu(a: &BorrowedTensor) -> PyResult<OwnedTensor> {
             if a.strides == contiguous_strides(&a.shape) {
                 let a_data = unsafe { typed_slice::<f32>(a) };
                 let out_data = unsafe {
-                    std::slice::from_raw_parts_mut(out.data.as_mut_ptr() as *mut f32, out.elem_count())
+                    std::slice::from_raw_parts_mut(
+                        out.data.as_mut_ptr() as *mut f32,
+                        out.elem_count(),
+                    )
                 };
                 simd_relu_f32_contig(a_data, out_data);
             } else {
@@ -606,7 +727,6 @@ pub fn relu(a: &BorrowedTensor) -> PyResult<OwnedTensor> {
         DType::I64 | DType::I32 | DType::Bool => {
             return Err(unsupported("this kernel only supports f32/f64 tensors"));
         }
-
     }
     Ok(out)
 }

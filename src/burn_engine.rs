@@ -22,10 +22,14 @@
 //!   the zero-copy guarantee (REQ-003) belongs to the native engine; the
 //!   fused wgpu engine will own its device buffers instead.
 
-use crate::dlpack::{self, BorrowedTensor, DType, OwnedTensor, contiguous_strides, dtype_from_spec, unsupported};
-use crate::engine::{self, Payload, Node};
+use crate::dlpack::{
+    self, contiguous_strides, dtype_from_spec, unsupported, BorrowedTensor, DType, OwnedTensor,
+};
+use crate::engine::{self, Node, Payload};
 use burn::backend::NdArray;
-use burn::tensor::activation::{leaky_relu, log_softmax, mish, sigmoid, silu, softmax, softplus, tanh};
+use burn::tensor::activation::{
+    leaky_relu, log_softmax, mish, sigmoid, silu, softmax, softplus, tanh,
+};
 use burn::tensor::backend::Backend as BurnBackend;
 use burn::tensor::{Tensor, TensorData};
 use pyo3::prelude::*;
@@ -43,8 +47,12 @@ fn read_inputs(payload: &Payload, capsules: &[Bound<'_, PyCapsule>]) -> PyResult
     let mut inputs = Vec::with_capacity(capsules.len());
     for (i, cap) in capsules.iter().enumerate() {
         let t = BorrowedTensor::from_capsule(cap)?;
-        let want = dtype_from_spec(&payload.inputs[i].dtype)
-            .ok_or_else(|| unsupported(&format!("unknown input dtype '{}'", payload.inputs[i].dtype)))?;
+        let want = dtype_from_spec(&payload.inputs[i].dtype).ok_or_else(|| {
+            unsupported(&format!(
+                "unknown input dtype '{}'",
+                payload.inputs[i].dtype
+            ))
+        })?;
         if t.dtype != want {
             return Err(unsupported(&format!(
                 "input {i} dtype {} does not match payload spec {}",
@@ -76,13 +84,18 @@ fn read_inputs(payload: &Payload, capsules: &[Bound<'_, PyCapsule>]) -> PyResult
 fn norm_dim(dim: isize, rank: usize) -> PyResult<usize> {
     let d = if dim < 0 { rank as isize + dim } else { dim };
     if d < 0 || d as usize >= rank {
-        return Err(unsupported(&format!("dim {dim} out of range for rank {rank}")));
+        return Err(unsupported(&format!(
+            "dim {dim} out of range for rank {rank}"
+        )));
     }
     Ok(d as usize)
 }
 
 /// Execute a rank-R payload: elementwise ops over same-shape tensors.
-fn run_rank<B, const R: usize>(payload: &Payload, inputs: Vec<Vec<f32>>) -> PyResult<Vec<OwnedTensor>>
+fn run_rank<B, const R: usize>(
+    payload: &Payload,
+    inputs: Vec<Vec<f32>>,
+) -> PyResult<Vec<OwnedTensor>>
 where
     B: BurnBackend<FloatElem = f32>,
 {
@@ -93,7 +106,11 @@ where
     let device = B::Device::default();
 
     for (i, values) in inputs.into_iter().enumerate() {
-        let mut dims: Vec<usize> = payload.inputs[i].shape.iter().map(|&d| d as usize).collect();
+        let mut dims: Vec<usize> = payload.inputs[i]
+            .shape
+            .iter()
+            .map(|&d| d as usize)
+            .collect();
         let orig_rank = dims.len();
         // Effective scalars (0-d or all-1 dims) must have rank-R dims for
         // TensorData; run_node expands them to sibling shapes before ops.
@@ -205,22 +222,24 @@ where
     B: BurnBackend<FloatElem = f32>,
 {
     let arg = |pos: usize| -> PyResult<usize> {
-        node.args
-            .get(pos)
-            .and_then(|a| a.index)
-            .ok_or_else(|| unsupported(&format!("node '{}' has an unindexed argument", node.target)))
+        node.args.get(pos).and_then(|a| a.index).ok_or_else(|| {
+            unsupported(&format!("node '{}' has an unindexed argument", node.target))
+        })
     };
-    let unary = |pos: usize| -> PyResult<Tensor<B, R>> {
-        Ok(env[arg(pos)?].clone())
-    };
-    let binary = |pos: usize| -> PyResult<Tensor<B, R>> {
-        Ok(env[arg(pos)?].clone())
-    };
+    let unary = |pos: usize| -> PyResult<Tensor<B, R>> { Ok(env[arg(pos)?].clone()) };
+    let binary = |pos: usize| -> PyResult<Tensor<B, R>> { Ok(env[arg(pos)?].clone()) };
     let kw_f64 = |key: &str, default: f64| -> f64 {
-        node.kwargs.get(key).and_then(|v| v.as_f64()).unwrap_or(default)
+        node.kwargs
+            .get(key)
+            .and_then(|v| v.as_f64())
+            .unwrap_or(default)
     };
     let kw_isize = |key: &str, default: isize| -> isize {
-        node.kwargs.get(key).and_then(|v| v.as_i64()).map(|v| v as isize).unwrap_or(default)
+        node.kwargs
+            .get(key)
+            .and_then(|v| v.as_i64())
+            .map(|v| v as isize)
+            .unwrap_or(default)
     };
 
     match node.target.as_str() {
@@ -285,7 +304,10 @@ where
             // approximate="tanh"): 0.5*x*(1 + tanh(0.7978845608*(x + 0.044715*x^3)))
             let x = unary(0)?;
             let x3 = x.clone().powf_scalar(3.0);
-            let inner = x.clone().add(x3.mul_scalar(0.044715)).mul_scalar(0.7978845608);
+            let inner = x
+                .clone()
+                .add(x3.mul_scalar(0.044715))
+                .mul_scalar(0.7978845608);
             Ok(x.mul(inner.tanh().add_scalar(1.0)).mul_scalar(0.5))
         }
         "silu" => Ok(silu(unary(0)?)),
@@ -330,7 +352,8 @@ where
             if sa[R - 1] != sb[R - 2] {
                 return Err(unsupported(&format!(
                     "burn engine: matmul inner dims mismatch: {} vs {}",
-                    sa[R - 1], sb[R - 2]
+                    sa[R - 1],
+                    sb[R - 2]
                 )));
             }
             if node.target == "bmm" && R >= 3 && sa[..R - 2] != sb[..R - 2] {
@@ -349,7 +372,9 @@ where
             if orig_ranks.get(arg(0)?).copied().unwrap_or(R) != R
                 || orig_ranks.get(arg(1)?).copied().unwrap_or(R) != R
             {
-                return Err(unsupported("burn engine: linear needs 2-D input and weight"));
+                return Err(unsupported(
+                    "burn engine: linear needs 2-D input and weight",
+                ));
             }
             // weight is [O, I]; after swap_dims it is [I, O], so the input's
             // last dim must equal weight[1] — validate to avoid burn's panic.
@@ -358,7 +383,8 @@ where
             if si[R - 1] != sw[1] {
                 return Err(unsupported(&format!(
                     "burn engine: linear dim mismatch: input last dim {} vs weight in-dim {}",
-                    si[R - 1], sw[1]
+                    si[R - 1],
+                    sw[1]
                 )));
             }
             let mut out = input.matmul(weight.swap_dims(0, 1));
@@ -384,7 +410,8 @@ where
             if sm1[R - 1] != sm2[R - 2] {
                 return Err(unsupported(&format!(
                     "burn engine: addmm inner dims mismatch: {} vs {}",
-                    sm1[R - 1], sm2[R - 2]
+                    sm1[R - 1],
+                    sm2[R - 2]
                 )));
             }
             let out = mat1.matmul(mat2);
@@ -395,40 +422,70 @@ where
         // Shape ops (rank-preserving, GPU-accelerated)
         "reshape" => {
             let t = unary(0)?;
-            let shape_vec: Vec<usize> = node.kwargs.get("shape")
+            let shape_vec: Vec<usize> = node
+                .kwargs
+                .get("shape")
                 .and_then(|v| v.as_array())
-                .map(|arr| arr.iter().filter_map(|x| x.as_i64()).map(|x| x as usize).collect())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|x| x.as_i64())
+                        .map(|x| x as usize)
+                        .collect()
+                })
                 .unwrap_or_default();
             if shape_vec.len() != R {
-                return Err(unsupported("burn engine: reshape rank mismatch (GPU fallback to native)"));
+                return Err(unsupported(
+                    "burn engine: reshape rank mismatch (GPU fallback to native)",
+                ));
             }
             let old_numel: usize = t.shape().dims.iter().product();
             let new_numel: usize = shape_vec.iter().product();
             if old_numel != new_numel {
-                return Err(unsupported("burn engine: reshape numel mismatch (fallback to native)"));
+                return Err(unsupported(
+                    "burn engine: reshape numel mismatch (fallback to native)",
+                ));
             }
             // Convert Vec to array [usize; R]
-            let shape_arr: [usize; R] = shape_vec.try_into().map_err(|_| unsupported("reshape shape conversion failed"))?;
+            let shape_arr: [usize; R] = shape_vec
+                .try_into()
+                .map_err(|_| unsupported("reshape shape conversion failed"))?;
             Ok(t.reshape(shape_arr))
         }
         "permute" => {
             let t = unary(0)?;
-            let dims_vec: Vec<isize> = node.kwargs.get("dims")
+            let dims_vec: Vec<isize> = node
+                .kwargs
+                .get("dims")
                 .and_then(|v| v.as_array())
-                .map(|arr| arr.iter().filter_map(|x| x.as_i64()).map(|x| x as isize).collect())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|x| x.as_i64())
+                        .map(|x| x as isize)
+                        .collect()
+                })
                 .unwrap_or((0..R as isize).collect());
             if dims_vec.len() != R {
                 return Err(unsupported("burn engine: permute dims mismatch"));
             }
-            let dims_arr: [isize; R] = dims_vec.try_into().map_err(|_| unsupported("permute dims conversion failed"))?;
+            let dims_arr: [isize; R] = dims_vec
+                .try_into()
+                .map_err(|_| unsupported("permute dims conversion failed"))?;
             Ok(t.permute(dims_arr))
         }
         "transpose" => {
             let t = unary(0)?;
             let d0 = kw_isize("d0", 0);
             let d1 = kw_isize("d1", 1);
-            let dim0 = if d0 < 0 { (R as isize + d0) as usize } else { d0 as usize };
-            let dim1 = if d1 < 0 { (R as isize + d1) as usize } else { d1 as usize };
+            let dim0 = if d0 < 0 {
+                (R as isize + d0) as usize
+            } else {
+                d0 as usize
+            };
+            let dim1 = if d1 < 0 {
+                (R as isize + d1) as usize
+            } else {
+                d1 as usize
+            };
             Ok(t.swap_dims(dim0, dim1))
         }
         "t" => {
@@ -440,14 +497,23 @@ where
         }
         "expand" => {
             let t = unary(0)?;
-            let shape_vec: Vec<usize> = node.kwargs.get("shape")
+            let shape_vec: Vec<usize> = node
+                .kwargs
+                .get("shape")
                 .and_then(|v| v.as_array())
-                .map(|arr| arr.iter().filter_map(|x| x.as_i64()).map(|x| x as usize).collect())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|x| x.as_i64())
+                        .map(|x| x as usize)
+                        .collect()
+                })
                 .unwrap_or_default();
             if shape_vec.len() != R {
                 return Err(unsupported("burn engine: expand rank mismatch"));
             }
-            let shape_arr: [usize; R] = shape_vec.try_into().map_err(|_| unsupported("expand shape conversion failed"))?;
+            let shape_arr: [usize; R] = shape_vec
+                .try_into()
+                .map_err(|_| unsupported("expand shape conversion failed"))?;
             Ok(t.expand(shape_arr))
         }
         "squeeze" | "unsqueeze" => {
@@ -455,21 +521,33 @@ where
             let _ = unary(0)?;
             // For GPU, only handle when rank doesn't change (e.g., squeeze dim of size 1 where shape still R)
             // Otherwise fallback
-            return Err(unsupported("burn engine: squeeze/unsqueeze rank change fallback to native"));
+            return Err(unsupported(
+                "burn engine: squeeze/unsqueeze rank change fallback to native",
+            ));
         }
         "sum" => {
             let t = unary(0)?;
             if let Some(dim_val) = node.kwargs.get("dim").and_then(|v| v.as_i64()) {
-                let dim = if dim_val < 0 { (R as i64 + dim_val) as usize } else { dim_val as usize };
+                let dim = if dim_val < 0 {
+                    (R as i64 + dim_val) as usize
+                } else {
+                    dim_val as usize
+                };
                 if dim >= R {
                     return Err(unsupported("burn engine: sum dim out of range"));
                 }
-                let keepdim = node.kwargs.get("keepdim").and_then(|v| v.as_bool()).unwrap_or(false);
+                let keepdim = node
+                    .kwargs
+                    .get("keepdim")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
                 if keepdim {
                     Ok(t.sum_dim(dim))
                 } else {
                     // sum_dim keeps dim, need to squeeze if not keepdim — fallback for now
-                    return Err(unsupported("burn engine: sum without keepdim fallback to native"));
+                    return Err(unsupported(
+                        "burn engine: sum without keepdim fallback to native",
+                    ));
                 }
             } else {
                 // sum all -> scalar (rank 0) - fallback
@@ -479,15 +557,25 @@ where
         "mean" => {
             let t = unary(0)?;
             if let Some(dim_val) = node.kwargs.get("dim").and_then(|v| v.as_i64()) {
-                let dim = if dim_val < 0 { (R as i64 + dim_val) as usize } else { dim_val as usize };
+                let dim = if dim_val < 0 {
+                    (R as i64 + dim_val) as usize
+                } else {
+                    dim_val as usize
+                };
                 if dim >= R {
                     return Err(unsupported("burn engine: mean dim out of range"));
                 }
-                let keepdim = node.kwargs.get("keepdim").and_then(|v| v.as_bool()).unwrap_or(false);
+                let keepdim = node
+                    .kwargs
+                    .get("keepdim")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
                 if keepdim {
                     Ok(t.mean_dim(dim))
                 } else {
-                    return Err(unsupported("burn engine: mean without keepdim fallback to native"));
+                    return Err(unsupported(
+                        "burn engine: mean without keepdim fallback to native",
+                    ));
                 }
             } else {
                 return Err(unsupported("burn engine: mean all fallback to native"));
@@ -508,7 +596,9 @@ where
             Ok(t.round())
         }
 
-        other => Err(unsupported(&format!("burn engine: unknown target {other:?}"))),
+        other => Err(unsupported(&format!(
+            "burn engine: unknown target {other:?}"
+        ))),
     }
 }
 
@@ -518,7 +608,11 @@ fn owned_from_values(values: Vec<f32>, shape: Vec<i64>) -> OwnedTensor {
     let words = bytes.div_ceil(8);
     let mut data = vec![0u64; words];
     unsafe {
-        std::ptr::copy_nonoverlapping(values.as_ptr() as *const u8, data.as_mut_ptr() as *mut u8, bytes);
+        std::ptr::copy_nonoverlapping(
+            values.as_ptr() as *const u8,
+            data.as_mut_ptr() as *mut u8,
+            bytes,
+        );
     }
     OwnedTensor {
         data,
@@ -653,18 +747,16 @@ where
     B: BurnBackend<FloatElem = f32>,
 {
     let inputs = read_inputs(payload, capsules)?;
-    let rank = payload
-        .inputs
-        .first()
-        .map(|i| i.shape.len())
-        .unwrap_or(2);
+    let rank = payload.inputs.first().map(|i| i.shape.len()).unwrap_or(2);
     // Release GIL during the Burn computation (pure Rust, no Python interaction).
     let owned = py.allow_threads(|| match rank {
         1 => run_rank::<B, 1>(payload, inputs),
         2 => run_rank::<B, 2>(payload, inputs),
         3 => run_rank::<B, 3>(payload, inputs),
         4 => run_rank::<B, 4>(payload, inputs),
-        r => Err(unsupported(&format!("burn engine supports ranks 1-4, got {r}"))),
+        r => Err(unsupported(&format!(
+            "burn engine supports ranks 1-4, got {r}"
+        ))),
     })?;
     let mut out = Vec::with_capacity(owned.len());
     for tensor in owned {

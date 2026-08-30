@@ -8,8 +8,8 @@
 use pyo3::prelude::*;
 use serde_json::Value;
 use std::collections::HashMap;
-use std::sync::RwLock;
 use std::sync::LazyLock;
+use std::sync::RwLock;
 
 /// Thread-safe LRU cache: BLAKE3 signature -> canonical parsed payload.
 /// Uses RwLock for better read concurrency (cache lookups are read-only hot path).
@@ -57,8 +57,7 @@ impl LruCache {
     }
 }
 
-static GRAPH_CACHE: LazyLock<RwLock<LruCache>> =
-    LazyLock::new(|| RwLock::new(LruCache::new()));
+static GRAPH_CACHE: LazyLock<RwLock<LruCache>> = LazyLock::new(|| RwLock::new(LruCache::new()));
 
 static HITS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static MISSES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -76,14 +75,21 @@ pub const MAX_PAYLOAD_BYTES: usize = 10 * 1024 * 1024;
 pub fn cache_get(signature: &str) -> Option<String> {
     let result = {
         let mut cache = GRAPH_CACHE.write().unwrap_or_else(|e| e.into_inner());
-        cache.get(signature).cloned().map(|v| serde_json::to_string(&v).unwrap_or_default())
+        cache
+            .get(signature)
+            .cloned()
+            .map(|v| serde_json::to_string(&v).unwrap_or_default())
     };
     if result.is_some() {
         HITS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     } else {
         MISSES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
-    if result.as_deref().is_some_and(|s| s.is_empty()) { None } else { result }
+    if result.as_deref().is_some_and(|s| s.is_empty()) {
+        None
+    } else {
+        result
+    }
 }
 
 /// Cache insert: stores the parsed payload under its signature (first write wins).
@@ -110,7 +116,10 @@ pub fn cache_stats() -> (usize, u64, u64) {
 /// Reset the graph cache (mostly useful for tests).
 #[pyfunction]
 pub fn cache_clear() {
-    GRAPH_CACHE.write().unwrap_or_else(|e| e.into_inner()).clear();
+    GRAPH_CACHE
+        .write()
+        .unwrap_or_else(|e| e.into_inner())
+        .clear();
     HITS.store(0, std::sync::atomic::Ordering::Relaxed);
     MISSES.store(0, std::sync::atomic::Ordering::Relaxed);
 }

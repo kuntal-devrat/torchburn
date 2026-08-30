@@ -16,7 +16,9 @@
 //!   HuggingFace split-half convention:
 //!   `out[..., :D/2] = x1*cos - x2*sin; out[..., D/2:] = x1*sin + x2*cos`.
 
-use crate::dlpack::{BorrowedTensor, DType, OwnedTensor, contiguous_strides, elem_count, unsupported};
+use crate::dlpack::{
+    contiguous_strides, elem_count, unsupported, BorrowedTensor, DType, OwnedTensor,
+};
 use pyo3::prelude::*;
 use wide::f32x4;
 
@@ -48,7 +50,11 @@ fn mask_value(mask: &BorrowedTensor, b: usize, h: usize, i: usize, j: usize) -> 
         match mask.dtype {
             DType::Bool => {
                 let bytes = unsafe { typed_slice::<u8>(mask) };
-                return if bytes[0] != 0 { 0.0 } else { f32::NEG_INFINITY };
+                return if bytes[0] != 0 {
+                    0.0
+                } else {
+                    f32::NEG_INFINITY
+                };
             }
             DType::F32 => return (unsafe { typed_slice::<f32>(mask) })[0],
             DType::F64 => return (unsafe { typed_slice::<f64>(mask) })[0] as f32,
@@ -67,7 +73,11 @@ fn mask_value(mask: &BorrowedTensor, b: usize, h: usize, i: usize, j: usize) -> 
     match mask.dtype {
         DType::Bool => {
             let bytes = unsafe { typed_slice::<u8>(mask) };
-            if bytes[idx] != 0 { 0.0 } else { f32::NEG_INFINITY }
+            if bytes[idx] != 0 {
+                0.0
+            } else {
+                f32::NEG_INFINITY
+            }
         }
         DType::F32 => (unsafe { typed_slice::<f32>(mask) })[idx],
         DType::F64 => (unsafe { typed_slice::<f64>(mask) })[idx] as f32,
@@ -168,7 +178,11 @@ fn sdpa_block_f32(
             }
             if let Some(m) = mask {
                 let mv = mask_value(m, bi, hi, i, j);
-                sv = if mv.is_infinite() && mv < 0.0 { f32::NEG_INFINITY } else { sv + mv };
+                sv = if mv.is_infinite() && mv < 0.0 {
+                    f32::NEG_INFINITY
+                } else {
+                    sv + mv
+                };
             }
             scores[j] = sv;
         }
@@ -258,7 +272,11 @@ fn sdpa_block_f64(
             }
             if let Some(m) = mask {
                 let mv = mask_value(m, bi, hi, i, j) as f64;
-                sv = if mv.is_infinite() && mv < 0.0 { f64::NEG_INFINITY } else { sv + mv };
+                sv = if mv.is_infinite() && mv < 0.0 {
+                    f64::NEG_INFINITY
+                } else {
+                    sv + mv
+                };
             }
             scores[j] = sv;
         }
@@ -331,12 +349,17 @@ pub fn scaled_dot_product_attention(
             return Err(unsupported("attention mask must be float or bool"));
         }
         if rank < 2 || rank > 4 {
-            return Err(unsupported("attention mask must be [T, T], [B, T, T] or [B, H, T, T]"));
+            return Err(unsupported(
+                "attention mask must be [T, T], [B, T, T] or [B, H, T, T]",
+            ));
         }
         // validate trailing dims against the score grid
         let t = q.shape[2] as usize;
         let want = [q.shape[2] as usize, t];
-        let got = [m.shape[rank - 2].max(1) as usize, m.shape[rank - 1].max(1) as usize];
+        let got = [
+            m.shape[rank - 2].max(1) as usize,
+            m.shape[rank - 1].max(1) as usize,
+        ];
         if got != want {
             return Err(unsupported(&format!(
                 "attention mask trailing dims {:?} do not match [T, T] = {:?}",
@@ -385,7 +408,21 @@ pub fn scaled_dot_product_attention(
             let od = unsafe { typed_mut_slice::<f32>(&mut out) };
             let scale_f = scale as f32;
             let block = |bi: usize, hi: usize, o: &mut [f32]| {
-                sdpa_block_f32(qd, kd, vd, o, bi, hi, h, t, d, scale_f, causal_only, is_causal, mask)
+                sdpa_block_f32(
+                    qd,
+                    kd,
+                    vd,
+                    o,
+                    bi,
+                    hi,
+                    h,
+                    t,
+                    d,
+                    scale_f,
+                    causal_only,
+                    is_causal,
+                    mask,
+                )
             };
             let per_block = t * d;
             if b * h * t * t * d >= SDPA_PAR_THRESHOLD && b * h > 1 {
@@ -414,7 +451,21 @@ pub fn scaled_dot_product_attention(
             let vd = unsafe { typed_slice::<f64>(v) };
             let od = unsafe { typed_mut_slice::<f64>(&mut out) };
             let block = |bi: usize, hi: usize, o: &mut [f64]| {
-                sdpa_block_f64(qd, kd, vd, o, bi, hi, h, t, d, scale, causal_only, is_causal, mask)
+                sdpa_block_f64(
+                    qd,
+                    kd,
+                    vd,
+                    o,
+                    bi,
+                    hi,
+                    h,
+                    t,
+                    d,
+                    scale,
+                    causal_only,
+                    is_causal,
+                    mask,
+                )
             };
             let per_block = t * d;
             if b * h * t * t * d >= SDPA_PAR_THRESHOLD && b * h > 1 {
@@ -447,7 +498,11 @@ pub fn scaled_dot_product_attention(
 /// Rotary positional embedding (HF split-half convention).
 ///
 /// `x` is [..., T, D], `cos`/`sin` are [T, D/2] (or [1, T, D/2]).
-pub fn rope(x: &BorrowedTensor, cos: &BorrowedTensor, sin: &BorrowedTensor) -> PyResult<OwnedTensor> {
+pub fn rope(
+    x: &BorrowedTensor,
+    cos: &BorrowedTensor,
+    sin: &BorrowedTensor,
+) -> PyResult<OwnedTensor> {
     if x.dtype != DType::F32 && x.dtype != DType::F64 {
         return Err(unsupported("rope requires f32/f64 tensors"));
     }
@@ -463,7 +518,10 @@ pub fn rope(x: &BorrowedTensor, cos: &BorrowedTensor, sin: &BorrowedTensor) -> P
     let d2 = d / 2;
     // cos/sin: [T, D/2] or [1, T, D/2]
     let cos_rank = cos.shape.len();
-    let (cos_t, cos_d2) = (cos.shape[cos_rank - 2] as usize, cos.shape[cos_rank - 1] as usize);
+    let (cos_t, cos_d2) = (
+        cos.shape[cos_rank - 2] as usize,
+        cos.shape[cos_rank - 1] as usize,
+    );
     if cos_t != t || cos_d2 != d2 {
         return Err(unsupported(&format!(
             "rope cos shape {:?} does not match [T, D/2] = [{t}, {d2}]",
@@ -539,7 +597,7 @@ pub fn fused_swiglu(
     let m = elem_count(&x.shape[..x_rank - 1]);
     let k = x.shape[x_rank - 1] as usize;
     let n = gate_w.shape[0] as usize; // gate_w is [N, K]
-    
+
     let mut out_shape = x.shape.clone();
     out_shape[x_rank - 1] = n as i64;
     let mut out = OwnedTensor::new(x.dtype, out_shape);
@@ -613,7 +671,7 @@ pub fn fused_geglu(
     let m = elem_count(&x.shape[..x_rank - 1]);
     let k = x.shape[x_rank - 1] as usize;
     let n = gate_w.shape[0] as usize;
-    
+
     let mut out_shape = x.shape.clone();
     out_shape[x_rank - 1] = n as i64;
     let mut out = OwnedTensor::new(x.dtype, out_shape);
@@ -664,7 +722,8 @@ pub fn fused_geglu(
                         g_acc += x_row[i] * g_w[i];
                         u_acc += x_row[i] * u_w[i];
                     }
-                    let inner = (SQRT_2_OVER_PI as f64) * (g_acc + (GELU_COEFF as f64) * g_acc * g_acc * g_acc);
+                    let inner = (SQRT_2_OVER_PI as f64)
+                        * (g_acc + (GELU_COEFF as f64) * g_acc * g_acc * g_acc);
                     let gelu_g = 0.5 * g_acc * (1.0 + inner.tanh());
                     out_row[col] = gelu_g * u_acc;
                 }

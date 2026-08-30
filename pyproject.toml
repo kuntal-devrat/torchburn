@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "torchburn"
-version = "0.4.1"
+version = "0.5.0"
 description = "A hardware-agnostic, Rust-compiled PyTorch compilation backend. Zero-copy DLPack FFI, BLAKE3 structural graph caching, and safe eager fallback for unsupported operators."
 readme = "README.md"
 requires-python = ">=3.9"

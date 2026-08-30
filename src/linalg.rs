@@ -5,11 +5,28 @@
 //! `addmm` write their output directly (bias in the zero-init, optional fused
 //! activation in the epilogue) — no intermediate matmul buffer or copy.
 
-use crate::dlpack::{BorrowedTensor, DType, OwnedTensor, contiguous_strides, unsupported};
+use crate::dlpack::{contiguous_strides, unsupported, BorrowedTensor, DType, OwnedTensor};
 use pyo3::prelude::*;
 
 #[cfg(not(feature = "openblas"))]
-use matrixmultiply::{sgemm, dgemm};
+use matrixmultiply::{dgemm, sgemm};
+
+#[cfg(feature = "openblas")]
+use matrixmultiply::{dgemm as dgemm_mm, sgemm as sgemm_mm};
+
+fn use_openblas() -> bool {
+    #[cfg(not(feature = "openblas"))]
+    {
+        false
+    }
+    #[cfg(feature = "openblas")]
+    {
+        match std::env::var("TORCHBURN_MATMUL").as_deref() {
+            Ok("matrixmultiply") | Ok("matmul") | Ok("sgemm") => false,
+            _ => true,
+        }
+    }
+}
 
 unsafe fn typed_slice<T>(t: &BorrowedTensor) -> &[T] {
     std::slice::from_raw_parts(t.data as *const T, t.buffer_len())
@@ -18,8 +35,6 @@ unsafe fn typed_slice<T>(t: &BorrowedTensor) -> &[T] {
 unsafe fn typed_mut_slice<T>(t: &mut OwnedTensor) -> &mut [T] {
     std::slice::from_raw_parts_mut(t.data.as_mut_ptr() as *mut T, t.elem_count())
 }
-
-
 
 // ---------------------------------------------------------------------------
 // 2D Matmul: (M, K) x (K, N) -> (M, N)
@@ -32,23 +47,36 @@ fn gemm_f32_into(a: &[f32], b: &[f32], out: &mut [f32], m: usize, k: usize, n: u
     #[cfg(feature = "openblas")]
     unsafe {
         crate::blas::sgemm_f32(
-            m as i32, k as i32, n as i32,
+            m as i32,
+            k as i32,
+            n as i32,
             1.0,
-            a.as_ptr(), k as i32,
-            b.as_ptr(), n as i32,
+            a.as_ptr(),
+            k as i32,
+            b.as_ptr(),
+            n as i32,
             0.0,
-            out.as_mut_ptr(), n as i32,
+            out.as_mut_ptr(),
+            n as i32,
         );
     }
     #[cfg(not(feature = "openblas"))]
     unsafe {
         sgemm(
-            m, k, n,
+            m,
+            k,
+            n,
             1.0,
-            a.as_ptr(), k as isize, 1,
-            b.as_ptr(), n as isize, 1,
+            a.as_ptr(),
+            k as isize,
+            1,
+            b.as_ptr(),
+            n as isize,
+            1,
             0.0,
-            out.as_mut_ptr(), n as isize, 1,
+            out.as_mut_ptr(),
+            n as isize,
+            1,
         );
     }
 }
@@ -57,23 +85,36 @@ fn gemm_f64_into(a: &[f64], b: &[f64], out: &mut [f64], m: usize, k: usize, n: u
     #[cfg(feature = "openblas")]
     unsafe {
         crate::blas::dgemm_f64(
-            m as i32, k as i32, n as i32,
+            m as i32,
+            k as i32,
+            n as i32,
             1.0,
-            a.as_ptr(), k as i32,
-            b.as_ptr(), n as i32,
+            a.as_ptr(),
+            k as i32,
+            b.as_ptr(),
+            n as i32,
             0.0,
-            out.as_mut_ptr(), n as i32,
+            out.as_mut_ptr(),
+            n as i32,
         );
     }
     #[cfg(not(feature = "openblas"))]
     unsafe {
         dgemm(
-            m, k, n,
+            m,
+            k,
+            n,
             1.0,
-            a.as_ptr(), k as isize, 1,
-            b.as_ptr(), n as isize, 1,
+            a.as_ptr(),
+            k as isize,
+            1,
+            b.as_ptr(),
+            n as isize,
+            1,
             0.0,
-            out.as_mut_ptr(), n as isize, 1,
+            out.as_mut_ptr(),
+            n as isize,
+            1,
         );
     }
 }
@@ -83,23 +124,36 @@ fn gemm_f32_into_accum(a: &[f32], b: &[f32], out: &mut [f32], m: usize, k: usize
     #[cfg(feature = "openblas")]
     unsafe {
         crate::blas::sgemm_f32(
-            m as i32, k as i32, n as i32,
+            m as i32,
+            k as i32,
+            n as i32,
             1.0,
-            a.as_ptr(), k as i32,
-            b.as_ptr(), n as i32,
+            a.as_ptr(),
+            k as i32,
+            b.as_ptr(),
+            n as i32,
             1.0,
-            out.as_mut_ptr(), n as i32,
+            out.as_mut_ptr(),
+            n as i32,
         );
     }
     #[cfg(not(feature = "openblas"))]
     unsafe {
         sgemm(
-            m, k, n,
+            m,
+            k,
+            n,
             1.0,
-            a.as_ptr(), k as isize, 1,
-            b.as_ptr(), n as isize, 1,
+            a.as_ptr(),
+            k as isize,
+            1,
+            b.as_ptr(),
+            n as isize,
+            1,
             1.0,
-            out.as_mut_ptr(), n as isize, 1,
+            out.as_mut_ptr(),
+            n as isize,
+            1,
         );
     }
 }
@@ -108,23 +162,36 @@ fn gemm_f64_into_accum(a: &[f64], b: &[f64], out: &mut [f64], m: usize, k: usize
     #[cfg(feature = "openblas")]
     unsafe {
         crate::blas::dgemm_f64(
-            m as i32, k as i32, n as i32,
+            m as i32,
+            k as i32,
+            n as i32,
             1.0,
-            a.as_ptr(), k as i32,
-            b.as_ptr(), n as i32,
+            a.as_ptr(),
+            k as i32,
+            b.as_ptr(),
+            n as i32,
             1.0,
-            out.as_mut_ptr(), n as i32,
+            out.as_mut_ptr(),
+            n as i32,
         );
     }
     #[cfg(not(feature = "openblas"))]
     unsafe {
         dgemm(
-            m, k, n,
+            m,
+            k,
+            n,
             1.0,
-            a.as_ptr(), k as isize, 1,
-            b.as_ptr(), n as isize, 1,
+            a.as_ptr(),
+            k as isize,
+            1,
+            b.as_ptr(),
+            n as isize,
+            1,
             1.0,
-            out.as_mut_ptr(), n as isize, 1,
+            out.as_mut_ptr(),
+            n as isize,
+            1,
         );
     }
 }
@@ -138,156 +205,240 @@ fn gemm_f64_into_accum(a: &[f64], b: &[f64], out: &mut [f64], m: usize, k: usize
 /// To transpose, we pass row_stride = 1, col_stride = N.
 #[cfg(not(feature = "openblas"))]
 fn gemm_f32_trans_b_into(
-    a: *const f32, m: usize, k: usize,
-    b: *const f32, b_n: usize,
-    out: *mut f32, n: usize,
+    a: *const f32,
+    m: usize,
+    k: usize,
+    b: *const f32,
+    b_n: usize,
+    out: *mut f32,
+    n: usize,
 ) {
     unsafe {
         sgemm(
-            m, k, n,
+            m,
+            k,
+            n,
             1.0,
-            a, k as isize, 1,
-            b, 1, b_n as isize,  // transposed: row_stride=1, col_stride=N
+            a,
+            k as isize,
+            1,
+            b,
+            1,
+            b_n as isize, // transposed: row_stride=1, col_stride=N
             0.0,
-            out, n as isize, 1,
+            out,
+            n as isize,
+            1,
         );
     }
 }
 
 #[cfg(not(feature = "openblas"))]
 fn gemm_f32_trans_b_into_accum(
-    a: *const f32, m: usize, k: usize,
-    b: *const f32, b_n: usize,
-    out: *mut f32, n: usize,
+    a: *const f32,
+    m: usize,
+    k: usize,
+    b: *const f32,
+    b_n: usize,
+    out: *mut f32,
+    n: usize,
 ) {
     unsafe {
         sgemm(
-            m, k, n,
+            m,
+            k,
+            n,
             1.0,
-            a, k as isize, 1,
-            b, 1, b_n as isize,
+            a,
+            k as isize,
+            1,
+            b,
+            1,
+            b_n as isize,
             1.0,
-            out, n as isize, 1,
+            out,
+            n as isize,
+            1,
         );
     }
 }
 
 #[cfg(not(feature = "openblas"))]
 fn gemm_f64_trans_b_into(
-    a: *const f64, m: usize, k: usize,
-    b: *const f64, b_n: usize,
-    out: *mut f64, n: usize,
+    a: *const f64,
+    m: usize,
+    k: usize,
+    b: *const f64,
+    b_n: usize,
+    out: *mut f64,
+    n: usize,
 ) {
     unsafe {
         dgemm(
-            m, k, n,
+            m,
+            k,
+            n,
             1.0,
-            a, k as isize, 1,
-            b, 1, b_n as isize,
+            a,
+            k as isize,
+            1,
+            b,
+            1,
+            b_n as isize,
             0.0,
-            out, n as isize, 1,
+            out,
+            n as isize,
+            1,
         );
     }
 }
 
 #[cfg(not(feature = "openblas"))]
 fn gemm_f64_trans_b_into_accum(
-    a: *const f64, m: usize, k: usize,
-    b: *const f64, b_n: usize,
-    out: *mut f64, n: usize,
+    a: *const f64,
+    m: usize,
+    k: usize,
+    b: *const f64,
+    b_n: usize,
+    out: *mut f64,
+    n: usize,
 ) {
     unsafe {
         dgemm(
-            m, k, n,
+            m,
+            k,
+            n,
             1.0,
-            a, k as isize, 1,
-            b, 1, b_n as isize,
+            a,
+            k as isize,
+            1,
+            b,
+            1,
+            b_n as isize,
             1.0,
-            out, n as isize, 1,
+            out,
+            n as isize,
+            1,
         );
     }
 }
 
 #[cfg(feature = "openblas")]
 fn gemm_f32_trans_b_into(
-    a: *const f32, m: usize, k: usize,
-    b: *const f32, b_n: usize,
-    out: *mut f32, n: usize,
+    a: *const f32,
+    m: usize,
+    k: usize,
+    b: *const f32,
+    b_n: usize,
+    out: *mut f32,
+    n: usize,
 ) {
     unsafe {
         crate::blas::cblas_sgemm(
             crate::blas::CBLAS_ROW_MAJOR,
-            crate::blas::CBLAS_NO_TRANS,   // A: no trans
-            crate::blas::CBLAS_TRANS,     // B: transpose
-            m as i32, n as i32, k as i32,
+            crate::blas::CBLAS_NO_TRANS, // A: no trans
+            crate::blas::CBLAS_TRANS,    // B: transpose
+            m as i32,
+            n as i32,
+            k as i32,
             1.0,
-            a, k as i32,
-            b, b_n as i32,
+            a,
+            k as i32,
+            b,
+            b_n as i32,
             0.0,
-            out, n as i32,
+            out,
+            n as i32,
         );
     }
 }
 
 #[cfg(feature = "openblas")]
 fn gemm_f32_trans_b_into_accum(
-    a: *const f32, m: usize, k: usize,
-    b: *const f32, b_n: usize,
-    out: *mut f32, n: usize,
+    a: *const f32,
+    m: usize,
+    k: usize,
+    b: *const f32,
+    b_n: usize,
+    out: *mut f32,
+    n: usize,
 ) {
     unsafe {
         crate::blas::cblas_sgemm(
             crate::blas::CBLAS_ROW_MAJOR,
             crate::blas::CBLAS_NO_TRANS,
             crate::blas::CBLAS_TRANS,
-            m as i32, n as i32, k as i32,
+            m as i32,
+            n as i32,
+            k as i32,
             1.0,
-            a, k as i32,
-            b, b_n as i32,
+            a,
+            k as i32,
+            b,
+            b_n as i32,
             1.0,
-            out, n as i32,
+            out,
+            n as i32,
         );
     }
 }
 
 #[cfg(feature = "openblas")]
 fn gemm_f64_trans_b_into(
-    a: *const f64, m: usize, k: usize,
-    b: *const f64, b_n: usize,
-    out: *mut f64, n: usize,
+    a: *const f64,
+    m: usize,
+    k: usize,
+    b: *const f64,
+    b_n: usize,
+    out: *mut f64,
+    n: usize,
 ) {
     unsafe {
         crate::blas::cblas_dgemm(
             crate::blas::CBLAS_ROW_MAJOR,
             crate::blas::CBLAS_NO_TRANS,
             crate::blas::CBLAS_TRANS,
-            m as i32, n as i32, k as i32,
+            m as i32,
+            n as i32,
+            k as i32,
             1.0,
-            a, k as i32,
-            b, b_n as i32,
+            a,
+            k as i32,
+            b,
+            b_n as i32,
             0.0,
-            out, n as i32,
+            out,
+            n as i32,
         );
     }
 }
 
 #[cfg(feature = "openblas")]
 fn gemm_f64_trans_b_into_accum(
-    a: *const f64, m: usize, k: usize,
-    b: *const f64, b_n: usize,
-    out: *mut f64, n: usize,
+    a: *const f64,
+    m: usize,
+    k: usize,
+    b: *const f64,
+    b_n: usize,
+    out: *mut f64,
+    n: usize,
 ) {
     unsafe {
         crate::blas::cblas_dgemm(
             crate::blas::CBLAS_ROW_MAJOR,
             crate::blas::CBLAS_NO_TRANS,
             crate::blas::CBLAS_TRANS,
-            m as i32, n as i32, k as i32,
+            m as i32,
+            n as i32,
+            k as i32,
             1.0,
-            a, k as i32,
-            b, b_n as i32,
+            a,
+            k as i32,
+            b,
+            b_n as i32,
             1.0,
-            out, n as i32,
+            out,
+            n as i32,
         );
     }
 }
@@ -364,7 +515,11 @@ fn matmul_2d_f64(a: &BorrowedTensor, b: &BorrowedTensor, out: &mut OwnedTensor) 
 /// 2D matrix multiply: (M, K) x (K, N) -> (M, N).
 pub fn matmul_2d(a: &BorrowedTensor, b: &BorrowedTensor) -> PyResult<OwnedTensor> {
     if a.dtype != b.dtype {
-        return Err(unsupported(&format!("dtype mismatch in matmul: {} vs {}", a.dtype.name(), b.dtype.name())));
+        return Err(unsupported(&format!(
+            "dtype mismatch in matmul: {} vs {}",
+            a.dtype.name(),
+            b.dtype.name()
+        )));
     }
     if a.shape.len() != 2 || b.shape.len() != 2 {
         return Err(unsupported("matmul_2d requires 2D tensors"));
@@ -385,7 +540,6 @@ pub fn matmul_2d(a: &BorrowedTensor, b: &BorrowedTensor) -> PyResult<OwnedTensor
         DType::I64 | DType::I32 | DType::Bool => {
             return Err(unsupported("this kernel only supports f32/f64 tensors"));
         }
-
     }
     Ok(out)
 }
@@ -396,16 +550,26 @@ pub fn matmul_2d(a: &BorrowedTensor, b: &BorrowedTensor) -> PyResult<OwnedTensor
 
 pub fn bmm(a: &BorrowedTensor, b: &BorrowedTensor) -> PyResult<OwnedTensor> {
     if a.dtype != b.dtype {
-        return Err(unsupported(&format!("dtype mismatch in bmm: {} vs {}", a.dtype.name(), b.dtype.name())));
+        return Err(unsupported(&format!(
+            "dtype mismatch in bmm: {} vs {}",
+            a.dtype.name(),
+            b.dtype.name()
+        )));
     }
     if a.shape.len() != 3 || b.shape.len() != 3 {
         return Err(unsupported("bmm requires 3D tensors"));
     }
     if a.shape[0] != b.shape[0] {
-        return Err(unsupported(&format!("bmm batch mismatch: {} vs {}", a.shape[0], b.shape[0])));
+        return Err(unsupported(&format!(
+            "bmm batch mismatch: {} vs {}",
+            a.shape[0], b.shape[0]
+        )));
     }
     if a.shape[2] != b.shape[1] {
-        return Err(unsupported(&format!("bmm inner dimension mismatch: {} vs {}", a.shape[2], b.shape[1])));
+        return Err(unsupported(&format!(
+            "bmm inner dimension mismatch: {} vs {}",
+            a.shape[2], b.shape[1]
+        )));
     }
 
     let batch = a.shape[0] as usize;
@@ -451,41 +615,43 @@ pub fn bmm(a: &BorrowedTensor, b: &BorrowedTensor) -> PyResult<OwnedTensor> {
                                     std::slice::from_raw_parts(ap, chunk_a),
                                     std::slice::from_raw_parts(bp, chunk_b),
                                     std::slice::from_raw_parts_mut(op, chunk_o),
-                                    m, k, n,
+                                    m,
+                                    k,
+                                    n,
                                 );
                             });
                         }
                     });
                 }
             }
-            DType::F64 => {
-                unsafe {
-                    let a_p0 = a_ptr as *const f64 as usize;
-                    let b_p0 = b_ptr as *const f64 as usize;
-                    let o_p0 = out_ptr as *mut f64 as usize;
-                    rayon::scope(|s| {
-                        for bi in 0..batch {
-                            let a_p = a_p0;
-                            let b_p = b_p0;
-                            let o_p = o_p0;
-                            s.spawn(move |_| {
-                                let a_off = bi * chunk_a;
-                                let b_off = bi * chunk_b;
-                                let o_off = bi * chunk_o;
-                                let ap = (a_p as *const f64).add(a_off);
-                                let bp = (b_p as *const f64).add(b_off);
-                                let op = (o_p as *mut f64).add(o_off);
-                                gemm_f64_into(
-                                    std::slice::from_raw_parts(ap, chunk_a),
-                                    std::slice::from_raw_parts(bp, chunk_b),
-                                    std::slice::from_raw_parts_mut(op, chunk_o),
-                                    m, k, n,
-                                );
-                            });
-                        }
-                    });
-                }
-            }
+            DType::F64 => unsafe {
+                let a_p0 = a_ptr as *const f64 as usize;
+                let b_p0 = b_ptr as *const f64 as usize;
+                let o_p0 = out_ptr as *mut f64 as usize;
+                rayon::scope(|s| {
+                    for bi in 0..batch {
+                        let a_p = a_p0;
+                        let b_p = b_p0;
+                        let o_p = o_p0;
+                        s.spawn(move |_| {
+                            let a_off = bi * chunk_a;
+                            let b_off = bi * chunk_b;
+                            let o_off = bi * chunk_o;
+                            let ap = (a_p as *const f64).add(a_off);
+                            let bp = (b_p as *const f64).add(b_off);
+                            let op = (o_p as *mut f64).add(o_off);
+                            gemm_f64_into(
+                                std::slice::from_raw_parts(ap, chunk_a),
+                                std::slice::from_raw_parts(bp, chunk_b),
+                                std::slice::from_raw_parts_mut(op, chunk_o),
+                                m,
+                                k,
+                                n,
+                            );
+                        });
+                    }
+                });
+            },
             _ => return Err(unsupported("this kernel only supports f32/f64 tensors")),
         }
     } else {
@@ -511,13 +677,27 @@ pub fn bmm(a: &BorrowedTensor, b: &BorrowedTensor) -> PyResult<OwnedTensor> {
                     let a_slice = unsafe { typed_slice::<f32>(&a_view) };
                     let b_slice = unsafe { typed_slice::<f32>(&b_view) };
                     let out_data = unsafe { typed_mut_slice::<f32>(&mut out) };
-                    gemm_f32_into(a_slice, b_slice, &mut out_data[o_offset..o_offset + chunk_o], m, k, n);
+                    gemm_f32_into(
+                        a_slice,
+                        b_slice,
+                        &mut out_data[o_offset..o_offset + chunk_o],
+                        m,
+                        k,
+                        n,
+                    );
                 }
                 DType::F64 => {
                     let a_slice = unsafe { typed_slice::<f64>(&a_view) };
                     let b_slice = unsafe { typed_slice::<f64>(&b_view) };
                     let out_data = unsafe { typed_mut_slice::<f64>(&mut out) };
-                    gemm_f64_into(a_slice, b_slice, &mut out_data[o_offset..o_offset + chunk_o], m, k, n);
+                    gemm_f64_into(
+                        a_slice,
+                        b_slice,
+                        &mut out_data[o_offset..o_offset + chunk_o],
+                        m,
+                        k,
+                        n,
+                    );
                 }
                 _ => return Err(unsupported("this kernel only supports f32/f64 tensors")),
             }
@@ -541,7 +721,9 @@ pub fn addmm(
     if mat1.dtype != mat2.dtype || mat1.dtype != bias.dtype {
         return Err(unsupported(&format!(
             "dtype mismatch in addmm: {} vs {} vs {}",
-            mat1.dtype.name(), mat2.dtype.name(), bias.dtype.name()
+            mat1.dtype.name(),
+            mat2.dtype.name(),
+            bias.dtype.name()
         )));
     }
     if mat1.shape.len() != 2 || mat2.shape.len() != 2 {
@@ -609,7 +791,8 @@ pub fn addmm(
             }
             let a_contig = mat1.strides == contiguous_strides(&mat1.shape);
             let b_contig = mat2.strides == contiguous_strides(&mat2.shape);
-            if a_contig && b_contig {            let a_data = unsafe { typed_slice::<f64>(mat1) };
+            if a_contig && b_contig {
+                let a_data = unsafe { typed_slice::<f64>(mat1) };
                 let b_data = unsafe { typed_slice::<f64>(mat2) };
                 gemm_f64_into_accum(a_data, b_data, out_data, m, k, n);
             } else {
@@ -642,7 +825,6 @@ pub fn addmm(
         DType::I64 | DType::I32 | DType::Bool => {
             return Err(unsupported("this kernel only supports f32/f64 tensors"));
         }
-
     }
     Ok(out)
 }
@@ -654,7 +836,11 @@ pub fn linear(
     epilogue: Option<&crate::fusion::ActSpec>,
 ) -> PyResult<OwnedTensor> {
     if input.dtype != weight.dtype {
-        return Err(unsupported(&format!("dtype mismatch in linear: {} vs {}", input.dtype.name(), weight.dtype.name())));
+        return Err(unsupported(&format!(
+            "dtype mismatch in linear: {} vs {}",
+            input.dtype.name(),
+            weight.dtype.name()
+        )));
     }
 
     // weight is (O, I), input is (..., I)
@@ -669,7 +855,11 @@ pub fn linear(
     let input_shape = &input.shape;
     let input_rank = input_shape.len();
     if input_shape[input_rank - 1] != i as i64 {
-        return Err(unsupported(&format!("linear input dim mismatch: last dim {} vs weight dim {}", input_shape[input_rank - 1], i)));
+        return Err(unsupported(&format!(
+            "linear input dim mismatch: last dim {} vs weight dim {}",
+            input_shape[input_rank - 1],
+            i
+        )));
     }
 
     // Compute output shape: replace last dim with O
@@ -677,7 +867,10 @@ pub fn linear(
     out_shape[input_rank - 1] = o as i64;
 
     let mut out = OwnedTensor::new(input.dtype, out_shape);
-    let n_batch: usize = input_shape[..input_rank - 1].iter().map(|&d| d.max(0) as usize).product();
+    let n_batch: usize = input_shape[..input_rank - 1]
+        .iter()
+        .map(|&d| d.max(0) as usize)
+        .product();
     let input_contig = input.strides == contiguous_strides(&input.shape);
 
     // linear(x, w, b) == x @ w^T + b.
@@ -695,7 +888,8 @@ pub fn linear(
                     let row = &mut buf[batch * i..(batch + 1) * i];
                     for k in 0..i {
                         row[k] = unsafe {
-                            *((input.data as *const f32).add(base + k * input.strides[input_rank - 1] as usize))
+                            *((input.data as *const f32)
+                                .add(base + k * input.strides[input_rank - 1] as usize))
                         };
                     }
                 }
@@ -735,7 +929,8 @@ pub fn linear(
                     let row = &mut buf[batch * i..(batch + 1) * i];
                     for k in 0..i {
                         row[k] = unsafe {
-                            *((input.data as *const f64).add(base + k * input.strides[input_rank - 1] as usize))
+                            *((input.data as *const f64)
+                                .add(base + k * input.strides[input_rank - 1] as usize))
                         };
                     }
                 }
@@ -767,7 +962,6 @@ pub fn linear(
         DType::I64 | DType::I32 | DType::Bool => {
             return Err(unsupported("this kernel only supports f32/f64 tensors"));
         }
-
     }
     Ok(out)
 }
@@ -792,13 +986,20 @@ fn batch_offset(input: &BorrowedTensor, batch: usize) -> usize {
 
 pub fn dot(a: &BorrowedTensor, b: &BorrowedTensor) -> PyResult<OwnedTensor> {
     if a.dtype != b.dtype {
-        return Err(unsupported(&format!("dtype mismatch in dot: {} vs {}", a.dtype.name(), b.dtype.name())));
+        return Err(unsupported(&format!(
+            "dtype mismatch in dot: {} vs {}",
+            a.dtype.name(),
+            b.dtype.name()
+        )));
     }
     if a.shape.len() != 1 || b.shape.len() != 1 {
         return Err(unsupported("dot requires 1D tensors"));
     }
     if a.shape[0] != b.shape[0] {
-        return Err(unsupported(&format!("dot length mismatch: {} vs {}", a.shape[0], b.shape[0])));
+        return Err(unsupported(&format!(
+            "dot length mismatch: {} vs {}",
+            a.shape[0], b.shape[0]
+        )));
     }
 
     let n = a.shape[0] as usize;
@@ -809,7 +1010,9 @@ pub fn dot(a: &BorrowedTensor, b: &BorrowedTensor) -> PyResult<OwnedTensor> {
             let a_data = unsafe { typed_slice::<f32>(a) };
             let b_data = unsafe { typed_slice::<f32>(b) };
             let mut sum = 0.0f32;
-            for i in 0..n { sum += a_data[i] * b_data[i]; }
+            for i in 0..n {
+                sum += a_data[i] * b_data[i];
+            }
             let d = unsafe { typed_mut_slice::<f32>(&mut out) };
             d[0] = sum;
         }
@@ -817,7 +1020,9 @@ pub fn dot(a: &BorrowedTensor, b: &BorrowedTensor) -> PyResult<OwnedTensor> {
             let a_data = unsafe { typed_slice::<f64>(a) };
             let b_data = unsafe { typed_slice::<f64>(b) };
             let mut sum = 0.0f64;
-            for i in 0..n { sum += a_data[i] * b_data[i]; }
+            for i in 0..n {
+                sum += a_data[i] * b_data[i];
+            }
             let d = unsafe { typed_mut_slice::<f64>(&mut out) };
             d[0] = sum;
         }
@@ -825,7 +1030,6 @@ pub fn dot(a: &BorrowedTensor, b: &BorrowedTensor) -> PyResult<OwnedTensor> {
         DType::I64 | DType::I32 | DType::Bool => {
             return Err(unsupported("this kernel only supports f32/f64 tensors"));
         }
-
     }
     Ok(out)
 }
@@ -837,7 +1041,11 @@ pub fn dot(a: &BorrowedTensor, b: &BorrowedTensor) -> PyResult<OwnedTensor> {
 
 pub fn matmul(a: &BorrowedTensor, b: &BorrowedTensor) -> PyResult<OwnedTensor> {
     if a.dtype != b.dtype {
-        return Err(unsupported(&format!("dtype mismatch in matmul: {} vs {}", a.dtype.name(), b.dtype.name())));
+        return Err(unsupported(&format!(
+            "dtype mismatch in matmul: {} vs {}",
+            a.dtype.name(),
+            b.dtype.name()
+        )));
     }
     let a_rank = a.shape.len();
     let b_rank = b.shape.len();
@@ -852,7 +1060,10 @@ pub fn matmul(a: &BorrowedTensor, b: &BorrowedTensor) -> PyResult<OwnedTensor> {
     let n = b.shape[b_rank - 1];
 
     if k_a != k_b {
-        return Err(unsupported(&format!("matmul inner dimension mismatch: {} vs {}", k_a, k_b)));
+        return Err(unsupported(&format!(
+            "matmul inner dimension mismatch: {} vs {}",
+            k_a, k_b
+        )));
     }
 
     if a_rank == 2 && b_rank == 2 {
@@ -866,12 +1077,25 @@ pub fn matmul(a: &BorrowedTensor, b: &BorrowedTensor) -> PyResult<OwnedTensor> {
     let batch_rank = a_batch.len().max(b_batch.len());
     let mut batch_shape = vec![0i64; batch_rank];
     for i in 0..batch_rank {
-        let ai = if i < batch_rank - a_batch.len() { 1 } else { a_batch[i - (batch_rank - a_batch.len())] };
-        let bi = if i < batch_rank - b_batch.len() { 1 } else { b_batch[i - (batch_rank - b_batch.len())] };
-        if ai == bi { batch_shape[i] = ai; }
-        else if ai == 1 { batch_shape[i] = bi; }
-        else if bi == 1 { batch_shape[i] = ai; }
-        else { return Err(unsupported("matmul batch shape broadcast failed")); }
+        let ai = if i < batch_rank - a_batch.len() {
+            1
+        } else {
+            a_batch[i - (batch_rank - a_batch.len())]
+        };
+        let bi = if i < batch_rank - b_batch.len() {
+            1
+        } else {
+            b_batch[i - (batch_rank - b_batch.len())]
+        };
+        if ai == bi {
+            batch_shape[i] = ai;
+        } else if ai == 1 {
+            batch_shape[i] = bi;
+        } else if bi == 1 {
+            batch_shape[i] = ai;
+        } else {
+            return Err(unsupported("matmul batch shape broadcast failed"));
+        }
     }
 
     let batch_size: usize = batch_shape.iter().map(|&d| d.max(0) as usize).product();
@@ -893,7 +1117,7 @@ pub fn matmul(a: &BorrowedTensor, b: &BorrowedTensor) -> PyResult<OwnedTensor> {
     let batch_rank = batch_shape.len();
     let mut batch_strides = vec![1usize; batch_rank];
     for i in (0..batch_rank.saturating_sub(1)).rev() {
-        batch_strides[i] = batch_strides[i+1] * batch_shape[i+1] as usize;
+        batch_strides[i] = batch_strides[i + 1] * batch_shape[i + 1] as usize;
     }
     let a_batch_vec = a_batch.to_vec();
     let b_batch_vec = b_batch.to_vec();
@@ -902,7 +1126,9 @@ pub fn matmul(a: &BorrowedTensor, b: &BorrowedTensor) -> PyResult<OwnedTensor> {
 
     // Helper to compute flat batch index for a given operand
     let flat_for = |batch: &[i64], bi: usize, strides: &[usize], shape: &[i64]| -> usize {
-        if batch.is_empty() { return 0; }
+        if batch.is_empty() {
+            return 0;
+        }
         let rank = shape.len();
         let blen = batch.len();
         let mut flat = 0usize;
@@ -923,82 +1149,82 @@ pub fn matmul(a: &BorrowedTensor, b: &BorrowedTensor) -> PyResult<OwnedTensor> {
 
     if parallel {
         match a.dtype {
-            DType::F32 => {
-                unsafe {
-                    let a_p0 = a_ptr as *const f32 as usize;
-                    let b_p0 = b_ptr as *const f32 as usize;
-                    let o_p0 = out_ptr as *mut f32 as usize;
-                    let a_batch_c = a_batch_vec.clone();
-                    let b_batch_c = b_batch_vec.clone();
-                    let bs = batch_strides_clone.clone();
-                    let bshape = batch_shape_clone.clone();
-                    rayon::scope(|s| {
-                        for bi in 0..batch_size {
-                            let a_p = a_p0;
-                            let b_p = b_p0;
-                            let o_p = o_p0;
-                            let a_batch_l = a_batch_c.clone();
-                            let b_batch_l = b_batch_c.clone();
-                            let bs_l = bs.clone();
-                            let bshape_l = bshape.clone();
-                            s.spawn(move |_| {
-                                let a_flat = flat_for(&a_batch_l, bi, &bs_l, &bshape_l);
-                                let b_flat = flat_for(&b_batch_l, bi, &bs_l, &bshape_l);
-                                let a_off = a_flat * chunk_a;
-                                let b_off = b_flat * chunk_b;
-                                let o_off = bi * chunk_o;
-                                let ap = (a_p as *const f32).add(a_off);
-                                let bp = (b_p as *const f32).add(b_off);
-                                let op = (o_p as *mut f32).add(o_off);
-                                gemm_f32_into(
-                                    std::slice::from_raw_parts(ap, chunk_a),
-                                    std::slice::from_raw_parts(bp, chunk_b),
-                                    std::slice::from_raw_parts_mut(op, chunk_o),
-                                    m_usize, k_usize, n_usize,
-                                );
-                            });
-                        }
-                    });
-                }
-            }
-            DType::F64 => {
-                unsafe {
-                    let a_p0 = a_ptr as *const f64 as usize;
-                    let b_p0 = b_ptr as *const f64 as usize;
-                    let o_p0 = out_ptr as *mut f64 as usize;
-                    let a_batch_c = a_batch_vec.clone();
-                    let b_batch_c = b_batch_vec.clone();
-                    let bs = batch_strides_clone.clone();
-                    let bshape = batch_shape_clone.clone();
-                    rayon::scope(|s| {
-                        for bi in 0..batch_size {
-                            let a_p = a_p0;
-                            let b_p = b_p0;
-                            let o_p = o_p0;
-                            let a_batch_l = a_batch_c.clone();
-                            let b_batch_l = b_batch_c.clone();
-                            let bs_l = bs.clone();
-                            let bshape_l = bshape.clone();
-                            s.spawn(move |_| {
-                                let a_flat = flat_for(&a_batch_l, bi, &bs_l, &bshape_l);
-                                let b_flat = flat_for(&b_batch_l, bi, &bs_l, &bshape_l);
-                                let a_off = a_flat * chunk_a;
-                                let b_off = b_flat * chunk_b;
-                                let o_off = bi * chunk_o;
-                                let ap = (a_p as *const f64).add(a_off);
-                                let bp = (b_p as *const f64).add(b_off);
-                                let op = (o_p as *mut f64).add(o_off);
-                                gemm_f64_into(
-                                    std::slice::from_raw_parts(ap, chunk_a),
-                                    std::slice::from_raw_parts(bp, chunk_b),
-                                    std::slice::from_raw_parts_mut(op, chunk_o),
-                                    m_usize, k_usize, n_usize,
-                                );
-                            });
-                        }
-                    });
-                }
-            }
+            DType::F32 => unsafe {
+                let a_p0 = a_ptr as *const f32 as usize;
+                let b_p0 = b_ptr as *const f32 as usize;
+                let o_p0 = out_ptr as *mut f32 as usize;
+                let a_batch_c = a_batch_vec.clone();
+                let b_batch_c = b_batch_vec.clone();
+                let bs = batch_strides_clone.clone();
+                let bshape = batch_shape_clone.clone();
+                rayon::scope(|s| {
+                    for bi in 0..batch_size {
+                        let a_p = a_p0;
+                        let b_p = b_p0;
+                        let o_p = o_p0;
+                        let a_batch_l = a_batch_c.clone();
+                        let b_batch_l = b_batch_c.clone();
+                        let bs_l = bs.clone();
+                        let bshape_l = bshape.clone();
+                        s.spawn(move |_| {
+                            let a_flat = flat_for(&a_batch_l, bi, &bs_l, &bshape_l);
+                            let b_flat = flat_for(&b_batch_l, bi, &bs_l, &bshape_l);
+                            let a_off = a_flat * chunk_a;
+                            let b_off = b_flat * chunk_b;
+                            let o_off = bi * chunk_o;
+                            let ap = (a_p as *const f32).add(a_off);
+                            let bp = (b_p as *const f32).add(b_off);
+                            let op = (o_p as *mut f32).add(o_off);
+                            gemm_f32_into(
+                                std::slice::from_raw_parts(ap, chunk_a),
+                                std::slice::from_raw_parts(bp, chunk_b),
+                                std::slice::from_raw_parts_mut(op, chunk_o),
+                                m_usize,
+                                k_usize,
+                                n_usize,
+                            );
+                        });
+                    }
+                });
+            },
+            DType::F64 => unsafe {
+                let a_p0 = a_ptr as *const f64 as usize;
+                let b_p0 = b_ptr as *const f64 as usize;
+                let o_p0 = out_ptr as *mut f64 as usize;
+                let a_batch_c = a_batch_vec.clone();
+                let b_batch_c = b_batch_vec.clone();
+                let bs = batch_strides_clone.clone();
+                let bshape = batch_shape_clone.clone();
+                rayon::scope(|s| {
+                    for bi in 0..batch_size {
+                        let a_p = a_p0;
+                        let b_p = b_p0;
+                        let o_p = o_p0;
+                        let a_batch_l = a_batch_c.clone();
+                        let b_batch_l = b_batch_c.clone();
+                        let bs_l = bs.clone();
+                        let bshape_l = bshape.clone();
+                        s.spawn(move |_| {
+                            let a_flat = flat_for(&a_batch_l, bi, &bs_l, &bshape_l);
+                            let b_flat = flat_for(&b_batch_l, bi, &bs_l, &bshape_l);
+                            let a_off = a_flat * chunk_a;
+                            let b_off = b_flat * chunk_b;
+                            let o_off = bi * chunk_o;
+                            let ap = (a_p as *const f64).add(a_off);
+                            let bp = (b_p as *const f64).add(b_off);
+                            let op = (o_p as *mut f64).add(o_off);
+                            gemm_f64_into(
+                                std::slice::from_raw_parts(ap, chunk_a),
+                                std::slice::from_raw_parts(bp, chunk_b),
+                                std::slice::from_raw_parts_mut(op, chunk_o),
+                                m_usize,
+                                k_usize,
+                                n_usize,
+                            );
+                        });
+                    }
+                });
+            },
             _ => return Err(unsupported("this kernel only supports f32/f64 tensors")),
         }
     } else {
@@ -1026,13 +1252,27 @@ pub fn matmul(a: &BorrowedTensor, b: &BorrowedTensor) -> PyResult<OwnedTensor> {
                     let a_slice = unsafe { typed_slice::<f32>(&a_view) };
                     let b_slice = unsafe { typed_slice::<f32>(&b_view) };
                     let out_data = unsafe { typed_mut_slice::<f32>(&mut out) };
-                    gemm_f32_into(a_slice, b_slice, &mut out_data[o_offset..o_offset + chunk_o], m_usize, k_usize, n_usize);
+                    gemm_f32_into(
+                        a_slice,
+                        b_slice,
+                        &mut out_data[o_offset..o_offset + chunk_o],
+                        m_usize,
+                        k_usize,
+                        n_usize,
+                    );
                 }
                 DType::F64 => {
                     let a_slice = unsafe { typed_slice::<f64>(&a_view) };
                     let b_slice = unsafe { typed_slice::<f64>(&b_view) };
                     let out_data = unsafe { typed_mut_slice::<f64>(&mut out) };
-                    gemm_f64_into(a_slice, b_slice, &mut out_data[o_offset..o_offset + chunk_o], m_usize, k_usize, n_usize);
+                    gemm_f64_into(
+                        a_slice,
+                        b_slice,
+                        &mut out_data[o_offset..o_offset + chunk_o],
+                        m_usize,
+                        k_usize,
+                        n_usize,
+                    );
                 }
                 _ => return Err(unsupported("this kernel only supports f32/f64 tensors")),
             }

@@ -3,7 +3,9 @@
 //! Adds scatter, scatter_add, topk, sort, argsort, repeat_interleave,
 //! repeat, einsum, prelu, clamp_tensor, nonzero.
 
-use crate::dlpack::{BorrowedTensor, DType, OwnedTensor, contiguous_strides, elem_count, unsupported};
+use crate::dlpack::{
+    contiguous_strides, elem_count, unsupported, BorrowedTensor, DType, OwnedTensor,
+};
 use pyo3::prelude::*;
 
 unsafe fn ts<T>(t: &BorrowedTensor) -> &[T] {
@@ -19,12 +21,21 @@ unsafe fn tms<T>(t: &mut OwnedTensor) -> &mut [T] {
 // ---------------------------------------------------------------------------
 
 /// scatter_method(self, dim, index, src) — output shape from self, data from src
-pub fn scatter_method(self_tensor: &BorrowedTensor, dim: isize, index: &BorrowedTensor, src: &BorrowedTensor) -> PyResult<OwnedTensor> {
+pub fn scatter_method(
+    self_tensor: &BorrowedTensor,
+    dim: isize,
+    index: &BorrowedTensor,
+    src: &BorrowedTensor,
+) -> PyResult<OwnedTensor> {
     // Create output with self's shape, copy self's data, then scatter src into it
     let _out = scatter(src, dim, index)?;
     // The scatter function creates output with src's shape, but we need self's shape
     // Re-implement: start with self's data, scatter src values into it
-    let dim_usize = if dim < 0 { (self_tensor.shape.len() as isize + dim) as usize } else { dim as usize };
+    let dim_usize = if dim < 0 {
+        (self_tensor.shape.len() as isize + dim) as usize
+    } else {
+        dim as usize
+    };
     // Use self's shape directly — no idx_dim_size adjustment for method call
     let out_shape = self_tensor.shape.clone();
     let mut result = OwnedTensor::new(self_tensor.dtype, out_shape.clone());
@@ -35,14 +46,22 @@ pub fn scatter_method(self_tensor: &BorrowedTensor, dim: isize, index: &Borrowed
         DType::F32 => {
             let sd = unsafe { ts::<f32>(self_tensor) };
             let rd = unsafe { tms::<f32>(&mut result) };
-            for i in 0..out_n.min(self_n) { rd[i] = sd[i]; }
-            for i in self_n..out_n { rd[i] = 0.0; }
+            for i in 0..out_n.min(self_n) {
+                rd[i] = sd[i];
+            }
+            for i in self_n..out_n {
+                rd[i] = 0.0;
+            }
         }
         DType::F64 => {
             let sd = unsafe { ts::<f64>(self_tensor) };
             let rd = unsafe { tms::<f64>(&mut result) };
-            for i in 0..out_n.min(self_n) { rd[i] = sd[i]; }
-            for i in self_n..out_n { rd[i] = 0.0; }
+            for i in 0..out_n.min(self_n) {
+                rd[i] = sd[i];
+            }
+            for i in self_n..out_n {
+                rd[i] = 0.0;
+            }
         }
         _ => {}
     }
@@ -70,7 +89,9 @@ pub fn scatter_method(self_tensor: &BorrowedTensor, dim: isize, index: &Borrowed
                     flat += coords[dd] * stride;
                     stride *= out_shape[dd] as usize;
                 }
-                if flat < out_n { out_d[flat] = src_d[si]; }
+                if flat < out_n {
+                    out_d[flat] = src_d[si];
+                }
             }
         }
         DType::F64 => {
@@ -91,7 +112,9 @@ pub fn scatter_method(self_tensor: &BorrowedTensor, dim: isize, index: &Borrowed
                     flat += coords[dd] * stride;
                     stride *= out_shape[dd] as usize;
                 }
-                if flat < out_n { out_d[flat] = src_d[si]; }
+                if flat < out_n {
+                    out_d[flat] = src_d[si];
+                }
             }
         }
         _ => {}
@@ -103,10 +126,18 @@ pub fn scatter(src: &BorrowedTensor, dim: isize, index: &BorrowedTensor) -> PyRe
     if src.dtype != index.dtype {
         // scatter reads index as i64 regardless of src dtype
     }
-    let dim = if dim < 0 { (src.shape.len() as isize + dim) as usize } else { dim as usize };
+    let dim = if dim < 0 {
+        (src.shape.len() as isize + dim) as usize
+    } else {
+        dim as usize
+    };
     let mut out_shape = src.shape.clone();
     // Determine size along dim from index
-    let idx_dim_size = if dim < index.shape.len() { index.shape[dim] } else { 1 };
+    let idx_dim_size = if dim < index.shape.len() {
+        index.shape[dim]
+    } else {
+        1
+    };
     out_shape[dim] = idx_dim_size;
 
     let mut out = OwnedTensor::new(src.dtype, out_shape.clone());
@@ -138,12 +169,18 @@ pub fn scatter(src: &BorrowedTensor, dim: isize, index: &BorrowedTensor) -> PyRe
                 }
                 // Read scatter index at same position
                 let idx_val = idx_data[src_idx.min(idx_n - 1)] as isize;
-                if idx_val < 0 { continue; }
+                if idx_val < 0 {
+                    continue;
+                }
                 // Compute output position: replace dim coord with idx_val
                 let mut out_idx = 0usize;
                 let out_strides = contiguous_strides(&out_shape);
                 for d in 0..rank {
-                    let coord = if d == dim { idx_val as usize } else { src_coords[d] };
+                    let coord = if d == dim {
+                        idx_val as usize
+                    } else {
+                        src_coords[d]
+                    };
                     out_idx += coord * out_strides[d] as usize;
                 }
                 if out_idx < out_n {
@@ -159,7 +196,9 @@ pub fn scatter(src: &BorrowedTensor, dim: isize, index: &BorrowedTensor) -> PyRe
             let rank = src_shape.len();
             let mut src_coords = vec![0usize; rank];
 
-            for i in 0..out_n { out_d[i] = 0.0; }
+            for i in 0..out_n {
+                out_d[i] = 0.0;
+            }
             for src_idx in 0..src_n.min(idx_n) {
                 let mut tmp = src_idx;
                 for d in (0..rank).rev() {
@@ -167,11 +206,17 @@ pub fn scatter(src: &BorrowedTensor, dim: isize, index: &BorrowedTensor) -> PyRe
                     tmp /= src_shape[d].max(1) as usize;
                 }
                 let idx_val = idx_data[src_idx.min(idx_n - 1)] as isize;
-                if idx_val < 0 { continue; }
+                if idx_val < 0 {
+                    continue;
+                }
                 let mut out_idx = 0usize;
                 let out_strides = contiguous_strides(&out_shape);
                 for d in 0..rank {
-                    let coord = if d == dim { idx_val as usize } else { src_coords[d] };
+                    let coord = if d == dim {
+                        idx_val as usize
+                    } else {
+                        src_coords[d]
+                    };
                     out_idx += coord * out_strides[d] as usize;
                 }
                 if out_idx < out_n {
@@ -187,7 +232,9 @@ pub fn scatter(src: &BorrowedTensor, dim: isize, index: &BorrowedTensor) -> PyRe
             let rank = src_shape.len();
             let mut src_coords = vec![0usize; rank];
 
-            for i in 0..out_n { out_d[i] = 0; }
+            for i in 0..out_n {
+                out_d[i] = 0;
+            }
             for src_idx in 0..src_n.min(idx_n) {
                 let mut tmp = src_idx;
                 for d in (0..rank).rev() {
@@ -195,14 +242,22 @@ pub fn scatter(src: &BorrowedTensor, dim: isize, index: &BorrowedTensor) -> PyRe
                     tmp /= src_shape[d].max(1) as usize;
                 }
                 let idx_val = idx_data[src_idx.min(idx_n - 1)] as isize;
-                if idx_val < 0 { continue; }
+                if idx_val < 0 {
+                    continue;
+                }
                 let mut out_idx = 0usize;
                 let out_strides = contiguous_strides(&out_shape);
                 for d in 0..rank {
-                    let coord = if d == dim { idx_val as usize } else { src_coords[d] };
+                    let coord = if d == dim {
+                        idx_val as usize
+                    } else {
+                        src_coords[d]
+                    };
                     out_idx += coord * out_strides[d] as usize;
                 }
-                if out_idx < out_n { out_d[out_idx] = src_d[src_idx]; }
+                if out_idx < out_n {
+                    out_d[out_idx] = src_d[src_idx];
+                }
             }
         }
         _ => return Err(unsupported("scatter: unsupported dtype")),
@@ -214,10 +269,22 @@ pub fn scatter(src: &BorrowedTensor, dim: isize, index: &BorrowedTensor) -> PyRe
 // scatter_add(src, dim, index, out) -> out (adds instead of overwrites)
 // ---------------------------------------------------------------------------
 
-pub fn scatter_add(src: &BorrowedTensor, dim: isize, index: &BorrowedTensor) -> PyResult<OwnedTensor> {
-    let dim = if dim < 0 { (src.shape.len() as isize + dim) as usize } else { dim as usize };
+pub fn scatter_add(
+    src: &BorrowedTensor,
+    dim: isize,
+    index: &BorrowedTensor,
+) -> PyResult<OwnedTensor> {
+    let dim = if dim < 0 {
+        (src.shape.len() as isize + dim) as usize
+    } else {
+        dim as usize
+    };
     let mut out_shape = src.shape.clone();
-    let idx_dim_size = if dim < index.shape.len() { index.shape[dim] } else { 1 };
+    let idx_dim_size = if dim < index.shape.len() {
+        index.shape[dim]
+    } else {
+        1
+    };
     out_shape[dim] = idx_dim_size;
 
     let mut out = OwnedTensor::new(src.dtype, out_shape.clone());
@@ -234,7 +301,9 @@ pub fn scatter_add(src: &BorrowedTensor, dim: isize, index: &BorrowedTensor) -> 
             let rank = src_shape.len();
             let mut src_coords = vec![0usize; rank];
 
-            for i in 0..out_n { out_d[i] = 0.0; }
+            for i in 0..out_n {
+                out_d[i] = 0.0;
+            }
             for src_idx in 0..src_n.min(idx_n) {
                 let mut tmp = src_idx;
                 for d in (0..rank).rev() {
@@ -242,14 +311,22 @@ pub fn scatter_add(src: &BorrowedTensor, dim: isize, index: &BorrowedTensor) -> 
                     tmp /= src_shape[d].max(1) as usize;
                 }
                 let idx_val = idx_data[src_idx.min(idx_n - 1)] as isize;
-                if idx_val < 0 { continue; }
+                if idx_val < 0 {
+                    continue;
+                }
                 let mut out_idx = 0usize;
                 let out_strides = contiguous_strides(&out_shape);
                 for d in 0..rank {
-                    let coord = if d == dim { idx_val as usize } else { src_coords[d] };
+                    let coord = if d == dim {
+                        idx_val as usize
+                    } else {
+                        src_coords[d]
+                    };
                     out_idx += coord * out_strides[d] as usize;
                 }
-                if out_idx < out_n { out_d[out_idx] += src_d[src_idx]; }
+                if out_idx < out_n {
+                    out_d[out_idx] += src_d[src_idx];
+                }
             }
         }
         DType::F64 => {
@@ -260,7 +337,9 @@ pub fn scatter_add(src: &BorrowedTensor, dim: isize, index: &BorrowedTensor) -> 
             let rank = src_shape.len();
             let mut src_coords = vec![0usize; rank];
 
-            for i in 0..out_n { out_d[i] = 0.0; }
+            for i in 0..out_n {
+                out_d[i] = 0.0;
+            }
             for src_idx in 0..src_n.min(idx_n) {
                 let mut tmp = src_idx;
                 for d in (0..rank).rev() {
@@ -268,14 +347,22 @@ pub fn scatter_add(src: &BorrowedTensor, dim: isize, index: &BorrowedTensor) -> 
                     tmp /= src_shape[d].max(1) as usize;
                 }
                 let idx_val = idx_data[src_idx.min(idx_n - 1)] as isize;
-                if idx_val < 0 { continue; }
+                if idx_val < 0 {
+                    continue;
+                }
                 let mut out_idx = 0usize;
                 let out_strides = contiguous_strides(&out_shape);
                 for d in 0..rank {
-                    let coord = if d == dim { idx_val as usize } else { src_coords[d] };
+                    let coord = if d == dim {
+                        idx_val as usize
+                    } else {
+                        src_coords[d]
+                    };
                     out_idx += coord * out_strides[d] as usize;
                 }
-                if out_idx < out_n { out_d[out_idx] += src_d[src_idx]; }
+                if out_idx < out_n {
+                    out_d[out_idx] += src_d[src_idx];
+                }
             }
         }
         _ => return Err(unsupported("scatter_add: only f32/f64")),
@@ -287,13 +374,25 @@ pub fn scatter_add(src: &BorrowedTensor, dim: isize, index: &BorrowedTensor) -> 
 // topk(input, k, dim, largest, sorted) -> (values, indices)
 // ---------------------------------------------------------------------------
 
-pub fn topk(input: &BorrowedTensor, k: usize, dim: isize, largest: bool) -> PyResult<(OwnedTensor, OwnedTensor)> {
-    let dim = if dim < 0 { (input.shape.len() as isize + dim) as usize } else { dim as usize };
+pub fn topk(
+    input: &BorrowedTensor,
+    k: usize,
+    dim: isize,
+    largest: bool,
+) -> PyResult<(OwnedTensor, OwnedTensor)> {
+    let dim = if dim < 0 {
+        (input.shape.len() as isize + dim) as usize
+    } else {
+        dim as usize
+    };
     let _n = elem_count(&input.shape);
     let dim_size = input.shape[dim] as usize;
 
     if k > dim_size {
-        return Err(unsupported(&format!("topk: k={} > dim_size={}", k, dim_size)));
+        return Err(unsupported(&format!(
+            "topk: k={} > dim_size={}",
+            k, dim_size
+        )));
     }
 
     let mut out_shape = input.shape.clone();
@@ -308,21 +407,38 @@ pub fn topk(input: &BorrowedTensor, k: usize, dim: isize, largest: bool) -> PyRe
             let val_d = unsafe { tms::<f32>(&mut values) };
             let idx_d = unsafe { tms::<i64>(&mut indices) };
             let _rank = input.shape.len();
-            let outer: usize = input.shape.iter().take(dim).map(|&d| d.max(0) as usize).product();
-            let inner: usize = input.shape.iter().skip(dim + 1).map(|&d| d.max(0) as usize).product::<usize>().max(1);
+            let outer: usize = input
+                .shape
+                .iter()
+                .take(dim)
+                .map(|&d| d.max(0) as usize)
+                .product();
+            let inner: usize = input
+                .shape
+                .iter()
+                .skip(dim + 1)
+                .map(|&d| d.max(0) as usize)
+                .product::<usize>()
+                .max(1);
 
             for o in 0..outer {
                 for i in 0..inner {
                     // Collect (value, original_index) pairs along the dim
-                    let mut pairs: Vec<(f32, i64)> = (0..dim_size).map(|d| {
-                        let idx = o * dim_size * inner + d * inner + i;
-                        (in_d[idx], d as i64)
-                    }).collect();
+                    let mut pairs: Vec<(f32, i64)> = (0..dim_size)
+                        .map(|d| {
+                            let idx = o * dim_size * inner + d * inner + i;
+                            (in_d[idx], d as i64)
+                        })
+                        .collect();
 
                     if largest {
-                        pairs.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+                        pairs.sort_by(|a, b| {
+                            b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal)
+                        });
                     } else {
-                        pairs.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+                        pairs.sort_by(|a, b| {
+                            a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal)
+                        });
                     }
 
                     for ki in 0..k {
@@ -338,20 +454,37 @@ pub fn topk(input: &BorrowedTensor, k: usize, dim: isize, largest: bool) -> PyRe
             let val_d = unsafe { tms::<f64>(&mut values) };
             let idx_d = unsafe { tms::<i64>(&mut indices) };
             let _rank = input.shape.len();
-            let outer: usize = input.shape.iter().take(dim).map(|&d| d.max(0) as usize).product();
-            let inner: usize = input.shape.iter().skip(dim + 1).map(|&d| d.max(0) as usize).product::<usize>().max(1);
+            let outer: usize = input
+                .shape
+                .iter()
+                .take(dim)
+                .map(|&d| d.max(0) as usize)
+                .product();
+            let inner: usize = input
+                .shape
+                .iter()
+                .skip(dim + 1)
+                .map(|&d| d.max(0) as usize)
+                .product::<usize>()
+                .max(1);
 
             for o in 0..outer {
                 for i in 0..inner {
-                    let mut pairs: Vec<(f64, i64)> = (0..dim_size).map(|d| {
-                        let idx = o * dim_size * inner + d * inner + i;
-                        (in_d[idx], d as i64)
-                    }).collect();
+                    let mut pairs: Vec<(f64, i64)> = (0..dim_size)
+                        .map(|d| {
+                            let idx = o * dim_size * inner + d * inner + i;
+                            (in_d[idx], d as i64)
+                        })
+                        .collect();
 
                     if largest {
-                        pairs.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+                        pairs.sort_by(|a, b| {
+                            b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal)
+                        });
                     } else {
-                        pairs.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+                        pairs.sort_by(|a, b| {
+                            a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal)
+                        });
                     }
 
                     for ki in 0..k {
@@ -371,8 +504,16 @@ pub fn topk(input: &BorrowedTensor, k: usize, dim: isize, largest: bool) -> PyRe
 // sort(input, dim, descending) -> (values, indices)
 // ---------------------------------------------------------------------------
 
-pub fn sort(input: &BorrowedTensor, dim: isize, descending: bool) -> PyResult<(OwnedTensor, OwnedTensor)> {
-    let k = input.shape[if dim < 0 { (input.shape.len() as isize + dim) as usize } else { dim as usize }] as usize;
+pub fn sort(
+    input: &BorrowedTensor,
+    dim: isize,
+    descending: bool,
+) -> PyResult<(OwnedTensor, OwnedTensor)> {
+    let k = input.shape[if dim < 0 {
+        (input.shape.len() as isize + dim) as usize
+    } else {
+        dim as usize
+    }] as usize;
     topk(input, k, dim, descending)
 }
 
@@ -397,8 +538,16 @@ pub fn argsort(input: &BorrowedTensor, dim: isize, descending: bool) -> PyResult
 // repeat_interleave(input, repeats, dim) -> output
 // ---------------------------------------------------------------------------
 
-pub fn repeat_interleave(input: &BorrowedTensor, repeats: &BorrowedTensor, dim: isize) -> PyResult<OwnedTensor> {
-    let dim = if dim < 0 { (input.shape.len() as isize + dim) as usize } else { dim as usize };
+pub fn repeat_interleave(
+    input: &BorrowedTensor,
+    repeats: &BorrowedTensor,
+    dim: isize,
+) -> PyResult<OwnedTensor> {
+    let dim = if dim < 0 {
+        (input.shape.len() as isize + dim) as usize
+    } else {
+        dim as usize
+    };
     let rep_data = unsafe { ts::<i64>(repeats) };
     let rep_n = elem_count(&repeats.shape);
     let dim_size = input.shape[dim] as usize;
@@ -407,7 +556,9 @@ pub fn repeat_interleave(input: &BorrowedTensor, repeats: &BorrowedTensor, dim: 
     let total: usize = if rep_n == 1 {
         dim_size * (rep_data[0] as usize)
     } else {
-        (0..dim_size).map(|i| rep_data[i.min(rep_n - 1)] as usize).sum()
+        (0..dim_size)
+            .map(|i| rep_data[i.min(rep_n - 1)] as usize)
+            .sum()
     };
 
     let mut out_shape = input.shape.clone();
@@ -421,11 +572,21 @@ pub fn repeat_interleave(input: &BorrowedTensor, repeats: &BorrowedTensor, dim: 
             let in_d = unsafe { ts::<f32>(input) };
             let out_d = unsafe { tms::<f32>(&mut out) };
             let _rank = input.shape.len();
-            let inner: usize = input.shape.iter().skip(dim + 1).map(|&d| d.max(0) as usize).product::<usize>().max(1);
+            let inner: usize = input
+                .shape
+                .iter()
+                .skip(dim + 1)
+                .map(|&d| d.max(0) as usize)
+                .product::<usize>()
+                .max(1);
 
             let mut out_offset = 0usize;
             for d in 0..dim_size {
-                let rep = if rep_n == 1 { rep_data[0] as usize } else { rep_data[d.min(rep_n - 1)] as usize };
+                let rep = if rep_n == 1 {
+                    rep_data[0] as usize
+                } else {
+                    rep_data[d.min(rep_n - 1)] as usize
+                };
                 for _r in 0..rep {
                     for i in 0..inner {
                         let in_flat = d * inner + i;
@@ -441,11 +602,21 @@ pub fn repeat_interleave(input: &BorrowedTensor, repeats: &BorrowedTensor, dim: 
             let in_d = unsafe { ts::<f64>(input) };
             let out_d = unsafe { tms::<f64>(&mut out) };
             let _rank = input.shape.len();
-            let inner: usize = input.shape.iter().skip(dim + 1).map(|&d| d.max(0) as usize).product::<usize>().max(1);
+            let inner: usize = input
+                .shape
+                .iter()
+                .skip(dim + 1)
+                .map(|&d| d.max(0) as usize)
+                .product::<usize>()
+                .max(1);
 
             let mut out_offset = 0usize;
             for d in 0..dim_size {
-                let rep = if rep_n == 1 { rep_data[0] as usize } else { rep_data[d.min(rep_n - 1)] as usize };
+                let rep = if rep_n == 1 {
+                    rep_data[0] as usize
+                } else {
+                    rep_data[d.min(rep_n - 1)] as usize
+                };
                 for _r in 0..rep {
                     for i in 0..inner {
                         let in_flat = d * inner + i;
@@ -474,7 +645,11 @@ pub fn repeat(input: &BorrowedTensor, repeats: &[i64]) -> PyResult<OwnedTensor> 
     // Compute output shape
     let mut out_shape = vec![0i64; rep_len.max(rank)];
     for i in 0..out_shape.len() {
-        let in_dim = if i >= rep_len - rank { in_shape[i - (rep_len - rank)] } else { 1 };
+        let in_dim = if i >= rep_len - rank {
+            in_shape[i - (rep_len - rank)]
+        } else {
+            1
+        };
         let rep = repeats[i];
         out_shape[i] = in_dim * rep;
     }
@@ -529,7 +704,9 @@ pub fn repeat(input: &BorrowedTensor, repeats: &[i64]) -> PyResult<OwnedTensor> 
                         in_idx += in_coord * in_strides[d - (out_rank - rank)] as usize;
                     }
                 }
-                if in_idx < in_n { out_d[o_idx] = in_d[in_idx]; }
+                if in_idx < in_n {
+                    out_d[o_idx] = in_d[in_idx];
+                }
             }
         }
         _ => return Err(unsupported("repeat: only f32/f64")),
@@ -553,7 +730,11 @@ pub fn prelu(input: &BorrowedTensor, weight: &BorrowedTensor) -> PyResult<OwnedT
             let w_n = w_d.len();
             for i in 0..n {
                 let wi = if w_n == 1 { 0 } else { i % w_n };
-                out_d[i] = if in_d[i] > 0.0 { in_d[i] } else { in_d[i] * w_d[wi] };
+                out_d[i] = if in_d[i] > 0.0 {
+                    in_d[i]
+                } else {
+                    in_d[i] * w_d[wi]
+                };
             }
         }
         DType::F64 => {
@@ -563,7 +744,11 @@ pub fn prelu(input: &BorrowedTensor, weight: &BorrowedTensor) -> PyResult<OwnedT
             let w_n = w_d.len();
             for i in 0..n {
                 let wi = if w_n == 1 { 0 } else { i % w_n };
-                out_d[i] = if in_d[i] > 0.0 { in_d[i] } else { in_d[i] * w_d[wi] };
+                out_d[i] = if in_d[i] > 0.0 {
+                    in_d[i]
+                } else {
+                    in_d[i] * w_d[wi]
+                };
             }
         }
         _ => return Err(unsupported("prelu: only f32/f64")),
@@ -575,7 +760,11 @@ pub fn prelu(input: &BorrowedTensor, weight: &BorrowedTensor) -> PyResult<OwnedT
 // clamp_tensor(input, min_tensor, max_tensor) -> output
 // ---------------------------------------------------------------------------
 
-pub fn clamp_tensor(input: &BorrowedTensor, min_t: &BorrowedTensor, max_t: &BorrowedTensor) -> PyResult<OwnedTensor> {
+pub fn clamp_tensor(
+    input: &BorrowedTensor,
+    min_t: &BorrowedTensor,
+    max_t: &BorrowedTensor,
+) -> PyResult<OwnedTensor> {
     let n = elem_count(&input.shape);
     let mut out = OwnedTensor::new(input.dtype, input.shape.clone());
     let min_n = elem_count(&min_t.shape);
@@ -593,7 +782,13 @@ pub fn clamp_tensor(input: &BorrowedTensor, min_t: &BorrowedTensor, max_t: &Borr
                 let v = in_d[i];
                 let lo = min_d[mi];
                 let hi = max_d[xi];
-                out_d[i] = if v < lo { lo } else if v > hi { hi } else { v };
+                out_d[i] = if v < lo {
+                    lo
+                } else if v > hi {
+                    hi
+                } else {
+                    v
+                };
             }
         }
         DType::F64 => {
@@ -607,7 +802,13 @@ pub fn clamp_tensor(input: &BorrowedTensor, min_t: &BorrowedTensor, max_t: &Borr
                 let v = in_d[i];
                 let lo = min_d[mi];
                 let hi = max_d[xi];
-                out_d[i] = if v < lo { lo } else if v > hi { hi } else { v };
+                out_d[i] = if v < lo {
+                    lo
+                } else if v > hi {
+                    hi
+                } else {
+                    v
+                };
             }
         }
         _ => return Err(unsupported("clamp_tensor: only f32/f64")),
@@ -656,11 +857,26 @@ pub fn nonzero(input: &BorrowedTensor) -> PyResult<OwnedTensor> {
 
     for flat in 0..n {
         let is_nonzero = match input.dtype {
-            DType::F32 => { let d = unsafe { ts::<f32>(input) }; d[flat] != 0.0 }
-            DType::F64 => { let d = unsafe { ts::<f64>(input) }; d[flat] != 0.0 }
-            DType::I64 => { let d = unsafe { ts::<i64>(input) }; d[flat] != 0 }
-            DType::I32 => { let d = unsafe { ts::<i32>(input) }; d[flat] != 0 }
-            DType::Bool => { let d = unsafe { ts::<u8>(input) }; d[flat] != 0 }
+            DType::F32 => {
+                let d = unsafe { ts::<f32>(input) };
+                d[flat] != 0.0
+            }
+            DType::F64 => {
+                let d = unsafe { ts::<f64>(input) };
+                d[flat] != 0.0
+            }
+            DType::I64 => {
+                let d = unsafe { ts::<i64>(input) };
+                d[flat] != 0
+            }
+            DType::I32 => {
+                let d = unsafe { ts::<i32>(input) };
+                d[flat] != 0
+            }
+            DType::Bool => {
+                let d = unsafe { ts::<u8>(input) };
+                d[flat] != 0
+            }
         };
         if is_nonzero {
             // Decompose flat index into coords
@@ -686,13 +902,18 @@ pub fn einsum(equation: &str, tensors: &[&BorrowedTensor]) -> PyResult<OwnedTens
     // Parse "ij,jk->ik" style equations (2-operand only for now)
     let parts: Vec<&str> = equation.split("->").collect();
     if parts.len() != 2 {
-        return Err(unsupported(&format!("einsum: complex equation '{}' not supported", equation)));
+        return Err(unsupported(&format!(
+            "einsum: complex equation '{}' not supported",
+            equation
+        )));
     }
     let inputs: Vec<&str> = parts[0].split(',').map(|s| s.trim()).collect();
     let output: &str = parts[1].trim();
 
     if inputs.len() != tensors.len() {
-        return Err(unsupported("einsum: number of operands doesn't match equation"));
+        return Err(unsupported(
+            "einsum: number of operands doesn't match equation",
+        ));
     }
 
     if inputs.len() == 2 && tensors.len() == 2 {
@@ -725,17 +946,27 @@ fn einsum_1operand(input_eq: &str, output_eq: &str, a: &BorrowedTensor) -> PyRes
         }
         return Ok(out);
     }
-    Err(unsupported(&format!("einsum: equation '{}' not supported", format!("{}->{}", input_eq, output_eq))))
+    Err(unsupported(&format!(
+        "einsum: equation '{}' not supported",
+        format!("{}->{}", input_eq, output_eq)
+    )))
 }
 
-fn einsum_2operand(a_eq: &str, b_eq: &str, output_eq: &str, a: &BorrowedTensor, b: &BorrowedTensor) -> PyResult<OwnedTensor> {
+fn einsum_2operand(
+    a_eq: &str,
+    b_eq: &str,
+    output_eq: &str,
+    a: &BorrowedTensor,
+    b: &BorrowedTensor,
+) -> PyResult<OwnedTensor> {
     // Support "ij,jk->ik" (matmul-like) and "ij,jk->ijk" (outer product-like)
     let a_chars: Vec<char> = a_eq.chars().collect();
     let b_chars: Vec<char> = b_eq.chars().collect();
     let o_chars: Vec<char> = output_eq.chars().collect();
 
     // Find contracted indices (in both inputs but not in output)
-    let contracted: Vec<char> = a_chars.iter()
+    let contracted: Vec<char> = a_chars
+        .iter()
         .filter(|c| b_chars.contains(c) && !o_chars.contains(*c))
         .copied()
         .collect();
@@ -781,5 +1012,8 @@ fn einsum_2operand(a_eq: &str, b_eq: &str, output_eq: &str, a: &BorrowedTensor, 
         return Ok(out);
     }
 
-    Err(unsupported(&format!("einsum: equation '{}' not supported", format!("{}{},{}->{}", a_eq, b_eq, "", output_eq))))
+    Err(unsupported(&format!(
+        "einsum: equation '{}' not supported",
+        format!("{}{},{}->{}", a_eq, b_eq, "", output_eq)
+    )))
 }

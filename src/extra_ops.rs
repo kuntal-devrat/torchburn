@@ -3,7 +3,9 @@
 //! This module is intentionally `#[allow(dead_code)]` heavy: many ops are
 //! thin wrappers around `math_ops::unary` but kept separate for clarity.
 
-use crate::dlpack::{BorrowedTensor, DType, OwnedTensor, contiguous_strides, elem_count, unsupported};
+use crate::dlpack::{
+    contiguous_strides, elem_count, unsupported, BorrowedTensor, DType, OwnedTensor,
+};
 use pyo3::prelude::*;
 
 unsafe fn typed_slice<T>(t: &BorrowedTensor) -> &[T] {
@@ -28,16 +30,20 @@ macro_rules! unary_op {
                     // but we keep the structure for future wide::exp etc.
                     if a.strides == contiguous_strides(&a.shape) {
                         use rayon::prelude::*;
-                        dst.par_chunks_mut(PAR_CHUNK).enumerate().for_each(|(ci, chunk)| {
-                            let s = ci * PAR_CHUNK;
-                            for (j, o) in chunk.iter_mut().enumerate() {
-                                *o = $f32_expr(src[s + j]);
-                            }
-                        });
+                        dst.par_chunks_mut(PAR_CHUNK)
+                            .enumerate()
+                            .for_each(|(ci, chunk)| {
+                                let s = ci * PAR_CHUNK;
+                                for (j, o) in chunk.iter_mut().enumerate() {
+                                    *o = $f32_expr(src[s + j]);
+                                }
+                            });
                     } else {
                         // strided fallback
                         let n = elem_count(&a.shape);
-                        for i in 0..n { dst[i] = $f32_expr(src[i]); }
+                        for i in 0..n {
+                            dst[i] = $f32_expr(src[i]);
+                        }
                     }
                 }
                 DType::F64 => {
@@ -45,18 +51,27 @@ macro_rules! unary_op {
                     let dst = unsafe { typed_mut_slice::<f64>(&mut out) };
                     if a.strides == contiguous_strides(&a.shape) {
                         use rayon::prelude::*;
-                        dst.par_chunks_mut(PAR_CHUNK).enumerate().for_each(|(ci, chunk)| {
-                            let s = ci * PAR_CHUNK;
-                            for (j, o) in chunk.iter_mut().enumerate() {
-                                *o = $f64_expr(src[s + j]);
-                            }
-                        });
+                        dst.par_chunks_mut(PAR_CHUNK)
+                            .enumerate()
+                            .for_each(|(ci, chunk)| {
+                                let s = ci * PAR_CHUNK;
+                                for (j, o) in chunk.iter_mut().enumerate() {
+                                    *o = $f64_expr(src[s + j]);
+                                }
+                            });
                     } else {
                         let n = elem_count(&a.shape);
-                        for i in 0..n { dst[i] = $f64_expr(src[i]); }
+                        for i in 0..n {
+                            dst[i] = $f64_expr(src[i]);
+                        }
                     }
                 }
-                _ => return Err(unsupported(concat!(stringify!($name), " only supports f32/f64"))),
+                _ => {
+                    return Err(unsupported(concat!(
+                        stringify!($name),
+                        " only supports f32/f64"
+                    )))
+                }
             }
             Ok(out)
         }
@@ -71,8 +86,14 @@ unary_op!(cosh, |x: f32| x.cosh(), |x: f64| x.cosh());
 unary_op!(asinh, |x: f32| x.asinh(), |x: f64| x.asinh());
 unary_op!(acosh, |x: f32| x.acosh(), |x: f64| x.acosh());
 unary_op!(atanh, |x: f32| x.atanh(), |x: f64| x.atanh());
-unary_op!(erf, |x: f32| libm::erf(x as f64) as f32, |x: f64| libm::erf(x));
-unary_op!(erfc, |x: f32| libm::erfc(x as f64) as f32, |x: f64| libm::erfc(x));
+unary_op!(
+    erf,
+    |x: f32| libm::erf(x as f64) as f32,
+    |x: f64| libm::erf(x)
+);
+unary_op!(erfc, |x: f32| libm::erfc(x as f64) as f32, |x: f64| {
+    libm::erfc(x)
+});
 unary_op!(expm1, |x: f32| x.exp_m1(), |x: f64| x.exp_m1());
 unary_op!(log1p, |x: f32| x.ln_1p(), |x: f64| x.ln_1p());
 unary_op!(log2, |x: f32| x.log2(), |x: f64| x.log2());
@@ -87,13 +108,17 @@ pub fn atan2(a: &BorrowedTensor, b: &BorrowedTensor) -> PyResult<OwnedTensor> {
             let ad = unsafe { typed_slice::<f32>(a) };
             let bd = unsafe { typed_slice::<f32>(b) };
             let od = unsafe { typed_mut_slice::<f32>(&mut out) };
-            for i in 0..od.len() { od[i] = ad[i % ad.len()].atan2(bd[i % bd.len()]); }
+            for i in 0..od.len() {
+                od[i] = ad[i % ad.len()].atan2(bd[i % bd.len()]);
+            }
         }
         DType::F64 => {
             let ad = unsafe { typed_slice::<f64>(a) };
             let bd = unsafe { typed_slice::<f64>(b) };
             let od = unsafe { typed_mut_slice::<f64>(&mut out) };
-            for i in 0..od.len() { od[i] = ad[i % ad.len()].atan2(bd[i % bd.len()]); }
+            for i in 0..od.len() {
+                od[i] = ad[i % ad.len()].atan2(bd[i % bd.len()]);
+            }
         }
         _ => return Err(unsupported("atan2 only supports f32/f64")),
     }
@@ -107,13 +132,17 @@ pub fn hypot(a: &BorrowedTensor, b: &BorrowedTensor) -> PyResult<OwnedTensor> {
             let ad = unsafe { typed_slice::<f32>(a) };
             let bd = unsafe { typed_slice::<f32>(b) };
             let od = unsafe { typed_mut_slice::<f32>(&mut out) };
-            for i in 0..od.len() { od[i] = ad[i % ad.len()].hypot(bd[i % bd.len()]); }
+            for i in 0..od.len() {
+                od[i] = ad[i % ad.len()].hypot(bd[i % bd.len()]);
+            }
         }
         DType::F64 => {
             let ad = unsafe { typed_slice::<f64>(a) };
             let bd = unsafe { typed_slice::<f64>(b) };
             let od = unsafe { typed_mut_slice::<f64>(&mut out) };
-            for i in 0..od.len() { od[i] = ad[i % ad.len()].hypot(bd[i % bd.len()]); }
+            for i in 0..od.len() {
+                od[i] = ad[i % ad.len()].hypot(bd[i % bd.len()]);
+            }
         }
         _ => return Err(unsupported("hypot only supports f32/f64")),
     }
@@ -127,13 +156,17 @@ pub fn fmod(a: &BorrowedTensor, b: &BorrowedTensor) -> PyResult<OwnedTensor> {
             let ad = unsafe { typed_slice::<f32>(a) };
             let bd = unsafe { typed_slice::<f32>(b) };
             let od = unsafe { typed_mut_slice::<f32>(&mut out) };
-            for i in 0..od.len() { od[i] = ad[i % ad.len()] % bd[i % bd.len()]; }
+            for i in 0..od.len() {
+                od[i] = ad[i % ad.len()] % bd[i % bd.len()];
+            }
         }
         DType::F64 => {
             let ad = unsafe { typed_slice::<f64>(a) };
             let bd = unsafe { typed_slice::<f64>(b) };
             let od = unsafe { typed_mut_slice::<f64>(&mut out) };
-            for i in 0..od.len() { od[i] = ad[i % ad.len()] % bd[i % bd.len()]; }
+            for i in 0..od.len() {
+                od[i] = ad[i % ad.len()] % bd[i % bd.len()];
+            }
         }
         _ => return Err(unsupported("fmod only supports f32/f64")),
     }
@@ -176,13 +209,17 @@ pub fn copysign(a: &BorrowedTensor, b: &BorrowedTensor) -> PyResult<OwnedTensor>
             let ad = unsafe { typed_slice::<f32>(a) };
             let bd = unsafe { typed_slice::<f32>(b) };
             let od = unsafe { typed_mut_slice::<f32>(&mut out) };
-            for i in 0..od.len() { od[i] = ad[i % ad.len()].copysign(bd[i % bd.len()]); }
+            for i in 0..od.len() {
+                od[i] = ad[i % ad.len()].copysign(bd[i % bd.len()]);
+            }
         }
         DType::F64 => {
             let ad = unsafe { typed_slice::<f64>(a) };
             let bd = unsafe { typed_slice::<f64>(b) };
             let od = unsafe { typed_mut_slice::<f64>(&mut out) };
-            for i in 0..od.len() { od[i] = ad[i % ad.len()].copysign(bd[i % bd.len()]); }
+            for i in 0..od.len() {
+                od[i] = ad[i % ad.len()].copysign(bd[i % bd.len()]);
+            }
         }
         _ => return Err(unsupported("copysign only supports f32/f64")),
     }
@@ -197,13 +234,17 @@ pub fn lerp(a: &BorrowedTensor, b: &BorrowedTensor, w: f64) -> PyResult<OwnedTen
             let bd = unsafe { typed_slice::<f32>(b) };
             let od = unsafe { typed_mut_slice::<f32>(&mut out) };
             let wf = w as f32;
-            for i in 0..od.len() { od[i] = ad[i % ad.len()] + wf * (bd[i % bd.len()] - ad[i % ad.len()]); }
+            for i in 0..od.len() {
+                od[i] = ad[i % ad.len()] + wf * (bd[i % bd.len()] - ad[i % ad.len()]);
+            }
         }
         DType::F64 => {
             let ad = unsafe { typed_slice::<f64>(a) };
             let bd = unsafe { typed_slice::<f64>(b) };
             let od = unsafe { typed_mut_slice::<f64>(&mut out) };
-            for i in 0..od.len() { od[i] = ad[i % ad.len()] + w * (bd[i % bd.len()] - ad[i % ad.len()]); }
+            for i in 0..od.len() {
+                od[i] = ad[i % ad.len()] + w * (bd[i % bd.len()] - ad[i % ad.len()]);
+            }
         }
         _ => return Err(unsupported("lerp only supports f32/f64")),
     }
@@ -217,7 +258,9 @@ pub fn bitwise_and(a: &BorrowedTensor, b: &BorrowedTensor) -> PyResult<OwnedTens
     let ad = unsafe { typed_slice::<i64>(a) };
     let bd = unsafe { typed_slice::<i64>(b) };
     let od = unsafe { typed_mut_slice::<i64>(&mut out) };
-    for i in 0..od.len() { od[i] = ad[i % ad.len()] & bd[i % bd.len()]; }
+    for i in 0..od.len() {
+        od[i] = ad[i % ad.len()] & bd[i % bd.len()];
+    }
     Ok(out)
 }
 pub fn bitwise_or(a: &BorrowedTensor, b: &BorrowedTensor) -> PyResult<OwnedTensor> {
@@ -226,7 +269,9 @@ pub fn bitwise_or(a: &BorrowedTensor, b: &BorrowedTensor) -> PyResult<OwnedTenso
     let ad = unsafe { typed_slice::<i64>(a) };
     let bd = unsafe { typed_slice::<i64>(b) };
     let od = unsafe { typed_mut_slice::<i64>(&mut out) };
-    for i in 0..od.len() { od[i] = ad[i % ad.len()] | bd[i % bd.len()]; }
+    for i in 0..od.len() {
+        od[i] = ad[i % ad.len()] | bd[i % bd.len()];
+    }
     Ok(out)
 }
 pub fn bitwise_xor(a: &BorrowedTensor, b: &BorrowedTensor) -> PyResult<OwnedTensor> {
@@ -235,14 +280,18 @@ pub fn bitwise_xor(a: &BorrowedTensor, b: &BorrowedTensor) -> PyResult<OwnedTens
     let ad = unsafe { typed_slice::<i64>(a) };
     let bd = unsafe { typed_slice::<i64>(b) };
     let od = unsafe { typed_mut_slice::<i64>(&mut out) };
-    for i in 0..od.len() { od[i] = ad[i % ad.len()] ^ bd[i % bd.len()]; }
+    for i in 0..od.len() {
+        od[i] = ad[i % ad.len()] ^ bd[i % bd.len()];
+    }
     Ok(out)
 }
 pub fn bitwise_not(a: &BorrowedTensor) -> PyResult<OwnedTensor> {
     let mut out = OwnedTensor::new(DType::I64, a.shape.clone());
     let ad = unsafe { typed_slice::<i64>(a) };
     let od = unsafe { typed_mut_slice::<i64>(&mut out) };
-    for i in 0..od.len() { od[i] = !ad[i % ad.len()]; }
+    for i in 0..od.len() {
+        od[i] = !ad[i % ad.len()];
+    }
     Ok(out)
 }
 
@@ -253,11 +302,15 @@ pub fn isfinite(a: &BorrowedTensor) -> PyResult<OwnedTensor> {
     match a.dtype {
         DType::F32 => {
             let ad = unsafe { typed_slice::<f32>(a) };
-            for i in 0..od.len() { od[i] = if ad[i % ad.len()].is_finite() {1} else {0}; }
+            for i in 0..od.len() {
+                od[i] = if ad[i % ad.len()].is_finite() { 1 } else { 0 };
+            }
         }
         DType::F64 => {
             let ad = unsafe { typed_slice::<f64>(a) };
-            for i in 0..od.len() { od[i] = if ad[i % ad.len()].is_finite() {1} else {0}; }
+            for i in 0..od.len() {
+                od[i] = if ad[i % ad.len()].is_finite() { 1 } else { 0 };
+            }
         }
         _ => return Err(unsupported("isfinite only supports f32/f64")),
     }
@@ -269,11 +322,15 @@ pub fn isinf(a: &BorrowedTensor) -> PyResult<OwnedTensor> {
     match a.dtype {
         DType::F32 => {
             let ad = unsafe { typed_slice::<f32>(a) };
-            for i in 0..od.len() { od[i] = if ad[i % ad.len()].is_infinite() {1} else {0}; }
+            for i in 0..od.len() {
+                od[i] = if ad[i % ad.len()].is_infinite() { 1 } else { 0 };
+            }
         }
         DType::F64 => {
             let ad = unsafe { typed_slice::<f64>(a) };
-            for i in 0..od.len() { od[i] = if ad[i % ad.len()].is_infinite() {1} else {0}; }
+            for i in 0..od.len() {
+                od[i] = if ad[i % ad.len()].is_infinite() { 1 } else { 0 };
+            }
         }
         _ => return Err(unsupported("isinf only supports f32/f64")),
     }
@@ -285,11 +342,15 @@ pub fn isnan(a: &BorrowedTensor) -> PyResult<OwnedTensor> {
     match a.dtype {
         DType::F32 => {
             let ad = unsafe { typed_slice::<f32>(a) };
-            for i in 0..od.len() { od[i] = if ad[i % ad.len()].is_nan() {1} else {0}; }
+            for i in 0..od.len() {
+                od[i] = if ad[i % ad.len()].is_nan() { 1 } else { 0 };
+            }
         }
         DType::F64 => {
             let ad = unsafe { typed_slice::<f64>(a) };
-            for i in 0..od.len() { od[i] = if ad[i % ad.len()].is_nan() {1} else {0}; }
+            for i in 0..od.len() {
+                od[i] = if ad[i % ad.len()].is_nan() { 1 } else { 0 };
+            }
         }
         _ => return Err(unsupported("isnan only supports f32/f64")),
     }
@@ -304,12 +365,12 @@ pub fn all(a: &BorrowedTensor) -> PyResult<OwnedTensor> {
         DType::F32 => {
             let ad = unsafe { typed_slice::<f32>(a) };
             let n = elem_count(&a.shape);
-            od[0] = if (0..n).all(|i| ad[i] != 0.0) {1} else {0};
+            od[0] = if (0..n).all(|i| ad[i] != 0.0) { 1 } else { 0 };
         }
         DType::Bool => {
             let ad = unsafe { typed_slice::<u8>(a) };
             let n = elem_count(&a.shape);
-            od[0] = if (0..n).all(|i| ad[i] != 0) {1} else {0};
+            od[0] = if (0..n).all(|i| ad[i] != 0) { 1 } else { 0 };
         }
         _ => return Err(unsupported("all only supports f32/bool")),
     }
@@ -322,12 +383,12 @@ pub fn any(a: &BorrowedTensor) -> PyResult<OwnedTensor> {
         DType::F32 => {
             let ad = unsafe { typed_slice::<f32>(a) };
             let n = elem_count(&a.shape);
-            od[0] = if (0..n).any(|i| ad[i] != 0.0) {1} else {0};
+            od[0] = if (0..n).any(|i| ad[i] != 0.0) { 1 } else { 0 };
         }
         DType::Bool => {
             let ad = unsafe { typed_slice::<u8>(a) };
             let n = elem_count(&a.shape);
-            od[0] = if (0..n).any(|i| ad[i] != 0) {1} else {0};
+            od[0] = if (0..n).any(|i| ad[i] != 0) { 1 } else { 0 };
         }
         _ => return Err(unsupported("any only supports f32/bool")),
     }
@@ -421,7 +482,12 @@ pub fn nanmean(a: &BorrowedTensor) -> PyResult<OwnedTensor> {
             let n = elem_count(&a.shape);
             let mut sum = 0.0f32;
             let mut cnt = 0usize;
-            for &x in &ad[..n] { if !x.is_nan() { sum += x; cnt += 1; } }
+            for &x in &ad[..n] {
+                if !x.is_nan() {
+                    sum += x;
+                    cnt += 1;
+                }
+            }
             od[0] = if cnt > 0 { sum / cnt as f32 } else { f32::NAN };
         }
         DType::F64 => {
@@ -430,7 +496,12 @@ pub fn nanmean(a: &BorrowedTensor) -> PyResult<OwnedTensor> {
             let n = elem_count(&a.shape);
             let mut sum = 0.0f64;
             let mut cnt = 0usize;
-            for &x in &ad[..n] { if !x.is_nan() { sum += x; cnt += 1; } }
+            for &x in &ad[..n] {
+                if !x.is_nan() {
+                    sum += x;
+                    cnt += 1;
+                }
+            }
             od[0] = if cnt > 0 { sum / cnt as f64 } else { f64::NAN };
         }
         _ => return Err(unsupported("nanmean only supports f32/f64")),
@@ -458,7 +529,7 @@ pub fn tile(a: &BorrowedTensor, repeats: &[i64]) -> PyResult<OwnedTensor> {
             let mut idx = 0;
             let total = elem_count(&out_shape);
             while idx < total {
-                od[idx..idx+n].copy_from_slice(&ad[..n]);
+                od[idx..idx + n].copy_from_slice(&ad[..n]);
                 idx += n;
             }
         }
@@ -469,7 +540,7 @@ pub fn tile(a: &BorrowedTensor, repeats: &[i64]) -> PyResult<OwnedTensor> {
             let mut idx = 0;
             let total = elem_count(&out_shape);
             while idx < total {
-                od[idx..idx+n].copy_from_slice(&ad[..n]);
+                od[idx..idx + n].copy_from_slice(&ad[..n]);
                 idx += n;
             }
         }
@@ -479,8 +550,14 @@ pub fn tile(a: &BorrowedTensor, repeats: &[i64]) -> PyResult<OwnedTensor> {
 }
 pub fn roll(a: &BorrowedTensor, shift: i64, dim: isize) -> PyResult<OwnedTensor> {
     let rank = a.shape.len();
-    let d = if dim < 0 { (rank as isize + dim) as usize } else { dim as usize };
-    if d >= rank { return Err(unsupported("roll dim out of range")); }
+    let d = if dim < 0 {
+        (rank as isize + dim) as usize
+    } else {
+        dim as usize
+    };
+    if d >= rank {
+        return Err(unsupported("roll dim out of range"));
+    }
     let dim_size = a.shape[d] as usize;
     let shift = ((shift % dim_size as i64) + dim_size as i64) % dim_size as i64;
     let mut out = OwnedTensor::new(a.dtype, a.shape.clone());
@@ -498,8 +575,16 @@ pub fn roll(a: &BorrowedTensor, shift: i64, dim: isize) -> PyResult<OwnedTensor>
             } else {
                 od.copy_from_slice(ad);
                 // ND roll via two memmoves per outer/inner (simplified)
-                let inner: usize = a.shape[d+1..].iter().map(|&s| s.max(1) as usize).product::<usize>().max(1);
-                let outer: usize = a.shape[..d].iter().map(|&s| s.max(1) as usize).product::<usize>().max(1);
+                let inner: usize = a.shape[d + 1..]
+                    .iter()
+                    .map(|&s| s.max(1) as usize)
+                    .product::<usize>()
+                    .max(1);
+                let outer: usize = a.shape[..d]
+                    .iter()
+                    .map(|&s| s.max(1) as usize)
+                    .product::<usize>()
+                    .max(1);
                 let total = elem_count(&a.shape);
                 let mut tmp = vec![0.0f32; total];
                 tmp.copy_from_slice(ad);
@@ -520,14 +605,20 @@ pub fn roll(a: &BorrowedTensor, shift: i64, dim: isize) -> PyResult<OwnedTensor>
     Ok(out)
 }
 pub fn pixel_shuffle(a: &BorrowedTensor, upscale: i64) -> PyResult<OwnedTensor> {
-    if a.shape.len() != 4 { return Err(unsupported("pixel_shuffle needs 4D")); }
+    if a.shape.len() != 4 {
+        return Err(unsupported("pixel_shuffle needs 4D"));
+    }
     let b = a.shape[0];
     let c = a.shape[1];
     let h = a.shape[2];
     let w = a.shape[3];
     let r = upscale;
-    if c % (r*r) != 0 { return Err(unsupported("pixel_shuffle channels must be divisible by r^2")); }
-    let oc = c / (r*r);
+    if c % (r * r) != 0 {
+        return Err(unsupported(
+            "pixel_shuffle channels must be divisible by r^2",
+        ));
+    }
+    let oc = c / (r * r);
     let oh = h * r;
     let ow = w * r;
     let mut out = OwnedTensor::new(a.dtype, vec![b, oc, oh, ow]);
@@ -542,13 +633,17 @@ pub fn pixel_shuffle(a: &BorrowedTensor, upscale: i64) -> PyResult<OwnedTensor> 
                         for wi in 0..w as usize {
                             for rh in 0..r as usize {
                                 for rw in 0..r as usize {
-                                    let ic = ci * (r*r) as usize + rh * r as usize + rw;
+                                    let ic = ci * (r * r) as usize + rh * r as usize + rw;
                                     let ih = hi;
                                     let iw = wi;
                                     let oh_ = hi * r as usize + rh;
                                     let ow_ = wi * r as usize + rw;
-                                    let src = ((bi * c as usize + ic) * h as usize + ih) * w as usize + iw;
-                                    let dst = ((bi * oc as usize + ci) * oh as usize + oh_) * ow as usize + ow_;
+                                    let src = ((bi * c as usize + ic) * h as usize + ih)
+                                        * w as usize
+                                        + iw;
+                                    let dst = ((bi * oc as usize + ci) * oh as usize + oh_)
+                                        * ow as usize
+                                        + ow_;
                                     od[dst] = ad[src];
                                 }
                             }
@@ -563,7 +658,9 @@ pub fn pixel_shuffle(a: &BorrowedTensor, upscale: i64) -> PyResult<OwnedTensor> 
 }
 pub fn instance_norm(a: &BorrowedTensor, eps: f64) -> PyResult<OwnedTensor> {
     // instance norm = per-sample per-channel normalize over H,W
-    if a.shape.len() != 4 { return Err(unsupported("instance_norm needs 4D (N,C,H,W)")); }
+    if a.shape.len() != 4 {
+        return Err(unsupported("instance_norm needs 4D (N,C,H,W)"));
+    }
     let n = a.shape[0] as usize;
     let c = a.shape[1] as usize;
     let hw: usize = (a.shape[2] * a.shape[3]) as usize;
@@ -575,11 +672,14 @@ pub fn instance_norm(a: &BorrowedTensor, eps: f64) -> PyResult<OwnedTensor> {
             for ni in 0..n {
                 for ci in 0..c {
                     let base = (ni * c + ci) * hw;
-                    let slice = &ad[base..base+hw];
+                    let slice = &ad[base..base + hw];
                     let mean: f32 = slice.iter().sum::<f32>() / hw as f32;
-                    let var: f32 = slice.iter().map(|x| (x - mean)*(x-mean)).sum::<f32>() / hw as f32;
+                    let var: f32 =
+                        slice.iter().map(|x| (x - mean) * (x - mean)).sum::<f32>() / hw as f32;
                     let inv = 1.0 / (var + eps as f32).sqrt();
-                    for i in 0..hw { od[base+i] = (slice[i] - mean) * inv; }
+                    for i in 0..hw {
+                        od[base + i] = (slice[i] - mean) * inv;
+                    }
                 }
             }
         }
@@ -591,7 +691,9 @@ pub fn instance_norm(a: &BorrowedTensor, eps: f64) -> PyResult<OwnedTensor> {
 // ── losses ──
 pub fn cross_entropy(a: &BorrowedTensor, b: &BorrowedTensor) -> PyResult<OwnedTensor> {
     // a = logits (N,C), b = target (N) i64
-    if a.shape.len() != 2 { return Err(unsupported("cross_entropy expects 2D logits")); }
+    if a.shape.len() != 2 {
+        return Err(unsupported("cross_entropy expects 2D logits"));
+    }
     let n = a.shape[0] as usize;
     let c = a.shape[1] as usize;
     let mut out = OwnedTensor::new(DType::F32, vec![n as i64]);
@@ -601,18 +703,26 @@ pub fn cross_entropy(a: &BorrowedTensor, b: &BorrowedTensor) -> PyResult<OwnedTe
     for i in 0..n {
         let base = i * c;
         let t = target[i] as usize;
-        if t >= c { return Err(unsupported("cross_entropy target out of range")); }
+        if t >= c {
+            return Err(unsupported("cross_entropy target out of range"));
+        }
         // log-softmax then pick
-        let maxv = logits[base..base+c].iter().fold(f32::NEG_INFINITY, |m, &x| m.max(x));
+        let maxv = logits[base..base + c]
+            .iter()
+            .fold(f32::NEG_INFINITY, |m, &x| m.max(x));
         let mut sum = 0.0f32;
-        for j in 0..c { sum += (logits[base+j] - maxv).exp(); }
+        for j in 0..c {
+            sum += (logits[base + j] - maxv).exp();
+        }
         let lse = maxv + sum.ln();
         od[i] = -(logits[base + t] - lse);
     }
     // mean reduction
     let mean = od.iter().sum::<f32>() / n as f32;
     let mut out2 = OwnedTensor::new(DType::F32, vec![]);
-    unsafe { typed_mut_slice::<f32>(&mut out2)[0] = mean; }
+    unsafe {
+        typed_mut_slice::<f32>(&mut out2)[0] = mean;
+    }
     Ok(out2)
 }
 pub fn huber_loss(a: &BorrowedTensor, b: &BorrowedTensor, delta: f64) -> PyResult<OwnedTensor> {
@@ -626,7 +736,11 @@ pub fn huber_loss(a: &BorrowedTensor, b: &BorrowedTensor, delta: f64) -> PyResul
             let mut sum = 0.0f32;
             for i in 0..n {
                 let d = (ad[i] - bd[i]).abs();
-                sum += if d <= delta as f32 { 0.5*d*d } else { delta as f32 * (d - 0.5*delta as f32) };
+                sum += if d <= delta as f32 {
+                    0.5 * d * d
+                } else {
+                    delta as f32 * (d - 0.5 * delta as f32)
+                };
             }
             od[0] = sum / n as f32;
         }
@@ -642,8 +756,11 @@ pub fn hardtanh(a: &BorrowedTensor, min: f64, max: f64) -> PyResult<OwnedTensor>
         DType::F32 => {
             let ad = unsafe { typed_slice::<f32>(a) };
             let od = unsafe { typed_mut_slice::<f32>(&mut out) };
-            let mn = min as f32; let mx = max as f32;
-            for i in 0..od.len() { od[i] = ad[i].max(mn).min(mx); }
+            let mn = min as f32;
+            let mx = max as f32;
+            for i in 0..od.len() {
+                od[i] = ad[i].max(mn).min(mx);
+            }
         }
         _ => return Err(unsupported("hardtanh only supports f32")),
     }
@@ -655,7 +772,9 @@ pub fn hardsigmoid(a: &BorrowedTensor) -> PyResult<OwnedTensor> {
         DType::F32 => {
             let ad = unsafe { typed_slice::<f32>(a) };
             let od = unsafe { typed_mut_slice::<f32>(&mut out) };
-            for i in 0..od.len() { od[i] = ((ad[i] + 3.0)/6.0).max(0.0).min(1.0); }
+            for i in 0..od.len() {
+                od[i] = ((ad[i] + 3.0) / 6.0).max(0.0).min(1.0);
+            }
         }
         _ => return Err(unsupported("hardsigmoid only supports f32")),
     }
@@ -663,8 +782,14 @@ pub fn hardsigmoid(a: &BorrowedTensor) -> PyResult<OwnedTensor> {
 }
 pub fn glu(a: &BorrowedTensor, dim: isize) -> PyResult<OwnedTensor> {
     let rank = a.shape.len();
-    let d = if dim < 0 { (rank as isize + dim) as usize } else { dim as usize };
-    if a.shape[d] % 2 != 0 { return Err(unsupported("glu dim must be even")); }
+    let d = if dim < 0 {
+        (rank as isize + dim) as usize
+    } else {
+        dim as usize
+    };
+    if a.shape[d] % 2 != 0 {
+        return Err(unsupported("glu dim must be even"));
+    }
     let mut out_shape = a.shape.clone();
     out_shape[d] /= 2;
     let mut out = OwnedTensor::new(a.dtype, out_shape.clone());
@@ -676,12 +801,14 @@ pub fn glu(a: &BorrowedTensor, dim: isize) -> PyResult<OwnedTensor> {
             // split last dim: first half * sigmoid(second half)
             for i in 0..n {
                 // For dim = -1 case, simple
-                let a_idx = if d == rank-1 { 
+                let a_idx = if d == rank - 1 {
                     let half = a.shape[d] as usize / 2;
                     let outer = i / half;
                     let inner = i % half;
                     outer * a.shape[d] as usize + inner
-                } else { i };
+                } else {
+                    i
+                };
                 let b_idx = a_idx + out_shape[d] as usize;
                 let av = ad[a_idx % ad.len()];
                 let bv = ad[b_idx % ad.len()];
@@ -699,12 +826,16 @@ pub fn trunc(a: &BorrowedTensor) -> PyResult<OwnedTensor> {
         DType::F32 => {
             let ad = unsafe { typed_slice::<f32>(a) };
             let od = unsafe { typed_mut_slice::<f32>(&mut out) };
-            for i in 0..od.len() { od[i] = ad[i].trunc(); }
+            for i in 0..od.len() {
+                od[i] = ad[i].trunc();
+            }
         }
         DType::F64 => {
             let ad = unsafe { typed_slice::<f64>(a) };
             let od = unsafe { typed_mut_slice::<f64>(&mut out) };
-            for i in 0..od.len() { od[i] = ad[i].trunc(); }
+            for i in 0..od.len() {
+                od[i] = ad[i].trunc();
+            }
         }
         _ => return Err(unsupported("trunc only supports f32/f64")),
     }
@@ -716,12 +847,16 @@ pub fn frac(a: &BorrowedTensor) -> PyResult<OwnedTensor> {
         DType::F32 => {
             let ad = unsafe { typed_slice::<f32>(a) };
             let od = unsafe { typed_mut_slice::<f32>(&mut out) };
-            for i in 0..od.len() { od[i] = ad[i].fract(); }
+            for i in 0..od.len() {
+                od[i] = ad[i].fract();
+            }
         }
         DType::F64 => {
             let ad = unsafe { typed_slice::<f64>(a) };
             let od = unsafe { typed_mut_slice::<f64>(&mut out) };
-            for i in 0..od.len() { od[i] = ad[i].fract(); }
+            for i in 0..od.len() {
+                od[i] = ad[i].fract();
+            }
         }
         _ => return Err(unsupported("frac only supports f32/f64")),
     }
@@ -733,12 +868,16 @@ pub fn square(a: &BorrowedTensor) -> PyResult<OwnedTensor> {
         DType::F32 => {
             let ad = unsafe { typed_slice::<f32>(a) };
             let od = unsafe { typed_mut_slice::<f32>(&mut out) };
-            for i in 0..od.len() { od[i] = ad[i]*ad[i]; }
+            for i in 0..od.len() {
+                od[i] = ad[i] * ad[i];
+            }
         }
         DType::F64 => {
             let ad = unsafe { typed_slice::<f64>(a) };
             let od = unsafe { typed_mut_slice::<f64>(&mut out) };
-            for i in 0..od.len() { od[i] = ad[i]*ad[i]; }
+            for i in 0..od.len() {
+                od[i] = ad[i] * ad[i];
+            }
         }
         _ => return Err(unsupported("square only supports f32/f64")),
     }
@@ -750,12 +889,16 @@ pub fn exp2(a: &BorrowedTensor) -> PyResult<OwnedTensor> {
         DType::F32 => {
             let ad = unsafe { typed_slice::<f32>(a) };
             let od = unsafe { typed_mut_slice::<f32>(&mut out) };
-            for i in 0..od.len() { od[i] = ad[i].exp2(); }
+            for i in 0..od.len() {
+                od[i] = ad[i].exp2();
+            }
         }
         DType::F64 => {
             let ad = unsafe { typed_slice::<f64>(a) };
             let od = unsafe { typed_mut_slice::<f64>(&mut out) };
-            for i in 0..od.len() { od[i] = ad[i].exp2(); }
+            for i in 0..od.len() {
+                od[i] = ad[i].exp2();
+            }
         }
         _ => return Err(unsupported("exp2 only supports f32/f64")),
     }
@@ -806,7 +949,9 @@ pub fn bucketize(a: &BorrowedTensor, boundaries: &BorrowedTensor) -> PyResult<Ow
     for i in 0..od.len() {
         let v = ad[i % ad.len()];
         let mut lo = 0;
-        while lo < nb && bd[lo] <= v { lo += 1; }
+        while lo < nb && bd[lo] <= v {
+            lo += 1;
+        }
         od[i] = lo as i64;
     }
     Ok(out)
@@ -818,11 +963,15 @@ pub fn histc(a: &BorrowedTensor, bins: usize, min: f64, max: f64) -> PyResult<Ow
     let ad = unsafe { typed_slice::<f32>(a) };
     let n = elem_count(&a.shape);
     let width = (max - min) / bins as f64;
-    if width == 0.0 { return Err(unsupported("histc width zero")); }
+    if width == 0.0 {
+        return Err(unsupported("histc width zero"));
+    }
     for &v in &ad[..n] {
         if v >= min as f32 && v <= max as f32 {
             let mut bin = ((v as f64 - min) / width).floor() as usize;
-            if bin >= bins { bin = bins - 1; }
+            if bin >= bins {
+                bin = bins - 1;
+            }
             od[bin] += 1.0;
         }
     }

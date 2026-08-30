@@ -2,7 +2,7 @@
 //!
 //! These are reduction + elementwise operations over the normalized dimensions.
 
-use crate::dlpack::{BorrowedTensor, DType, OwnedTensor, unsupported};
+use crate::dlpack::{unsupported, BorrowedTensor, DType, OwnedTensor};
 use pyo3::prelude::*;
 
 unsafe fn typed_slice<T>(t: &BorrowedTensor) -> &[T] {
@@ -24,7 +24,9 @@ pub fn layer_norm(
     eps: f64,
 ) -> PyResult<OwnedTensor> {
     if input.dtype != weight.dtype || input.dtype != bias.dtype {
-        return Err(unsupported("layer_norm: dtype mismatch between input, weight, bias"));
+        return Err(unsupported(
+            "layer_norm: dtype mismatch between input, weight, bias",
+        ));
     }
 
     let shape = &input.shape;
@@ -37,7 +39,10 @@ pub fn layer_norm(
         return Err(unsupported("layer_norm: input rank < weight rank"));
     }
 
-    let _batch_size: usize = shape[..rank - normalized_dims].iter().map(|&d| d.max(0) as usize).product();
+    let _batch_size: usize = shape[..rank - normalized_dims]
+        .iter()
+        .map(|&d| d.max(0) as usize)
+        .product();
 
     let mut out = OwnedTensor::new(input.dtype, input.shape.clone());
 
@@ -51,25 +56,28 @@ pub fn layer_norm(
             let norm_f = normalized_size as f32;
 
             use rayon::prelude::*;
-            out_data.par_chunks_mut(normalized_size).enumerate().for_each(|(b_idx, out_row)| {
-                let base = b_idx * normalized_size;
-                let row_in = &in_data[base..base + normalized_size];
-                let mut sum = 0.0f32;
-                for &v in row_in {
-                    sum += v;
-                }
-                let mean = sum / norm_f;
-                let mut var = 0.0f32;
-                for &v in row_in {
-                    let diff = v - mean;
-                    var += diff * diff;
-                }
-                var /= norm_f;
-                let inv_std = 1.0 / (var + eps_f32).sqrt();
-                for i in 0..normalized_size {
-                    out_row[i] = (row_in[i] - mean) * inv_std * w_data[i] + b_data[i];
-                }
-            });
+            out_data
+                .par_chunks_mut(normalized_size)
+                .enumerate()
+                .for_each(|(b_idx, out_row)| {
+                    let base = b_idx * normalized_size;
+                    let row_in = &in_data[base..base + normalized_size];
+                    let mut sum = 0.0f32;
+                    for &v in row_in {
+                        sum += v;
+                    }
+                    let mean = sum / norm_f;
+                    let mut var = 0.0f32;
+                    for &v in row_in {
+                        let diff = v - mean;
+                        var += diff * diff;
+                    }
+                    var /= norm_f;
+                    let inv_std = 1.0 / (var + eps_f32).sqrt();
+                    for i in 0..normalized_size {
+                        out_row[i] = (row_in[i] - mean) * inv_std * w_data[i] + b_data[i];
+                    }
+                });
         }
         DType::F64 => {
             let in_data = unsafe { typed_slice::<f64>(input) };
@@ -79,31 +87,33 @@ pub fn layer_norm(
             let norm_f = normalized_size as f64;
 
             use rayon::prelude::*;
-            out_data.par_chunks_mut(normalized_size).enumerate().for_each(|(b_idx, out_row)| {
-                let base = b_idx * normalized_size;
-                let row_in = &in_data[base..base + normalized_size];
-                let mut sum = 0.0f64;
-                for &v in row_in {
-                    sum += v;
-                }
-                let mean = sum / norm_f;
-                let mut var = 0.0f64;
-                for &v in row_in {
-                    let diff = v - mean;
-                    var += diff * diff;
-                }
-                var /= norm_f;
-                let inv_std = 1.0 / (var + eps).sqrt();
-                for i in 0..normalized_size {
-                    out_row[i] = (row_in[i] - mean) * inv_std * w_data[i] + b_data[i];
-                }
-            });
+            out_data
+                .par_chunks_mut(normalized_size)
+                .enumerate()
+                .for_each(|(b_idx, out_row)| {
+                    let base = b_idx * normalized_size;
+                    let row_in = &in_data[base..base + normalized_size];
+                    let mut sum = 0.0f64;
+                    for &v in row_in {
+                        sum += v;
+                    }
+                    let mean = sum / norm_f;
+                    let mut var = 0.0f64;
+                    for &v in row_in {
+                        let diff = v - mean;
+                        var += diff * diff;
+                    }
+                    var /= norm_f;
+                    let inv_std = 1.0 / (var + eps).sqrt();
+                    for i in 0..normalized_size {
+                        out_row[i] = (row_in[i] - mean) * inv_std * w_data[i] + b_data[i];
+                    }
+                });
         }
 
         DType::I64 | DType::I32 | DType::Bool => {
             return Err(unsupported("this kernel only supports f32/f64 tensors"));
         }
-
     }
     Ok(out)
 }
@@ -128,7 +138,9 @@ pub fn batch_norm(
     let shape = &input.shape;
     let rank = shape.len();
     if rank < 2 {
-        return Err(unsupported("batch_norm: input must be at least 2D (N, C, ...)"));
+        return Err(unsupported(
+            "batch_norm: input must be at least 2D (N, C, ...)",
+        ));
     }
 
     let n = shape[0] as usize; // batch size
@@ -238,7 +250,6 @@ pub fn batch_norm(
         DType::I64 | DType::I32 | DType::Bool => {
             return Err(unsupported("this kernel only supports f32/f64 tensors"));
         }
-
     }
     Ok(out)
 }
@@ -261,13 +272,18 @@ pub fn group_norm(
     let shape = &input.shape;
     let rank = shape.len();
     if rank < 3 {
-        return Err(unsupported("group_norm: input must be at least 3D (N, C, ...)"));
+        return Err(unsupported(
+            "group_norm: input must be at least 3D (N, C, ...)",
+        ));
     }
 
     let n = shape[0] as usize;
     let c = shape[1] as usize;
     if c % num_groups != 0 {
-        return Err(unsupported(&format!("group_norm: channels {} not divisible by groups {}", c, num_groups)));
+        return Err(unsupported(&format!(
+            "group_norm: channels {} not divisible by groups {}",
+            c, num_groups
+        )));
     }
 
     let channels_per_group = c / num_groups;
@@ -320,7 +336,9 @@ pub fn group_norm(
                 for g in 0..num_groups {
                     let base = batch * c * spatial_size + g * channels_per_group * spatial_size;
                     let mut mean = 0.0f64;
-                    for i in 0..group_size { mean += in_data[base + i]; }
+                    for i in 0..group_size {
+                        mean += in_data[base + i];
+                    }
                     mean /= group_size as f64;
                     let mut var = 0.0f64;
                     for i in 0..group_size {
@@ -341,7 +359,6 @@ pub fn group_norm(
         DType::I64 | DType::I32 | DType::Bool => {
             return Err(unsupported("this kernel only supports f32/f64 tensors"));
         }
-
     }
     Ok(out)
 }
@@ -350,7 +367,11 @@ pub fn group_norm(
 // RMS Normalization: x / sqrt(mean(x^2) + eps) * weight
 // ---------------------------------------------------------------------------
 
-pub fn rms_norm(input: &BorrowedTensor, weight: &BorrowedTensor, eps: f64) -> PyResult<OwnedTensor> {
+pub fn rms_norm(
+    input: &BorrowedTensor,
+    weight: &BorrowedTensor,
+    eps: f64,
+) -> PyResult<OwnedTensor> {
     if input.dtype != weight.dtype {
         return Err(unsupported("rms_norm: dtype mismatch"));
     }
@@ -406,7 +427,6 @@ pub fn rms_norm(input: &BorrowedTensor, weight: &BorrowedTensor, eps: f64) -> Py
         DType::I64 | DType::I32 | DType::Bool => {
             return Err(unsupported("this kernel only supports f32/f64 tensors"));
         }
-
     }
     Ok(out)
 }
