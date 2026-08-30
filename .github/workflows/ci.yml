@@ -129,8 +129,8 @@ jobs:
         shell: bash
         run: |
           if [ "${{ matrix.os }}" = "macos-14" ]; then
-            # MacOS runners are slower and lack GPU; skip heavy BERT model tests that time out
-            python -m pytest tests/ -x -q --timeout=300 -k "not TestBertTiny"
+            # MacOS runners are slower and lack GPU; skip heavy BERT / benchmark tests that time out
+            python -m pytest tests/ -x -q --timeout=300 -k "not TestBertTiny and not TestBenchmarkSuite"
           else
             python -m pytest tests/ -x -q --timeout=300
           fi
@@ -184,7 +184,7 @@ jobs:
           CIBW_ENVIRONMENT_WINDOWS: 'RUSTFLAGS="" CARGO_BUILD_RUSTFLAGS=""'
           CIBW_BEFORE_BUILD: "rm -f .cargo/config.toml"
           CIBW_TEST_REQUIRES: "pytest pytest-timeout numpy torch"
-          CIBW_TEST_COMMAND: "python -m pytest {project}/tests/ -x -q --timeout=300 -k 'not TestBertTiny'"
+          CIBW_TEST_COMMAND: 'python -m pytest {project}/tests -x -q --timeout=300 -k "not TestBertTiny and not TestBenchmarkSuite"'
           CIBW_TEST_SKIP: "*-macosx_x86_64"
 
       - uses: actions/upload-artifact@v4

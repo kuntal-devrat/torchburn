@@ -119,7 +119,21 @@ pub fn fast_erf_f32(x: f32) -> f32 {
 
 #[inline(always)]
 pub fn fast_gelu_f32(x: f32) -> f32 {
-    0.5 * x * (1.0 + fast_erf_f32(x * 0.7071067811865475))
+    // PyTorch `approximate="tanh"` : 0.5*x*(1+tanh(sqrt(2/pi)*(x+0.044715*x^3)))
+    const C: f32 = 0.7978845608028654; // sqrt(2/pi)
+    const B: f32 = 0.044715;
+    let x3 = x * x * x;
+    let inner = C * (x + B * x3);
+    0.5 * x * (1.0 + inner.tanh())
+}
+
+#[inline(always)]
+pub fn fast_gelu_f64(x: f64) -> f64 {
+    const C: f64 = 0.7978845608028654;
+    const B: f64 = 0.044715;
+    let x3 = x * x * x;
+    let inner = C * (x + B * x3);
+    0.5 * x * (1.0 + inner.tanh())
 }
 
 fn apply_elementwise_param_f32(a: &BorrowedTensor, out: &mut OwnedTensor, f: impl Fn(f32) -> f32 + Sync) {
@@ -201,12 +215,8 @@ pub fn tanh_act(a: &BorrowedTensor) -> PyResult<OwnedTensor> {
 }
 
 pub fn gelu(a: &BorrowedTensor) -> PyResult<OwnedTensor> {
-    // High-performance vectorized GELU(x) = 0.5 * x * (1 + erf(x / sqrt(2)))
-    apply_elementwise(
-        a,
-        fast_gelu_f32,
-        |x| 0.5 * x * (1.0 + libm::erf(x / std::f64::consts::SQRT_2)),
-    )
+    // PyTorch approximate="tanh" : 0.5*x*(1+tanh(sqrt(2/pi)*(x+0.044715*x^3)))
+    apply_elementwise(a, fast_gelu_f32, fast_gelu_f64)
 }
 
 pub fn silu(a: &BorrowedTensor) -> PyResult<OwnedTensor> {
