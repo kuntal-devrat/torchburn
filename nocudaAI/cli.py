@@ -52,6 +52,7 @@ def build_parser() -> argparse.ArgumentParser:
     common.add_argument("--model", default=None, help="Pretrained model ID or path (e.g. 'qwen_0_5b', 'Qwen/Qwen2.5-0.5B-Instruct')")
     common.add_argument("--engine", choices=["igpu", "cpu", "eager"], default="igpu", help="Execution engine (default: igpu)")
     common.add_argument("--tb-engine", default=None, help="TorchBurn engine target override")
+    common.add_argument("--quant", "--quantization", choices=["int8", "int4", "none"], default="int8", help="Quantization precision: int8, int4, or none (default: int8)")
     common.add_argument("--threads", type=int, default=None, help="Number of CPU threads to utilize")
     common.add_argument("--max-tokens", type=int, default=64, help="Max tokens to generate")
     common.add_argument("--temperature", type=float, default=0.7, help="Sampling temperature")
@@ -127,6 +128,7 @@ def main():
     engine_cfg = EngineConfig(
         engine=args.engine,
         torchburn_engine=args.tb_engine,
+        quantization=args.quant,
         num_threads=args.threads,
     )
     engine = NoCudaEngine(model, tokenizer, engine_cfg)
