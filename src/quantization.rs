@@ -1260,28 +1260,75 @@ unsafe fn dot_f32_u4_group64_avx512(x: *const f32, w_packed: *const u8) -> f32 {
 }
 
 #[cfg(target_arch = "x86_64")]
+#[inline(always)]
+unsafe fn unpack_and_fma_32_avx512(
+    x_ptr: *const f32,
+    w_ptr: *const u8,
+    mask_low: std::arch::x86_64::__m128i,
+    sub8: std::arch::x86_64::__m128i,
+) -> std::arch::x86_64::__m512 {
+    use std::arch::x86_64::*;
+    let raw = _mm_loadu_si128(w_ptr as *const __m128i);
+    let lo = _mm_and_si128(raw, mask_low);
+    let hi = _mm_and_si128(_mm_srli_epi16::<4>(raw), mask_low);
+    let inter_lo = _mm_unpacklo_epi8(lo, hi);
+    let inter_hi = _mm_unpackhi_epi8(lo, hi);
+    let s_lo = _mm_sub_epi8(inter_lo, sub8);
+    let s_hi = _mm_sub_epi8(inter_hi, sub8);
+
+    let wf0 = _mm512_cvtepi32_ps(_mm512_cvtepi8_epi32(s_lo));
+    let xf0 = _mm512_loadu_ps(x_ptr);
+    let wf1 = _mm512_cvtepi32_ps(_mm512_cvtepi8_epi32(s_hi));
+    let xf1 = _mm512_loadu_ps(x_ptr.add(16));
+
+    _mm512_fmadd_ps(wf1, xf1, _mm512_mul_ps(wf0, xf0))
+}
+
+#[cfg(target_arch = "x86_64")]
+#[inline(always)]
+unsafe fn unpack_and_fma_32_avx2(
+    x_ptr: *const f32,
+    w_ptr: *const u8,
+    mask_low: std::arch::x86_64::__m128i,
+    sub8: std::arch::x86_64::__m128i,
+) -> std::arch::x86_64::__m256 {
+    use std::arch::x86_64::*;
+    let raw = _mm_loadu_si128(w_ptr as *const __m128i);
+    let lo = _mm_and_si128(raw, mask_low);
+    let hi = _mm_and_si128(_mm_srli_epi16::<4>(raw), mask_low);
+    let inter_lo = _mm_unpacklo_epi8(lo, hi);
+    let inter_hi = _mm_unpackhi_epi8(lo, hi);
+    let s_lo = _mm_sub_epi8(inter_lo, sub8);
+    let s_hi = _mm_sub_epi8(inter_hi, sub8);
+
+    let wf0 = _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(s_lo));
+    let xf0 = _mm256_loadu_ps(x_ptr);
+    let mut sum0 = _mm256_mul_ps(wf0, xf0);
+
+    let s_lo_hi = _mm_unpackhi_epi64(s_lo, s_lo);
+    let wf1 = _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(s_lo_hi));
+    let xf1 = _mm256_loadu_ps(x_ptr.add(8));
+    sum0 = _mm256_fmadd_ps(wf1, xf1, sum0);
+
+    let wf2 = _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(s_hi));
+    let xf2 = _mm256_loadu_ps(x_ptr.add(16));
+    let mut sum1 = _mm256_mul_ps(wf2, xf2);
+
+    let s_hi_hi = _mm_unpackhi_epi64(s_hi, s_hi);
+    let wf3 = _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(s_hi_hi));
+    let xf3 = _mm256_loadu_ps(x_ptr.add(24));
+    sum1 = _mm256_fmadd_ps(wf3, xf3, sum1);
+
+    _mm256_add_ps(sum0, sum1)
+}
+
+#[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f,avx512bw")]
 unsafe fn dot_f32_u4_group32_avx512(x: *const f32, w_packed: *const u8) -> f32 {
     use std::arch::x86_64::*;
     let mask_low = _mm_set1_epi8(0x0F);
     let sub8 = _mm_set1_epi8(8);
-
-    let raw0 = _mm_loadu_si128(w_packed as *const __m128i);
-    let lo0 = _mm_and_si128(raw0, mask_low);
-    let hi0 = _mm_and_si128(_mm_srli_epi16::<4>(raw0), mask_low);
-    let inter_lo0 = _mm_unpacklo_epi8(lo0, hi0);
-    let inter_hi0 = _mm_unpackhi_epi8(lo0, hi0);
-    let s_lo0 = _mm_sub_epi8(inter_lo0, sub8);
-    let s_hi0 = _mm_sub_epi8(inter_hi0, sub8);
-
-    let wf0 = _mm512_cvtepi32_ps(_mm512_cvtepi8_epi32(s_lo0));
-    let xf0 = _mm512_loadu_ps(x);
-    let mut sum0 = _mm512_mul_ps(wf0, xf0);
-
-    let wf1 = _mm512_cvtepi32_ps(_mm512_cvtepi8_epi32(s_hi0));
-    let xf1 = _mm512_loadu_ps(x.add(16));
-    sum0 = _mm512_fmadd_ps(wf1, xf1, sum0);
-
+    let sum0 = unpack_and_fma_32_avx512(x, w_packed, mask_low, sub8);
     _mm512_reduce_add_ps(sum0)
 }
 
@@ -1291,36 +1338,7 @@ unsafe fn dot_f32_u4_group32_avx2(x: *const f32, w_packed: *const u8) -> f32 {
     use std::arch::x86_64::*;
     let mask_low = _mm_set1_epi8(0x0F);
     let sub8 = _mm_set1_epi8(8);
-
-    let raw = _mm_loadu_si128(w_packed as *const __m128i);
-    let lo = _mm_and_si128(raw, mask_low);
-    let hi = _mm_and_si128(_mm_srli_epi16::<4>(raw), mask_low);
-
-    let inter_lo = _mm_unpacklo_epi8(lo, hi);
-    let inter_hi = _mm_unpackhi_epi8(lo, hi);
-
-    let s_lo = _mm_sub_epi8(inter_lo, sub8);
-    let s_hi = _mm_sub_epi8(inter_hi, sub8);
-
-    let wf0 = _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(s_lo));
-    let xf0 = _mm256_loadu_ps(x);
-    let mut sum0 = _mm256_mul_ps(wf0, xf0);
-
-    let s_lo_hi = _mm_unpackhi_epi64(s_lo, s_lo);
-    let wf1 = _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(s_lo_hi));
-    let xf1 = _mm256_loadu_ps(x.add(8));
-    sum0 = _mm256_fmadd_ps(wf1, xf1, sum0);
-
-    let wf2 = _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(s_hi));
-    let xf2 = _mm256_loadu_ps(x.add(16));
-    let mut sum1 = _mm256_mul_ps(wf2, xf2);
-
-    let s_hi_hi = _mm_unpackhi_epi64(s_hi, s_hi);
-    let wf3 = _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(s_hi_hi));
-    let xf3 = _mm256_loadu_ps(x.add(24));
-    sum1 = _mm256_fmadd_ps(wf3, xf3, sum1);
-
-    let sum = _mm256_add_ps(sum0, sum1);
+    let sum = unpack_and_fma_32_avx2(x, w_packed, mask_low, sub8);
     hsum256_ps_avx(sum)
 }
 
@@ -1330,6 +1348,315 @@ unsafe fn dot_f32_u4_group64_avx2(x: *const f32, w_packed: *const u8) -> f32 {
     let d0 = dot_f32_u4_group32_avx2(x, w_packed);
     let d1 = dot_f32_u4_group32_avx2(x.add(32), w_packed.add(16));
     d0 + d1
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f,avx512bw")]
+unsafe fn gemv_row_w4a32_group64_avx512(
+    x: *const f32,
+    w_row: *const u8,
+    s_row: *const f32,
+    num_groups: usize,
+) -> f32 {
+    use std::arch::x86_64::*;
+    let mask_low = _mm_set1_epi8(0x0F);
+    let sub8 = _mm_set1_epi8(8);
+    let mut acc = _mm512_setzero_ps();
+
+    for g in 0..num_groups {
+        let x_grp = x.add(g * 64);
+        let w_grp = w_row.add(g * 32);
+        let scale = _mm512_set1_ps(*s_row.add(g));
+
+        let sum0 = unpack_and_fma_32_avx512(x_grp, w_grp, mask_low, sub8);
+        let sum1 = unpack_and_fma_32_avx512(x_grp.add(32), w_grp.add(16), mask_low, sub8);
+        let grp_sum = _mm512_add_ps(sum0, sum1);
+        acc = _mm512_fmadd_ps(grp_sum, scale, acc);
+    }
+    _mm512_reduce_add_ps(acc)
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f,avx512bw")]
+unsafe fn gemv_row_w4a32_group32_avx512(
+    x: *const f32,
+    w_row: *const u8,
+    s_row: *const f32,
+    num_groups: usize,
+) -> f32 {
+    use std::arch::x86_64::*;
+    let mask_low = _mm_set1_epi8(0x0F);
+    let sub8 = _mm_set1_epi8(8);
+    let mut acc = _mm512_setzero_ps();
+
+    for g in 0..num_groups {
+        let x_grp = x.add(g * 32);
+        let w_grp = w_row.add(g * 16);
+        let scale = _mm512_set1_ps(*s_row.add(g));
+
+        let sum0 = unpack_and_fma_32_avx512(x_grp, w_grp, mask_low, sub8);
+        acc = _mm512_fmadd_ps(sum0, scale, acc);
+    }
+    _mm512_reduce_add_ps(acc)
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn gemv_row_w4a32_group64_avx2(
+    x: *const f32,
+    w_row: *const u8,
+    s_row: *const f32,
+    num_groups: usize,
+) -> f32 {
+    use std::arch::x86_64::*;
+    let mask_low = _mm_set1_epi8(0x0F);
+    let sub8 = _mm_set1_epi8(8);
+    let mut acc = _mm256_setzero_ps();
+
+    for g in 0..num_groups {
+        let x_grp = x.add(g * 64);
+        let w_grp = w_row.add(g * 32);
+        let scale = _mm256_set1_ps(*s_row.add(g));
+
+        let sum0 = unpack_and_fma_32_avx2(x_grp, w_grp, mask_low, sub8);
+        let sum1 = unpack_and_fma_32_avx2(x_grp.add(32), w_grp.add(16), mask_low, sub8);
+        let grp_sum = _mm256_add_ps(sum0, sum1);
+        acc = _mm256_fmadd_ps(grp_sum, scale, acc);
+    }
+    hsum256_ps_avx(acc)
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn gemv_row_w4a32_group32_avx2(
+    x: *const f32,
+    w_row: *const u8,
+    s_row: *const f32,
+    num_groups: usize,
+) -> f32 {
+    use std::arch::x86_64::*;
+    let mask_low = _mm_set1_epi8(0x0F);
+    let sub8 = _mm_set1_epi8(8);
+    let mut acc = _mm256_setzero_ps();
+
+    for g in 0..num_groups {
+        let x_grp = x.add(g * 32);
+        let w_grp = w_row.add(g * 16);
+        let scale = _mm256_set1_ps(*s_row.add(g));
+
+        let sum0 = unpack_and_fma_32_avx2(x_grp, w_grp, mask_low, sub8);
+        acc = _mm256_fmadd_ps(sum0, scale, acc);
+    }
+    hsum256_ps_avx(acc)
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f,avx512bw")]
+unsafe fn swiglu_neuron_w4a32_group64_avx512(
+    x: *const f32,
+    gw_row: *const u8,
+    gs_row: *const f32,
+    uw_row: *const u8,
+    us_row: *const f32,
+    num_groups: usize,
+) -> (f32, f32) {
+    use std::arch::x86_64::*;
+    let mask_low = _mm_set1_epi8(0x0F);
+    let sub8 = _mm_set1_epi8(8);
+
+    let mut g_acc = _mm512_setzero_ps();
+    let mut u_acc = _mm512_setzero_ps();
+
+    for g in 0..num_groups {
+        let x_grp = x.add(g * 64);
+        let gw_grp = gw_row.add(g * 32);
+        let uw_grp = uw_row.add(g * 32);
+        let g_scale = _mm512_set1_ps(*gs_row.add(g));
+        let u_scale = _mm512_set1_ps(*us_row.add(g));
+
+        // Chunk 0 (elements 0..31)
+        let xf0 = _mm512_loadu_ps(x_grp);
+        let xf1 = _mm512_loadu_ps(x_grp.add(16));
+
+        // Gate Chunk 0
+        let g_raw0 = _mm_loadu_si128(gw_grp as *const __m128i);
+        let g_lo0 = _mm_and_si128(g_raw0, mask_low);
+        let g_hi0 = _mm_and_si128(_mm_srli_epi16::<4>(g_raw0), mask_low);
+        let g_s_lo0 = _mm_sub_epi8(_mm_unpacklo_epi8(g_lo0, g_hi0), sub8);
+        let g_s_hi0 = _mm_sub_epi8(_mm_unpackhi_epi8(g_lo0, g_hi0), sub8);
+        let gwf0 = _mm512_cvtepi32_ps(_mm512_cvtepi8_epi32(g_s_lo0));
+        let gwf1 = _mm512_cvtepi32_ps(_mm512_cvtepi8_epi32(g_s_hi0));
+        let g_sum0 = _mm512_fmadd_ps(gwf1, xf1, _mm512_mul_ps(gwf0, xf0));
+
+        // Up Chunk 0
+        let u_raw0 = _mm_loadu_si128(uw_grp as *const __m128i);
+        let u_lo0 = _mm_and_si128(u_raw0, mask_low);
+        let u_hi0 = _mm_and_si128(_mm_srli_epi16::<4>(u_raw0), mask_low);
+        let u_s_lo0 = _mm_sub_epi8(_mm_unpacklo_epi8(u_lo0, u_hi0), sub8);
+        let u_s_hi0 = _mm_sub_epi8(_mm_unpackhi_epi8(u_lo0, u_hi0), sub8);
+        let uwf0 = _mm512_cvtepi32_ps(_mm512_cvtepi8_epi32(u_s_lo0));
+        let uwf1 = _mm512_cvtepi32_ps(_mm512_cvtepi8_epi32(u_s_hi0));
+        let u_sum0 = _mm512_fmadd_ps(uwf1, xf1, _mm512_mul_ps(uwf0, xf0));
+
+        // Chunk 1 (elements 32..63)
+        let xf2 = _mm512_loadu_ps(x_grp.add(32));
+        let xf3 = _mm512_loadu_ps(x_grp.add(48));
+
+        // Gate Chunk 1
+        let g_raw1 = _mm_loadu_si128(gw_grp.add(16) as *const __m128i);
+        let g_lo1 = _mm_and_si128(g_raw1, mask_low);
+        let g_hi1 = _mm_and_si128(_mm_srli_epi16::<4>(g_raw1), mask_low);
+        let g_s_lo1 = _mm_sub_epi8(_mm_unpacklo_epi8(g_lo1, g_hi1), sub8);
+        let g_s_hi1 = _mm_sub_epi8(_mm_unpackhi_epi8(g_lo1, g_hi1), sub8);
+        let gwf2 = _mm512_cvtepi32_ps(_mm512_cvtepi8_epi32(g_s_lo1));
+        let gwf3 = _mm512_cvtepi32_ps(_mm512_cvtepi8_epi32(g_s_hi1));
+        let g_sum1 = _mm512_fmadd_ps(gwf3, xf3, _mm512_mul_ps(gwf2, xf2));
+
+        // Up Chunk 1
+        let u_raw1 = _mm_loadu_si128(uw_grp.add(16) as *const __m128i);
+        let u_lo1 = _mm_and_si128(u_raw1, mask_low);
+        let u_hi1 = _mm_and_si128(_mm_srli_epi16::<4>(u_raw1), mask_low);
+        let u_s_lo1 = _mm_sub_epi8(_mm_unpacklo_epi8(u_lo1, u_hi1), sub8);
+        let u_s_hi1 = _mm_sub_epi8(_mm_unpackhi_epi8(u_lo1, u_hi1), sub8);
+        let uwf2 = _mm512_cvtepi32_ps(_mm512_cvtepi8_epi32(u_s_lo1));
+        let uwf3 = _mm512_cvtepi32_ps(_mm512_cvtepi8_epi32(u_s_hi1));
+        let u_sum1 = _mm512_fmadd_ps(uwf3, xf3, _mm512_mul_ps(uwf2, xf2));
+
+        let g_grp_sum = _mm512_add_ps(g_sum0, g_sum1);
+        let u_grp_sum = _mm512_add_ps(u_sum0, u_sum1);
+
+        g_acc = _mm512_fmadd_ps(g_grp_sum, g_scale, g_acc);
+        u_acc = _mm512_fmadd_ps(u_grp_sum, u_scale, u_acc);
+    }
+
+    (_mm512_reduce_add_ps(g_acc), _mm512_reduce_add_ps(u_acc))
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f,avx512bw")]
+unsafe fn swiglu_neuron_w4a32_group32_avx512(
+    x: *const f32,
+    gw_row: *const u8,
+    gs_row: *const f32,
+    uw_row: *const u8,
+    us_row: *const f32,
+    num_groups: usize,
+) -> (f32, f32) {
+    use std::arch::x86_64::*;
+    let mask_low = _mm_set1_epi8(0x0F);
+    let sub8 = _mm_set1_epi8(8);
+
+    let mut g_acc = _mm512_setzero_ps();
+    let mut u_acc = _mm512_setzero_ps();
+
+    for g in 0..num_groups {
+        let x_grp = x.add(g * 32);
+        let gw_grp = gw_row.add(g * 16);
+        let uw_grp = uw_row.add(g * 16);
+        let g_scale = _mm512_set1_ps(*gs_row.add(g));
+        let u_scale = _mm512_set1_ps(*us_row.add(g));
+
+        let xf0 = _mm512_loadu_ps(x_grp);
+        let xf1 = _mm512_loadu_ps(x_grp.add(16));
+
+        // Gate
+        let g_raw0 = _mm_loadu_si128(gw_grp as *const __m128i);
+        let g_lo0 = _mm_and_si128(g_raw0, mask_low);
+        let g_hi0 = _mm_and_si128(_mm_srli_epi16::<4>(g_raw0), mask_low);
+        let g_s_lo0 = _mm_sub_epi8(_mm_unpacklo_epi8(g_lo0, g_hi0), sub8);
+        let g_s_hi0 = _mm_sub_epi8(_mm_unpackhi_epi8(g_lo0, g_hi0), sub8);
+        let gwf0 = _mm512_cvtepi32_ps(_mm512_cvtepi8_epi32(g_s_lo0));
+        let gwf1 = _mm512_cvtepi32_ps(_mm512_cvtepi8_epi32(g_s_hi0));
+        let g_sum0 = _mm512_fmadd_ps(gwf1, xf1, _mm512_mul_ps(gwf0, xf0));
+
+        // Up
+        let u_raw0 = _mm_loadu_si128(uw_grp as *const __m128i);
+        let u_lo0 = _mm_and_si128(u_raw0, mask_low);
+        let u_hi0 = _mm_and_si128(_mm_srli_epi16::<4>(u_raw0), mask_low);
+        let u_s_lo0 = _mm_sub_epi8(_mm_unpacklo_epi8(u_lo0, u_hi0), sub8);
+        let u_s_hi0 = _mm_sub_epi8(_mm_unpackhi_epi8(u_lo0, u_hi0), sub8);
+        let uwf0 = _mm512_cvtepi32_ps(_mm512_cvtepi8_epi32(u_s_lo0));
+        let uwf1 = _mm512_cvtepi32_ps(_mm512_cvtepi8_epi32(u_s_hi0));
+        let u_sum0 = _mm512_fmadd_ps(uwf1, xf1, _mm512_mul_ps(uwf0, xf0));
+
+        g_acc = _mm512_fmadd_ps(g_sum0, g_scale, g_acc);
+        u_acc = _mm512_fmadd_ps(u_sum0, u_scale, u_acc);
+    }
+
+    (_mm512_reduce_add_ps(g_acc), _mm512_reduce_add_ps(u_acc))
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn swiglu_neuron_w4a32_group32_avx2(
+    x: *const f32,
+    gw_row: *const u8,
+    gs_row: *const f32,
+    uw_row: *const u8,
+    us_row: *const f32,
+    num_groups: usize,
+) -> (f32, f32) {
+    use std::arch::x86_64::*;
+    let mask_low = _mm_set1_epi8(0x0F);
+    let sub8 = _mm_set1_epi8(8);
+
+    let mut g_acc = _mm256_setzero_ps();
+    let mut u_acc = _mm256_setzero_ps();
+
+    for g in 0..num_groups {
+        let x_grp = x.add(g * 32);
+        let gw_grp = gw_row.add(g * 16);
+        let uw_grp = uw_row.add(g * 16);
+        let g_scale = _mm256_set1_ps(*gs_row.add(g));
+        let u_scale = _mm256_set1_ps(*us_row.add(g));
+
+        let g_sum0 = unpack_and_fma_32_avx2(x_grp, gw_grp, mask_low, sub8);
+        let u_sum0 = unpack_and_fma_32_avx2(x_grp, uw_grp, mask_low, sub8);
+
+        g_acc = _mm256_fmadd_ps(g_sum0, g_scale, g_acc);
+        u_acc = _mm256_fmadd_ps(u_sum0, u_scale, u_acc);
+    }
+
+    (hsum256_ps_avx(g_acc), hsum256_ps_avx(u_acc))
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn swiglu_neuron_w4a32_group64_avx2(
+    x: *const f32,
+    gw_row: *const u8,
+    gs_row: *const f32,
+    uw_row: *const u8,
+    us_row: *const f32,
+    num_groups: usize,
+) -> (f32, f32) {
+    use std::arch::x86_64::*;
+    let mask_low = _mm_set1_epi8(0x0F);
+    let sub8 = _mm_set1_epi8(8);
+
+    let mut g_acc = _mm256_setzero_ps();
+    let mut u_acc = _mm256_setzero_ps();
+
+    for g in 0..num_groups {
+        let x_grp = x.add(g * 64);
+        let gw_grp = gw_row.add(g * 32);
+        let uw_grp = uw_row.add(g * 32);
+        let g_scale = _mm256_set1_ps(*gs_row.add(g));
+        let u_scale = _mm256_set1_ps(*us_row.add(g));
+
+        let g_sum0 = unpack_and_fma_32_avx2(x_grp, gw_grp, mask_low, sub8);
+        let g_sum1 = unpack_and_fma_32_avx2(x_grp.add(32), gw_grp.add(16), mask_low, sub8);
+        let g_grp_sum = _mm256_add_ps(g_sum0, g_sum1);
+
+        let u_sum0 = unpack_and_fma_32_avx2(x_grp, uw_grp, mask_low, sub8);
+        let u_sum1 = unpack_and_fma_32_avx2(x_grp.add(32), uw_grp.add(16), mask_low, sub8);
+        let u_grp_sum = _mm256_add_ps(u_sum0, u_sum1);
+
+        g_acc = _mm256_fmadd_ps(g_grp_sum, g_scale, g_acc);
+        u_acc = _mm256_fmadd_ps(u_grp_sum, u_scale, u_acc);
+    }
+
+    (hsum256_ps_avx(g_acc), hsum256_ps_avx(u_acc))
 }
 
 unsafe fn dot_f32_u4_group_scalar(x: *const f32, w_packed: *const u8, group_size: usize) -> f32 {
@@ -1444,33 +1771,50 @@ unsafe fn gemv_w4a32_grouped(
         let b_p = b_usize.map(|bp| bp as *const f32);
         let out_p = out_usize as *mut f32;
 
-        let mut row_sum = 0.0f32;
-        if group_size == 64 {
-            for g in 0..num_groups {
-                let x_grp = x_p.add(g * 64);
-                let w_grp = w_row.add(g * 32);
-                let scale = *s_row.add(g);
-                let dot = dot_f32_u4_group64_fast(x_grp, w_grp, has_avx512, has_avx2);
-                row_sum += dot * scale;
+        let row_sum = if has_avx512 {
+            #[cfg(target_arch = "x86_64")]
+            {
+                if group_size == 64 {
+                    gemv_row_w4a32_group64_avx512(x_p, w_row, s_row, num_groups)
+                } else if group_size == 32 {
+                    gemv_row_w4a32_group32_avx512(x_p, w_row, s_row, num_groups)
+                } else {
+                    let mut s = 0.0f32;
+                    for g in 0..num_groups {
+                        let cur_len = (k - g * group_size).min(group_size);
+                        s += dot_f32_u4_group_scalar(x_p.add(g * group_size), w_row.add(g * bytes_per_group), cur_len) * *s_row.add(g);
+                    }
+                    s
+                }
             }
-        } else if group_size == 32 {
-            for g in 0..num_groups {
-                let x_grp = x_p.add(g * 32);
-                let w_grp = w_row.add(g * 16);
-                let scale = *s_row.add(g);
-                let dot = dot_f32_u4_group32_fast(x_grp, w_grp, has_avx512, has_avx2);
-                row_sum += dot * scale;
+            #[cfg(not(target_arch = "x86_64"))]
+            { 0.0f32 }
+        } else if has_avx2 {
+            #[cfg(target_arch = "x86_64")]
+            {
+                if group_size == 64 {
+                    gemv_row_w4a32_group64_avx2(x_p, w_row, s_row, num_groups)
+                } else if group_size == 32 {
+                    gemv_row_w4a32_group32_avx2(x_p, w_row, s_row, num_groups)
+                } else {
+                    let mut s = 0.0f32;
+                    for g in 0..num_groups {
+                        let cur_len = (k - g * group_size).min(group_size);
+                        s += dot_f32_u4_group_scalar(x_p.add(g * group_size), w_row.add(g * bytes_per_group), cur_len) * *s_row.add(g);
+                    }
+                    s
+                }
             }
+            #[cfg(not(target_arch = "x86_64"))]
+            { 0.0f32 }
         } else {
+            let mut s = 0.0f32;
             for g in 0..num_groups {
-                let x_grp = x_p.add(g * group_size);
-                let w_grp = w_row.add(g * bytes_per_group);
-                let scale = *s_row.add(g);
                 let cur_len = (k - g * group_size).min(group_size);
-                let dot = dot_f32_u4_group_scalar(x_grp, w_grp, cur_len);
-                row_sum += dot * scale;
+                s += dot_f32_u4_group_scalar(x_p.add(g * group_size), w_row.add(g * bytes_per_group), cur_len) * *s_row.add(g);
             }
-        }
+            s
+        };
 
         let b = if let Some(bp) = b_p { *bp.add(j) } else { 0.0 };
         *out_p.add(j) = row_sum + b;
@@ -1757,53 +2101,56 @@ pub fn fused_swiglu_mlp_w4a32(
             let us_row = unsafe { (us_usize as *const f32).add(j * num_groups_k) };
             let ub = if let Some(bp) = ub_usize { unsafe { *((bp as *const f32).add(j)) } } else { 0.0 };
 
-            let mut g_sum = 0.0f32;
-            let mut u_sum = 0.0f32;
-
-            if group_size == 64 {
-                for g in 0..num_groups_k {
-                    let x_grp = unsafe { x_p.add(g * 64) };
-                    let gw_grp = unsafe { gw_row.add(g * 32) };
-                    let uw_grp = unsafe { uw_row.add(g * 32) };
-                    let g_scale = unsafe { *gs_row.add(g) };
-                    let u_scale = unsafe { *us_row.add(g) };
-
-                    let g_dot = unsafe { dot_f32_u4_group64_fast(x_grp, gw_grp, has_avx512, has_avx2) };
-                    let u_dot = unsafe { dot_f32_u4_group64_fast(x_grp, uw_grp, has_avx512, has_avx2) };
-
-                    g_sum += g_dot * g_scale;
-                    u_sum += u_dot * u_scale;
+            let (g_sum, u_sum) = if has_avx512 {
+                #[cfg(target_arch = "x86_64")]
+                {
+                    if group_size == 64 {
+                        unsafe { swiglu_neuron_w4a32_group64_avx512(x_p, gw_row, gs_row, uw_row, us_row, num_groups_k) }
+                    } else if group_size == 32 {
+                        unsafe { swiglu_neuron_w4a32_group32_avx512(x_p, gw_row, gs_row, uw_row, us_row, num_groups_k) }
+                    } else {
+                        let mut gs = 0.0f32;
+                        let mut us = 0.0f32;
+                        for g in 0..num_groups_k {
+                            let cur_len = (k - g * group_size).min(group_size);
+                            gs += unsafe { dot_f32_u4_group_scalar(x_p.add(g * group_size), gw_row.add(g * (group_size / 2)), cur_len) * *gs_row.add(g) };
+                            us += unsafe { dot_f32_u4_group_scalar(x_p.add(g * group_size), uw_row.add(g * (group_size / 2)), cur_len) * *us_row.add(g) };
+                        }
+                        (gs, us)
+                    }
                 }
-            } else if group_size == 32 {
-                for g in 0..num_groups_k {
-                    let x_grp = unsafe { x_p.add(g * 32) };
-                    let gw_grp = unsafe { gw_row.add(g * 16) };
-                    let uw_grp = unsafe { uw_row.add(g * 16) };
-                    let g_scale = unsafe { *gs_row.add(g) };
-                    let u_scale = unsafe { *us_row.add(g) };
-
-                    let g_dot = unsafe { dot_f32_u4_group32_fast(x_grp, gw_grp, has_avx512, has_avx2) };
-                    let u_dot = unsafe { dot_f32_u4_group32_fast(x_grp, uw_grp, has_avx512, has_avx2) };
-
-                    g_sum += g_dot * g_scale;
-                    u_sum += u_dot * u_scale;
+                #[cfg(not(target_arch = "x86_64"))]
+                { (0.0, 0.0) }
+            } else if has_avx2 {
+                #[cfg(target_arch = "x86_64")]
+                {
+                    if group_size == 64 {
+                        unsafe { swiglu_neuron_w4a32_group64_avx2(x_p, gw_row, gs_row, uw_row, us_row, num_groups_k) }
+                    } else if group_size == 32 {
+                        unsafe { swiglu_neuron_w4a32_group32_avx2(x_p, gw_row, gs_row, uw_row, us_row, num_groups_k) }
+                    } else {
+                        let mut gs = 0.0f32;
+                        let mut us = 0.0f32;
+                        for g in 0..num_groups_k {
+                            let cur_len = (k - g * group_size).min(group_size);
+                            gs += unsafe { dot_f32_u4_group_scalar(x_p.add(g * group_size), gw_row.add(g * (group_size / 2)), cur_len) * *gs_row.add(g) };
+                            us += unsafe { dot_f32_u4_group_scalar(x_p.add(g * group_size), uw_row.add(g * (group_size / 2)), cur_len) * *us_row.add(g) };
+                        }
+                        (gs, us)
+                    }
                 }
+                #[cfg(not(target_arch = "x86_64"))]
+                { (0.0, 0.0) }
             } else {
+                let mut gs = 0.0f32;
+                let mut us = 0.0f32;
                 for g in 0..num_groups_k {
-                    let x_grp = unsafe { x_p.add(g * group_size) };
-                    let gw_grp = unsafe { gw_row.add(g * (group_size / 2)) };
-                    let uw_grp = unsafe { uw_row.add(g * (group_size / 2)) };
-                    let g_scale = unsafe { *gs_row.add(g) };
-                    let u_scale = unsafe { *us_row.add(g) };
                     let cur_len = (k - g * group_size).min(group_size);
-
-                    let g_dot = unsafe { dot_f32_u4_group_scalar(x_grp, gw_grp, cur_len) };
-                    let u_dot = unsafe { dot_f32_u4_group_scalar(x_grp, uw_grp, cur_len) };
-
-                    g_sum += g_dot * g_scale;
-                    u_sum += u_dot * u_scale;
+                    gs += unsafe { dot_f32_u4_group_scalar(x_p.add(g * group_size), gw_row.add(g * (group_size / 2)), cur_len) * *gs_row.add(g) };
+                    us += unsafe { dot_f32_u4_group_scalar(x_p.add(g * group_size), uw_row.add(g * (group_size / 2)), cur_len) * *us_row.add(g) };
                 }
-            }
+                (gs, us)
+            };
 
             let g = g_sum + gb;
             let u = u_sum + ub;

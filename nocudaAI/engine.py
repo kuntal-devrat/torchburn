@@ -143,11 +143,10 @@ class NoCudaEngine:
         if temperature <= 1e-4 or top_k == 1:
             return int(torch.argmax(logits).item())
 
-        logits = logits / temperature
-
-        # Fast Top-K filtered subset without full vocab sort
+        # Fast Top-K filtered subset without full vocab sort or full-tensor division
         k = min(top_k if top_k > 0 else 1000, logits.size(-1))
         top_vals, top_indices = torch.topk(logits, k)
+        top_vals = top_vals / temperature
 
         # Top-P (Nucleus) on top-k subset
         if 0.0 < top_p < 1.0:

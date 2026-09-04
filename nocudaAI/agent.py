@@ -16,7 +16,8 @@ import re
 import subprocess
 import sys
 import time
-from typing import Dict, Any, List, Optional, Callable
+from typing import Dict, Any, List, Optional, Callable, Union
+import torch
 
 if hasattr(sys.stdout, "reconfigure"):
     try:
@@ -82,6 +83,7 @@ class NoCudaAgent:
         self._cached_kv = None
         self._cached_token_ids: List[int] = []
         self._register_default_tools()
+        self._warmup()
 
     def _register_default_tools(self):
         """Registers built-in terminal tools."""
@@ -160,10 +162,36 @@ class NoCudaAgent:
     def register_tool(self, tool: AgentTool):
         self.tools[tool.name] = tool
 
+    def _warmup(self):
+        """Warm up engine and pre-cache system prompt to eliminate Turn 1 prefill & thread cold-start lag."""
+        try:
+            sys_prompt_text = self.tokenizer.apply_chat_template(
+                [{"role": "system", "content": self.SYSTEM_PROMPT}],
+                add_generation_prompt=False,
+            )
+            sys_ids = self.tokenizer.encode(sys_prompt_text)
+            if sys_ids:
+                input_tensor = torch.tensor([sys_ids], dtype=torch.long)
+                if self.engine.config.use_static_kv_cache and hasattr(self.engine.raw_model, "create_static_kv_caches"):
+                    max_len = max(len(sys_ids) + 512, 2048)
+                    init_kv = self.engine.raw_model.create_static_kv_caches(max_batch_size=1, max_seq_len=max_len)
+                    _, kv, _ = self.engine.prefill(input_tensor, kv_caches=init_kv, offset=0)
+                else:
+                    _, kv, _ = self.engine.prefill(input_tensor)
+                # Warm up one decode step on dummy token so Rayon worker threads & SIMD kernels spin up
+                if kv is not None:
+                    dummy_token = sys_ids[-1]
+                    self.engine.decode_step(dummy_token, kv, offset=len(sys_ids) - 1)
+                self._cached_kv = kv
+                self._cached_token_ids = sys_ids
+        except Exception:
+            pass
+
     def reset(self):
         self.history = [{"role": "system", "content": self.SYSTEM_PROMPT}]
         self._cached_kv = None
         self._cached_token_ids = []
+        self._warmup()
 
     def chat_round(
         self,
