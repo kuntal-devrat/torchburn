@@ -90,6 +90,7 @@ from .quantization import (
     w4a32_linear,
     w4a32_grouped_linear,
     fused_swiglu_mlp,
+    fused_attention_step,
     quantize_weight_int8,
     quantize_weight_int4,
     quantize_weight_int4_grouped,

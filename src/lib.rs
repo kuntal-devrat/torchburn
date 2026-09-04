@@ -767,6 +767,128 @@ fn quantize_linear_int4(
     Ok((cap_w, cap_s))
 }
 
+#[pyfunction]
+fn fused_attention_step_w8a32(
+    py: Python<'_>,
+    x: &Bound<'_, PyCapsule>,
+    qkv_w: &Bound<'_, PyCapsule>,
+    qkv_s: &Bound<'_, PyCapsule>,
+    qkv_b: Option<&Bound<'_, PyCapsule>>,
+    o_w: &Bound<'_, PyCapsule>,
+    o_s: &Bound<'_, PyCapsule>,
+    o_b: Option<&Bound<'_, PyCapsule>>,
+    k_cache: &Bound<'_, PyCapsule>,
+    v_cache: &Bound<'_, PyCapsule>,
+    cos: &Bound<'_, PyCapsule>,
+    sin: &Bound<'_, PyCapsule>,
+    offset: usize,
+    num_heads: usize,
+    num_kv_heads: usize,
+    head_dim: usize,
+) -> PyResult<Py<PyCapsule>> {
+    let x_view = unsafe { dlpack::BorrowedTensor::from_capsule(x)? };
+    let qkv_w_view = unsafe { dlpack::BorrowedTensor::from_capsule(qkv_w)? };
+    let qkv_s_view = unsafe { dlpack::BorrowedTensor::from_capsule(qkv_s)? };
+    let qkv_b_view = match qkv_b {
+        Some(b) => Some(unsafe { dlpack::BorrowedTensor::from_capsule(b)? }),
+        None => None,
+    };
+    let o_w_view = unsafe { dlpack::BorrowedTensor::from_capsule(o_w)? };
+    let o_s_view = unsafe { dlpack::BorrowedTensor::from_capsule(o_s)? };
+    let o_b_view = match o_b {
+        Some(b) => Some(unsafe { dlpack::BorrowedTensor::from_capsule(b)? }),
+        None => None,
+    };
+    let k_cache_view = unsafe { dlpack::BorrowedTensor::from_capsule(k_cache)? };
+    let v_cache_view = unsafe { dlpack::BorrowedTensor::from_capsule(v_cache)? };
+    let cos_view = unsafe { dlpack::BorrowedTensor::from_capsule(cos)? };
+    let sin_view = unsafe { dlpack::BorrowedTensor::from_capsule(sin)? };
+
+    let out = py.allow_threads(|| {
+        crate::quantization::fused_attention_step_w8a32(
+            &x_view,
+            &qkv_w_view,
+            &qkv_s_view,
+            qkv_b_view.as_ref(),
+            &o_w_view,
+            &o_s_view,
+            o_b_view.as_ref(),
+            &k_cache_view,
+            &v_cache_view,
+            &cos_view,
+            &sin_view,
+            offset,
+            num_heads,
+            num_kv_heads,
+            head_dim,
+        )
+    })?;
+
+    dlpack::owned_to_capsule_owned(py, out)
+}
+
+#[pyfunction]
+fn fused_attention_step_w4a32(
+    py: Python<'_>,
+    x: &Bound<'_, PyCapsule>,
+    qkv_w: &Bound<'_, PyCapsule>,
+    qkv_s: &Bound<'_, PyCapsule>,
+    qkv_b: Option<&Bound<'_, PyCapsule>>,
+    o_w: &Bound<'_, PyCapsule>,
+    o_s: &Bound<'_, PyCapsule>,
+    o_b: Option<&Bound<'_, PyCapsule>>,
+    k_cache: &Bound<'_, PyCapsule>,
+    v_cache: &Bound<'_, PyCapsule>,
+    cos: &Bound<'_, PyCapsule>,
+    sin: &Bound<'_, PyCapsule>,
+    offset: usize,
+    num_heads: usize,
+    num_kv_heads: usize,
+    head_dim: usize,
+    group_size: usize,
+) -> PyResult<Py<PyCapsule>> {
+    let x_view = unsafe { dlpack::BorrowedTensor::from_capsule(x)? };
+    let qkv_w_view = unsafe { dlpack::BorrowedTensor::from_capsule(qkv_w)? };
+    let qkv_s_view = unsafe { dlpack::BorrowedTensor::from_capsule(qkv_s)? };
+    let qkv_b_view = match qkv_b {
+        Some(b) => Some(unsafe { dlpack::BorrowedTensor::from_capsule(b)? }),
+        None => None,
+    };
+    let o_w_view = unsafe { dlpack::BorrowedTensor::from_capsule(o_w)? };
+    let o_s_view = unsafe { dlpack::BorrowedTensor::from_capsule(o_s)? };
+    let o_b_view = match o_b {
+        Some(b) => Some(unsafe { dlpack::BorrowedTensor::from_capsule(b)? }),
+        None => None,
+    };
+    let k_cache_view = unsafe { dlpack::BorrowedTensor::from_capsule(k_cache)? };
+    let v_cache_view = unsafe { dlpack::BorrowedTensor::from_capsule(v_cache)? };
+    let cos_view = unsafe { dlpack::BorrowedTensor::from_capsule(cos)? };
+    let sin_view = unsafe { dlpack::BorrowedTensor::from_capsule(sin)? };
+
+    let out = py.allow_threads(|| {
+        crate::quantization::fused_attention_step_w4a32(
+            &x_view,
+            &qkv_w_view,
+            &qkv_s_view,
+            qkv_b_view.as_ref(),
+            &o_w_view,
+            &o_s_view,
+            o_b_view.as_ref(),
+            &k_cache_view,
+            &v_cache_view,
+            &cos_view,
+            &sin_view,
+            offset,
+            num_heads,
+            num_kv_heads,
+            head_dim,
+            group_size,
+        )
+    })?;
+
+    dlpack::owned_to_capsule_owned(py, out)
+}
+
 #[pymodule]
 fn _torchburn(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
@@ -805,6 +927,8 @@ fn _torchburn(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(w4a32_grouped_linear, m)?)?;
     m.add_function(wrap_pyfunction!(fused_swiglu_mlp_w8a32, m)?)?;
     m.add_function(wrap_pyfunction!(fused_swiglu_mlp_w4a32, m)?)?;
+    m.add_function(wrap_pyfunction!(fused_attention_step_w8a32, m)?)?;
+    m.add_function(wrap_pyfunction!(fused_attention_step_w4a32, m)?)?;
     m.add_function(wrap_pyfunction!(quantize_linear_int8, m)?)?;
     m.add_function(wrap_pyfunction!(quantize_linear_int4, m)?)?;
     Ok(())

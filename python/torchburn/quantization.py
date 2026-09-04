@@ -208,6 +208,74 @@ def fused_swiglu_mlp(
     return out_2d.reshape(out_shape)
 
 
+def fused_attention_step(
+    x: torch.Tensor,
+    qkv: QuantizedLinear,
+    o_proj: QuantizedLinear,
+    k_cache: torch.Tensor,
+    v_cache: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+    offset: int,
+    num_heads: int,
+    num_kv_heads: int,
+    head_dim: int,
+) -> torch.Tensor:
+    """Zero-allocation Fused Attention decode step (T=1) in native Rust."""
+    from . import _torchburn as _native
+
+    x_orig_shape = x.shape
+    x_2d = x.reshape(-1, x.shape[-1]).contiguous().float()
+
+    x_cap = torch.to_dlpack(x_2d)
+    qkv_w_cap = torch.to_dlpack(qkv.qweight.contiguous())
+    qkv_s_cap = torch.to_dlpack(qkv.scales.contiguous().float())
+    qkv_b_cap = torch.to_dlpack(qkv.bias.contiguous().float()) if qkv.bias is not None else None
+
+    o_w_cap = torch.to_dlpack(o_proj.qweight.contiguous())
+    o_s_cap = torch.to_dlpack(o_proj.scales.contiguous().float())
+    o_b_cap = torch.to_dlpack(o_proj.bias.contiguous().float()) if o_proj.bias is not None else None
+
+    k_cache_cap = torch.to_dlpack(k_cache.contiguous())
+    v_cache_cap = torch.to_dlpack(v_cache.contiguous())
+
+    cos_flat = cos.reshape(-1).contiguous().float()
+    sin_flat = sin.reshape(-1).contiguous().float()
+    cos_cap = torch.to_dlpack(cos_flat)
+    sin_cap = torch.to_dlpack(sin_flat)
+
+    if qkv.bits == 8:
+        out_cap = _native.fused_attention_step_w8a32(
+            x_cap,
+            qkv_w_cap, qkv_s_cap, qkv_b_cap,
+            o_w_cap, o_s_cap, o_b_cap,
+            k_cache_cap, v_cache_cap,
+            cos_cap, sin_cap,
+            offset,
+            num_heads,
+            num_kv_heads,
+            head_dim,
+        )
+    elif qkv.bits == 4:
+        out_cap = _native.fused_attention_step_w4a32(
+            x_cap,
+            qkv_w_cap, qkv_s_cap, qkv_b_cap,
+            o_w_cap, o_s_cap, o_b_cap,
+            k_cache_cap, v_cache_cap,
+            cos_cap, sin_cap,
+            offset,
+            num_heads,
+            num_kv_heads,
+            head_dim,
+            qkv.group_size,
+        )
+    else:
+        raise ValueError(f"Unsupported bits={qkv.bits}")
+
+    out_2d = torch.from_dlpack(out_cap)
+    return out_2d.reshape(x_orig_shape)
+
+
 class QuantizedLinear(nn.Module):
     """Drop-in replacement for `nn.Linear` using TorchBurn's native SIMD quantized kernels."""
 

@@ -155,6 +155,32 @@ class CausalSelfAttention(nn.Module):
     ) -> Tuple[torch.Tensor, Optional[Union[Tuple[torch.Tensor, torch.Tensor], StaticKVCache]]]:
         B, T, C = x.shape
 
+        # Fast path: single token decode with StaticKVCache and quantized TorchBurn kernel
+        if (
+            T == 1
+            and kv_cache is not None
+            and isinstance(kv_cache, StaticKVCache)
+            and hasattr(self, "qkv_proj")
+            and hasattr(self.qkv_proj, "qweight")
+            and hasattr(self.o_proj, "qweight")
+        ):
+            import torchburn
+            attn_out = torchburn.fused_attention_step(
+                x,
+                self.qkv_proj,
+                self.o_proj,
+                kv_cache.k,
+                kv_cache.v,
+                cos,
+                sin,
+                offset=offset,
+                num_heads=self.num_heads,
+                num_kv_heads=self.num_kv_heads,
+                head_dim=self.head_dim,
+            )
+            kv_cache.seq_len = offset + 1
+            return attn_out, kv_cache
+
         if hasattr(self, "qkv_proj"):
             qkv = self.qkv_proj(x)
             q, k, v = torch.split(qkv, [self.q_dim, self.k_dim, self.v_dim], dim=-1)

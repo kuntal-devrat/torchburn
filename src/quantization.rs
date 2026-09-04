@@ -1347,6 +1347,34 @@ unsafe fn dot_f32_u4_group_scalar(x: *const f32, w_packed: *const u8, group_size
 }
 
 #[inline(always)]
+unsafe fn dot_f32_u4_group64_fast(x: *const f32, w_packed: *const u8, has_avx512: bool, has_avx2: bool) -> f32 {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if has_avx512 {
+            return dot_f32_u4_group64_avx512(x, w_packed);
+        }
+        if has_avx2 {
+            return dot_f32_u4_group64_avx2(x, w_packed);
+        }
+    }
+    dot_f32_u4_group_scalar(x, w_packed, 64)
+}
+
+#[inline(always)]
+unsafe fn dot_f32_u4_group32_fast(x: *const f32, w_packed: *const u8, has_avx512: bool, has_avx2: bool) -> f32 {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if has_avx512 {
+            return dot_f32_u4_group32_avx512(x, w_packed);
+        }
+        if has_avx2 {
+            return dot_f32_u4_group32_avx2(x, w_packed);
+        }
+    }
+    dot_f32_u4_group_scalar(x, w_packed, 32)
+}
+
+#[inline(always)]
 unsafe fn dot_f32_u4_group64(x: *const f32, w_packed: *const u8) -> f32 {
     #[cfg(target_arch = "x86_64")]
     {
@@ -1399,6 +1427,16 @@ unsafe fn gemv_w4a32_grouped(
     let n_threads = rayon::current_num_threads();
     let min_chunk = (n / (n_threads * 4)).max(8);
 
+    #[cfg(target_arch = "x86_64")]
+    let has_avx512 = is_x86_feature_detected!("avx512f") && is_x86_feature_detected!("avx512bw");
+    #[cfg(not(target_arch = "x86_64"))]
+    let has_avx512 = false;
+
+    #[cfg(target_arch = "x86_64")]
+    let has_avx2 = is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma");
+    #[cfg(not(target_arch = "x86_64"))]
+    let has_avx2 = false;
+
     (0..n).into_par_iter().with_min_len(min_chunk).for_each(|j| {
         let x_p = x_usize as *const f32;
         let w_row = (w_usize as *const u8).add(j * bytes_per_row);
@@ -1412,7 +1450,7 @@ unsafe fn gemv_w4a32_grouped(
                 let x_grp = x_p.add(g * 64);
                 let w_grp = w_row.add(g * 32);
                 let scale = *s_row.add(g);
-                let dot = dot_f32_u4_group64(x_grp, w_grp);
+                let dot = dot_f32_u4_group64_fast(x_grp, w_grp, has_avx512, has_avx2);
                 row_sum += dot * scale;
             }
         } else if group_size == 32 {
@@ -1420,7 +1458,7 @@ unsafe fn gemv_w4a32_grouped(
                 let x_grp = x_p.add(g * 32);
                 let w_grp = w_row.add(g * 16);
                 let scale = *s_row.add(g);
-                let dot = dot_f32_u4_group32(x_grp, w_grp);
+                let dot = dot_f32_u4_group32_fast(x_grp, w_grp, has_avx512, has_avx2);
                 row_sum += dot * scale;
             }
         } else {
@@ -1699,6 +1737,16 @@ pub fn fused_swiglu_mlp_w4a32(
         let n_threads = rayon::current_num_threads();
         let min_chunk = (n_inter / (n_threads * 4)).max(8);
 
+        #[cfg(target_arch = "x86_64")]
+        let has_avx512 = is_x86_feature_detected!("avx512f") && is_x86_feature_detected!("avx512bw");
+        #[cfg(not(target_arch = "x86_64"))]
+        let has_avx512 = false;
+
+        #[cfg(target_arch = "x86_64")]
+        let has_avx2 = is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma");
+        #[cfg(not(target_arch = "x86_64"))]
+        let has_avx2 = false;
+
         (0..n_inter).into_par_iter().with_min_len(min_chunk).for_each(|j| {
             let x_p = x_usize as *const f32;
             let gw_row = unsafe { (gw_usize as *const u8).add(j * bytes_per_row_k) };
@@ -1720,8 +1768,8 @@ pub fn fused_swiglu_mlp_w4a32(
                     let g_scale = unsafe { *gs_row.add(g) };
                     let u_scale = unsafe { *us_row.add(g) };
 
-                    let g_dot = unsafe { dot_f32_u4_group64(x_grp, gw_grp) };
-                    let u_dot = unsafe { dot_f32_u4_group64(x_grp, uw_grp) };
+                    let g_dot = unsafe { dot_f32_u4_group64_fast(x_grp, gw_grp, has_avx512, has_avx2) };
+                    let u_dot = unsafe { dot_f32_u4_group64_fast(x_grp, uw_grp, has_avx512, has_avx2) };
 
                     g_sum += g_dot * g_scale;
                     u_sum += u_dot * u_scale;
@@ -1734,8 +1782,8 @@ pub fn fused_swiglu_mlp_w4a32(
                     let g_scale = unsafe { *gs_row.add(g) };
                     let u_scale = unsafe { *us_row.add(g) };
 
-                    let g_dot = unsafe { dot_f32_u4_group32(x_grp, gw_grp) };
-                    let u_dot = unsafe { dot_f32_u4_group32(x_grp, uw_grp) };
+                    let g_dot = unsafe { dot_f32_u4_group32_fast(x_grp, gw_grp, has_avx512, has_avx2) };
+                    let u_dot = unsafe { dot_f32_u4_group32_fast(x_grp, uw_grp, has_avx512, has_avx2) };
 
                     g_sum += g_dot * g_scale;
                     u_sum += u_dot * u_scale;
@@ -1867,4 +1915,391 @@ pub fn quantize_linear_weights_int4(w: &BorrowedTensor) -> PyResult<(OwnedTensor
     }
 
     Ok((out_w, out_s))
+}
+
+#[inline(always)]
+unsafe fn dot_f32_f32(a: *const f32, b: *const f32, len: usize) -> f32 {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if is_x86_feature_detected!("avx512f") && len >= 64 {
+            use std::arch::x86_64::*;
+            let a0 = _mm512_loadu_ps(a);
+            let b0 = _mm512_loadu_ps(b);
+            let mut sum0 = _mm512_mul_ps(a0, b0);
+
+            let a1 = _mm512_loadu_ps(a.add(16));
+            let b1 = _mm512_loadu_ps(b.add(16));
+            sum0 = _mm512_fmadd_ps(a1, b1, sum0);
+
+            let a2 = _mm512_loadu_ps(a.add(32));
+            let b2 = _mm512_loadu_ps(b.add(32));
+            sum0 = _mm512_fmadd_ps(a2, b2, sum0);
+
+            let a3 = _mm512_loadu_ps(a.add(48));
+            let b3 = _mm512_loadu_ps(b.add(48));
+            sum0 = _mm512_fmadd_ps(a3, b3, sum0);
+
+            return _mm512_reduce_add_ps(sum0);
+        }
+        if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") && len >= 32 {
+            use std::arch::x86_64::*;
+            let mut acc = _mm256_setzero_ps();
+            for i in (0..len).step_by(8) {
+                let av = _mm256_loadu_ps(a.add(i));
+                let bv = _mm256_loadu_ps(b.add(i));
+                acc = _mm256_fmadd_ps(av, bv, acc);
+            }
+            return hsum256_ps_avx(acc);
+        }
+    }
+    let mut sum = 0.0f32;
+    for i in 0..len {
+        sum += *a.add(i) * *b.add(i);
+    }
+    sum
+}
+
+/// Fused Attention Decode Step for W8A32 (T=1):
+/// Computes:
+/// 1. qkv = gemv_w8a32(x, qkv_w, qkv_s, qkv_b)
+/// 2. In-place RoPE on q and k with cos and sin
+/// 3. In-place update of k_cache and v_cache at offset
+/// 4. GQA Attention scores, softmax, and weighted value accumulation
+/// 5. o_out = gemv_w8a32(attn_out, o_w, o_s, o_b)
+pub fn fused_attention_step_w8a32(
+    x: &BorrowedTensor,
+    qkv_w: &BorrowedTensor,
+    qkv_s: &BorrowedTensor,
+    qkv_b: Option<&BorrowedTensor>,
+    o_w: &BorrowedTensor,
+    o_s: &BorrowedTensor,
+    o_b: Option<&BorrowedTensor>,
+    k_cache: &BorrowedTensor,
+    v_cache: &BorrowedTensor,
+    cos: &BorrowedTensor,
+    sin: &BorrowedTensor,
+    offset: usize,
+    num_heads: usize,
+    num_kv_heads: usize,
+    head_dim: usize,
+) -> PyResult<OwnedTensor> {
+    let x_rank = x.shape.len();
+    if x_rank < 1 {
+        return Err(unsupported("fused_attention_step requires x with at least 1 dim"));
+    }
+    let hidden_size = x.shape[x_rank - 1] as usize;
+    let q_dim = num_heads * head_dim;
+    let kv_dim = num_kv_heads * head_dim;
+    let total_qkv_dim = q_dim + 2 * kv_dim;
+
+    let x_slice = unsafe { typed_slice::<f32>(x) };
+    let qkv_w_slice = unsafe { typed_slice::<i8>(qkv_w) };
+    let qkv_s_slice = unsafe { typed_slice::<f32>(qkv_s) };
+    let qkv_b_slice = qkv_b.map(|b| unsafe { typed_slice::<f32>(b) });
+
+    let o_w_slice = unsafe { typed_slice::<i8>(o_w) };
+    let o_s_slice = unsafe { typed_slice::<f32>(o_s) };
+    let o_b_slice = o_b.map(|b| unsafe { typed_slice::<f32>(b) });
+
+    let cos_slice = unsafe { typed_slice::<f32>(cos) };
+    let sin_slice = unsafe { typed_slice::<f32>(sin) };
+
+    // 1. Compute QKV projection
+    let mut qkv = vec![0.0f32; total_qkv_dim];
+    unsafe {
+        gemv_w8a32(
+            x_slice.as_ptr(),
+            qkv_w_slice.as_ptr(),
+            qkv_s_slice.as_ptr(),
+            qkv_s_slice.len(),
+            qkv_b_slice.map(|b| b.as_ptr()),
+            qkv.as_mut_ptr(),
+            total_qkv_dim,
+            hidden_size,
+        );
+    }
+
+    let (q, kv_rest) = qkv.split_at_mut(q_dim);
+    let (k, v) = kv_rest.split_at_mut(kv_dim);
+
+    // 2. In-place RoPE on q and k
+    let half_dim = head_dim / 2;
+    for h in 0..num_heads {
+        let q_head = &mut q[h * head_dim..(h + 1) * head_dim];
+        for i in 0..half_dim {
+            let q1 = q_head[i];
+            let q2 = q_head[i + half_dim];
+            let c1 = cos_slice[i];
+            let s1 = sin_slice[i];
+            let c2 = cos_slice[i + half_dim];
+            let s2 = sin_slice[i + half_dim];
+            q_head[i] = q1 * c1 - q2 * s1;
+            q_head[i + half_dim] = q2 * c2 + q1 * s2;
+        }
+    }
+
+    for h in 0..num_kv_heads {
+        let k_head = &mut k[h * head_dim..(h + 1) * head_dim];
+        for i in 0..half_dim {
+            let k1 = k_head[i];
+            let k2 = k_head[i + half_dim];
+            let c1 = cos_slice[i];
+            let s1 = sin_slice[i];
+            let c2 = cos_slice[i + half_dim];
+            let s2 = sin_slice[i + half_dim];
+            k_head[i] = k1 * c1 - k2 * s1;
+            k_head[i + half_dim] = k2 * c2 + k1 * s2;
+        }
+    }
+
+    // 3. Update KV cache
+    let max_seq_len = k_cache.shape[2] as usize;
+    let head_stride = max_seq_len * head_dim;
+
+    let k_cache_mut = unsafe { std::slice::from_raw_parts_mut(k_cache.data as *mut f32, k_cache.buffer_len()) };
+    let v_cache_mut = unsafe { std::slice::from_raw_parts_mut(v_cache.data as *mut f32, v_cache.buffer_len()) };
+
+    for kv_h in 0..num_kv_heads {
+        let dst_offset = kv_h * head_stride + offset * head_dim;
+        let k_src = &k[kv_h * head_dim..(kv_h + 1) * head_dim];
+        let v_src = &v[kv_h * head_dim..(kv_h + 1) * head_dim];
+        k_cache_mut[dst_offset..dst_offset + head_dim].copy_from_slice(k_src);
+        v_cache_mut[dst_offset..dst_offset + head_dim].copy_from_slice(v_src);
+    }
+
+    // 4. Attention (GQA)
+    let seq_len = offset + 1;
+    let scale = 1.0f32 / (head_dim as f32).sqrt();
+    let heads_per_kv = num_heads / num_kv_heads;
+
+    let mut attn_out = vec![0.0f32; q_dim];
+    let mut scores = vec![0.0f32; seq_len];
+
+    for h in 0..num_heads {
+        let kv_h = h / heads_per_kv;
+        let q_ptr = unsafe { q.as_ptr().add(h * head_dim) };
+        let k_base_ptr = unsafe { (k_cache.data as *const f32).add(kv_h * head_stride) };
+        let v_base_ptr = unsafe { (v_cache.data as *const f32).add(kv_h * head_stride) };
+
+        let mut max_score = f32::NEG_INFINITY;
+        for t in 0..seq_len {
+            let k_t_ptr = unsafe { k_base_ptr.add(t * head_dim) };
+            let dot = unsafe { dot_f32_f32(q_ptr, k_t_ptr, head_dim) };
+            let sc = dot * scale;
+            scores[t] = sc;
+            if sc > max_score {
+                max_score = sc;
+            }
+        }
+
+        let mut exp_sum = 0.0f32;
+        for t in 0..seq_len {
+            let ex = (scores[t] - max_score).exp();
+            scores[t] = ex;
+            exp_sum += ex;
+        }
+        let inv_sum = 1.0f32 / exp_sum;
+
+        let out_h_ptr = unsafe { attn_out.as_mut_ptr().add(h * head_dim) };
+        for t in 0..seq_len {
+            let w = scores[t] * inv_sum;
+            let v_t_ptr = unsafe { v_base_ptr.add(t * head_dim) };
+            for d in 0..head_dim {
+                unsafe {
+                    *out_h_ptr.add(d) += w * *v_t_ptr.add(d);
+                }
+            }
+        }
+    }
+
+    // 5. Output projection
+    let mut out_shape = x.shape.clone();
+    out_shape[x_rank - 1] = hidden_size as i64;
+    let mut out = OwnedTensor::new(DType::F32, out_shape);
+    let out_slice = unsafe { typed_mut_slice::<f32>(&mut out) };
+
+    unsafe {
+        gemv_w8a32(
+            attn_out.as_ptr(),
+            o_w_slice.as_ptr(),
+            o_s_slice.as_ptr(),
+            o_s_slice.len(),
+            o_b_slice.map(|b| b.as_ptr()),
+            out_slice.as_mut_ptr(),
+            hidden_size,
+            q_dim,
+        );
+    }
+
+    Ok(out)
+}
+
+/// Fused Attention Decode Step for Grouped INT4 (T=1):
+pub fn fused_attention_step_w4a32(
+    x: &BorrowedTensor,
+    qkv_w: &BorrowedTensor,
+    qkv_s: &BorrowedTensor,
+    qkv_b: Option<&BorrowedTensor>,
+    o_w: &BorrowedTensor,
+    o_s: &BorrowedTensor,
+    o_b: Option<&BorrowedTensor>,
+    k_cache: &BorrowedTensor,
+    v_cache: &BorrowedTensor,
+    cos: &BorrowedTensor,
+    sin: &BorrowedTensor,
+    offset: usize,
+    num_heads: usize,
+    num_kv_heads: usize,
+    head_dim: usize,
+    group_size: usize,
+) -> PyResult<OwnedTensor> {
+    let x_rank = x.shape.len();
+    if x_rank < 1 {
+        return Err(unsupported("fused_attention_step_w4a32 requires x with at least 1 dim"));
+    }
+    let hidden_size = x.shape[x_rank - 1] as usize;
+    let q_dim = num_heads * head_dim;
+    let kv_dim = num_kv_heads * head_dim;
+    let total_qkv_dim = q_dim + 2 * kv_dim;
+
+    let x_slice = unsafe { typed_slice::<f32>(x) };
+    let qkv_w_slice = unsafe { typed_slice::<u8>(qkv_w) };
+    let qkv_s_slice = unsafe { typed_slice::<f32>(qkv_s) };
+    let qkv_b_slice = qkv_b.map(|b| unsafe { typed_slice::<f32>(b) });
+
+    let o_w_slice = unsafe { typed_slice::<u8>(o_w) };
+    let o_s_slice = unsafe { typed_slice::<f32>(o_s) };
+    let o_b_slice = o_b.map(|b| unsafe { typed_slice::<f32>(b) });
+
+    let cos_slice = unsafe { typed_slice::<f32>(cos) };
+    let sin_slice = unsafe { typed_slice::<f32>(sin) };
+
+    // 1. Compute QKV projection with gemv_w4a32_grouped
+    let mut qkv = vec![0.0f32; total_qkv_dim];
+    unsafe {
+        gemv_w4a32_grouped(
+            x_slice.as_ptr(),
+            qkv_w_slice.as_ptr(),
+            qkv_s_slice.as_ptr(),
+            qkv_b_slice.map(|b| b.as_ptr()),
+            qkv.as_mut_ptr(),
+            total_qkv_dim,
+            hidden_size,
+            group_size,
+        );
+    }
+
+    let (q, kv_rest) = qkv.split_at_mut(q_dim);
+    let (k, v) = kv_rest.split_at_mut(kv_dim);
+
+    // 2. In-place RoPE on q and k
+    let half_dim = head_dim / 2;
+    for h in 0..num_heads {
+        let q_head = &mut q[h * head_dim..(h + 1) * head_dim];
+        for i in 0..half_dim {
+            let q1 = q_head[i];
+            let q2 = q_head[i + half_dim];
+            let c1 = cos_slice[i];
+            let s1 = sin_slice[i];
+            let c2 = cos_slice[i + half_dim];
+            let s2 = sin_slice[i + half_dim];
+            q_head[i] = q1 * c1 - q2 * s1;
+            q_head[i + half_dim] = q2 * c2 + q1 * s2;
+        }
+    }
+
+    for h in 0..num_kv_heads {
+        let k_head = &mut k[h * head_dim..(h + 1) * head_dim];
+        for i in 0..half_dim {
+            let k1 = k_head[i];
+            let k2 = k_head[i + half_dim];
+            let c1 = cos_slice[i];
+            let s1 = sin_slice[i];
+            let c2 = cos_slice[i + half_dim];
+            let s2 = sin_slice[i + half_dim];
+            k_head[i] = k1 * c1 - k2 * s1;
+            k_head[i + half_dim] = k2 * c2 + k1 * s2;
+        }
+    }
+
+    // 3. Update KV cache
+    let max_seq_len = k_cache.shape[2] as usize;
+    let head_stride = max_seq_len * head_dim;
+
+    let k_cache_mut = unsafe { std::slice::from_raw_parts_mut(k_cache.data as *mut f32, k_cache.buffer_len()) };
+    let v_cache_mut = unsafe { std::slice::from_raw_parts_mut(v_cache.data as *mut f32, v_cache.buffer_len()) };
+
+    for kv_h in 0..num_kv_heads {
+        let dst_offset = kv_h * head_stride + offset * head_dim;
+        let k_src = &k[kv_h * head_dim..(kv_h + 1) * head_dim];
+        let v_src = &v[kv_h * head_dim..(kv_h + 1) * head_dim];
+        k_cache_mut[dst_offset..dst_offset + head_dim].copy_from_slice(k_src);
+        v_cache_mut[dst_offset..dst_offset + head_dim].copy_from_slice(v_src);
+    }
+
+    // 4. Attention (GQA)
+    let seq_len = offset + 1;
+    let scale = 1.0f32 / (head_dim as f32).sqrt();
+    let heads_per_kv = num_heads / num_kv_heads;
+
+    let mut attn_out = vec![0.0f32; q_dim];
+    let mut scores = vec![0.0f32; seq_len];
+
+    for h in 0..num_heads {
+        let kv_h = h / heads_per_kv;
+        let q_ptr = unsafe { q.as_ptr().add(h * head_dim) };
+        let k_base_ptr = unsafe { (k_cache.data as *const f32).add(kv_h * head_stride) };
+        let v_base_ptr = unsafe { (v_cache.data as *const f32).add(kv_h * head_stride) };
+
+        let mut max_score = f32::NEG_INFINITY;
+        for t in 0..seq_len {
+            let k_t_ptr = unsafe { k_base_ptr.add(t * head_dim) };
+            let dot = unsafe { dot_f32_f32(q_ptr, k_t_ptr, head_dim) };
+            let sc = dot * scale;
+            scores[t] = sc;
+            if sc > max_score {
+                max_score = sc;
+            }
+        }
+
+        let mut exp_sum = 0.0f32;
+        for t in 0..seq_len {
+            let ex = (scores[t] - max_score).exp();
+            scores[t] = ex;
+            exp_sum += ex;
+        }
+        let inv_sum = 1.0f32 / exp_sum;
+
+        let out_h_ptr = unsafe { attn_out.as_mut_ptr().add(h * head_dim) };
+        for t in 0..seq_len {
+            let w = scores[t] * inv_sum;
+            let v_t_ptr = unsafe { v_base_ptr.add(t * head_dim) };
+            for d in 0..head_dim {
+                unsafe {
+                    *out_h_ptr.add(d) += w * *v_t_ptr.add(d);
+                }
+            }
+        }
+    }
+
+    // 5. Output projection with gemv_w4a32_grouped
+    let mut out_shape = x.shape.clone();
+    out_shape[x_rank - 1] = hidden_size as i64;
+    let mut out = OwnedTensor::new(DType::F32, out_shape);
+    let out_slice = unsafe { typed_mut_slice::<f32>(&mut out) };
+
+    unsafe {
+        gemv_w4a32_grouped(
+            attn_out.as_ptr(),
+            o_w_slice.as_ptr(),
+            o_s_slice.as_ptr(),
+            o_b_slice.map(|b| b.as_ptr()),
+            out_slice.as_mut_ptr(),
+            hidden_size,
+            q_dim,
+            group_size,
+        );
+    }
+
+    Ok(out)
 }
