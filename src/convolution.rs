@@ -15,11 +15,19 @@ use crate::dlpack::{contiguous_strides, unsupported, BorrowedTensor, DType, Owne
 use pyo3::prelude::*;
 
 unsafe fn typed_slice<T>(t: &BorrowedTensor) -> &[T] {
-    std::slice::from_raw_parts(t.data as *const T, t.buffer_len())
+    if t.buffer_len() == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(t.data as *const T, t.buffer_len())
+    }
 }
 
 unsafe fn typed_mut_slice<T>(t: &mut OwnedTensor) -> &mut [T] {
-    std::slice::from_raw_parts_mut(t.data.as_mut_ptr() as *mut T, t.elem_count())
+    if t.elem_count() == 0 {
+        &mut []
+    } else {
+        std::slice::from_raw_parts_mut(t.data.as_mut_ptr() as *mut T, t.elem_count())
+    }
 }
 
 fn require_contiguous(t: &BorrowedTensor, what: &str) -> PyResult<()> {
@@ -126,6 +134,9 @@ fn conv2d_f32(
     let (ph, pw) = (padding.0, padding.1);
     let (dh, dw) = (dilation.0 as usize, dilation.1 as usize);
     let channel_plane_elems = out_h * out_w;
+    if channel_plane_elems == 0 || out_data.is_empty() {
+        return Ok(out);
+    }
 
     use rayon::prelude::*;
     // Parallelize over (batch, channel): each worker owns a disjoint
@@ -223,6 +234,9 @@ fn conv2d_f64(
     let (ph, pw) = (padding.0, padding.1);
     let (dh, dw) = (dilation.0 as usize, dilation.1 as usize);
     let channel_plane_elems = out_h * out_w;
+    if channel_plane_elems == 0 || out_data.is_empty() {
+        return Ok(out);
+    }
 
     use rayon::prelude::*;
     out_data

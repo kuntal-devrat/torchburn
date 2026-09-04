@@ -587,3 +587,18 @@ def cross_entropy(input: Tensor, target: Tensor, reduction: str = 'mean') -> Ten
         _tape.record("cross_entropy", [input._id, target._id], out._id,
                       [input.data, target.data.long()], {"reduction": reduction})
     return out
+
+
+def backward_single(
+    target: str,
+    upstream: torch.Tensor,
+    saved_inputs: list[torch.Tensor],
+    kwargs: dict | None = None,
+) -> list[torch.Tensor]:
+    """Compute VJP for a single operation via Rust native backward."""
+    entry = _TapeEntry(target, list(range(len(saved_inputs))), 0, saved_inputs, kwargs or {})
+    res = _backward_single(entry, upstream)
+    if res is None:
+        raise RuntimeError(f"backward_single failed for {target}")
+    return [r for r in res if r is not None]
+

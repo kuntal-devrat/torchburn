@@ -24,12 +24,20 @@ use wide::f32x4;
 
 /// Read a tensor's elements as a typed slice.
 unsafe fn typed_slice<T>(t: &BorrowedTensor) -> &[T] {
-    std::slice::from_raw_parts(t.data as *const T, t.buffer_len())
+    if t.buffer_len() == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(t.data as *const T, t.buffer_len())
+    }
 }
 
 /// Write typed data into an owned tensor.
 unsafe fn typed_mut_slice<T>(t: &mut OwnedTensor) -> &mut [T] {
-    std::slice::from_raw_parts_mut(t.data.as_mut_ptr() as *mut T, t.elem_count())
+    if t.elem_count() == 0 {
+        &mut []
+    } else {
+        std::slice::from_raw_parts_mut(t.data.as_mut_ptr() as *mut T, t.elem_count())
+    }
 }
 
 /// Load four contiguous f32s starting at `off` into a SIMD lane.
@@ -50,25 +58,50 @@ fn mask_value(mask: &BorrowedTensor, b: usize, h: usize, i: usize, j: usize) -> 
         match mask.dtype {
             DType::Bool => {
                 let bytes = unsafe { typed_slice::<u8>(mask) };
-                return if bytes[0] != 0 {
+                return if !bytes.is_empty() && bytes[0] != 0 {
                     0.0
                 } else {
                     f32::NEG_INFINITY
                 };
             }
-            DType::F32 => return (unsafe { typed_slice::<f32>(mask) })[0],
-            DType::F64 => return (unsafe { typed_slice::<f64>(mask) })[0] as f32,
+            DType::F32 => {
+                let s = unsafe { typed_slice::<f32>(mask) };
+                return if !s.is_empty() { s[0] } else { 0.0 };
+            }
+            DType::F64 => {
+                let s = unsafe { typed_slice::<f64>(mask) };
+                return if !s.is_empty() { s[0] as f32 } else { 0.0 };
+            }
             _ => return 0.0,
         }
     }
-    // Build coords from the trailing dims, padding with 1 (broadcast) in front.
-    let coords = [b, h, i, j];
+    // Determine coordinate mapping based on rank (right-to-left broadcasting).
+    // In transformers and PyTorch SDPA:
+    // - 4D: [B, H, T, T] -> [b, h, i, j]
+    // - 3D: [H, T, T] (head-specific) or [B, T, T] (batch-specific)
+    // - 2D: [T, T] -> [i, j]
+    // - 1D: [T] -> [j]
+    let coords: [usize; 4] = match rank {
+        1 => [0, 0, 0, j],
+        2 => [0, 0, i, j],
+        3 => {
+            if m[0] as usize == b && b != h {
+                [0, b, i, j]
+            } else {
+                [0, h, i, j]
+            }
+        }
+        _ => [b, h, i, j],
+    };
+
     let mut idx = 0usize;
     for k in 0..rank {
-        let grid_k = if rank <= 4 { 4 - rank + k } else { k };
         let dim = m[k].max(1) as usize;
-        let coord = if dim == 1 { 0 } else { coords[grid_k] };
+        let coord = if dim == 1 { 0 } else { coords[4 - rank + k] };
         idx += coord * mask.strides[k] as usize;
+    }
+    if idx >= mask.buffer_len() {
+        return 0.0;
     }
     match mask.dtype {
         DType::Bool => {
@@ -93,7 +126,6 @@ fn mask_value(mask: &BorrowedTensor, b: usize, h: usize, i: usize, j: usize) -> 
 /// matching torch's all-zero output for fully-masked rows.
 #[inline]
 fn softmax_row(scores: &mut [f32]) -> f32 {
-    let t = scores.len();
     let mut max_s = f32::NEG_INFINITY;
     for &s in scores.iter() {
         if s > max_s {
@@ -101,22 +133,10 @@ fn softmax_row(scores: &mut [f32]) -> f32 {
         }
     }
     let mut z = 0.0f32;
-    let maxv = f32x4::splat(max_s);
-    let mut j = 0;
-    while j + 4 <= t {
-        let e = (load4(scores, j) - maxv).exp();
-        let arr = e.to_array();
-        for k in 0..4 {
-            scores[j + k] = arr[k];
-            z += arr[k];
-        }
-        j += 4;
-    }
-    while j < t {
-        let e = (scores[j] - max_s).exp();
-        scores[j] = e;
+    for s in scores.iter_mut() {
+        let e = (*s - max_s).exp();
+        *s = e;
         z += e;
-        j += 1;
     }
     z
 }

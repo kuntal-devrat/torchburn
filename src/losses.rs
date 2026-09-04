@@ -1,7 +1,7 @@
 //! Loss kernels (Phase 4).
 //!
-//! All losses support torch's reduction convention: 0 = sum, 1 = mean,
-//! 2 = none (elementwise).  The `nll_loss_forward` op mirrors aten's tuple
+//! All losses support torch's reduction convention: 0 = none (elementwise),
+//! 1 = mean, 2 = sum.  The `nll_loss_forward` op mirrors aten's tuple
 //! contract (loss, total_weight): the engine produces the loss; getitem(0)
 //! aliases it and dead getitem(1) nodes are dropped by the parser.
 
@@ -55,7 +55,7 @@ impl LossScalar for f64 {
     }
 }
 
-/// Apply a reduction (0=sum, 1=mean, 2=none) to an elementwise loss buffer.
+/// Apply a reduction (0=none, 1=mean, 2=sum) to an elementwise loss buffer.
 fn reduce_loss<T: LossScalar>(
     data: &[T],
     n: usize,
@@ -63,13 +63,13 @@ fn reduce_loss<T: LossScalar>(
     elem_out: &mut OwnedTensor,
 ) -> PyResult<()> {
     match reduction {
-        2 => {
+        0 => {
             // none: copy elements through (keep the elementwise shape)
             let out_data = unsafe { typed_mut_slice::<T>(elem_out) };
             out_data.copy_from_slice(data);
         }
-        0 | 1 => {
-            // sum/mean: scalar output (0-dim tensor, like torch)
+        1 | 2 => {
+            // mean (1) / sum (2): scalar output (0-dim tensor, like torch)
             elem_out.shape = vec![];
             let mut total = T::from_f64(0.0);
             for &v in data {
@@ -175,14 +175,14 @@ pub fn nll_loss_forward(
             };
             let total: f32 = losses.iter().sum();
             let out = match reduction {
-                0 => total,
-                1 => total / denom,
-                2 => {
+                0 => {
                     // none: elementwise output [N]
                     let mut o = OwnedTensor::new(DType::F32, target.shape.clone());
                     unsafe { typed_mut_slice::<f32>(&mut o) }.copy_from_slice(&losses);
                     return Ok(o);
                 }
+                1 => total / denom,
+                2 => total,
                 other => return Err(unsupported(&format!("unsupported reduction {other}"))),
             };
             Ok(scalar_f32(out))
@@ -245,13 +245,13 @@ pub fn nll_loss_forward(
             };
             let total: f64 = losses.iter().sum();
             let out = match reduction {
-                0 => total,
-                1 => total / denom,
-                2 => {
+                0 => {
                     let mut o = OwnedTensor::new(DType::F64, target.shape.clone());
                     unsafe { typed_mut_slice::<f64>(&mut o) }.copy_from_slice(&losses);
                     return Ok(o);
                 }
+                1 => total / denom,
+                2 => total,
                 other => return Err(unsupported(&format!("unsupported reduction {other}"))),
             };
             Ok(scalar_f64(out))

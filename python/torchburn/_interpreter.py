@@ -35,7 +35,10 @@ _MIXED_FLOAT = (torch.float16, torch.bfloat16)
 
 
 def _warn_fallback(target: str, reason: str = "") -> None:
-    key = (target, reason)
+    # Dedup on the operator alone: the same op can fall back through both the
+    # native-phase path (with reason) and the eager-phase path (without), which
+    # would otherwise emit two warnings for one event.
+    key = target
     with _WARN_LOCK:
         if key in _WARNED:
             return
@@ -429,27 +432,6 @@ class _BaseInterpreter:
         elif isinstance(args, (list, tuple)):
             for item in args:
                 self._collect_refs(item, chunk_ids, needed)
-
-    def _node_ok(self, node: dict[str, Any], env: dict[int, Any]) -> bool:
-        for arg in node["args"]:
-            kind = arg.get("kind", "")
-            if kind == "const":
-                if isinstance(arg.get("value"), bool):
-                    return False
-                continue
-            if kind == "seq":
-                continue
-            if kind not in ("input", "node", "attr"):
-                continue
-            value = env.get(arg["index"])
-            if isinstance(value, (tuple, list)):
-                return False
-            if isinstance(value, torch.Tensor):
-                if value.device.type != "cpu":
-                    return False
-                if value.dtype not in _F32_F64 + _INT_BOOL + _MIXED_FLOAT:
-                    return False
-        return True
 
     def _tensor_for(self, arg: dict[str, Any], node: dict[str, Any], env: dict[int, Any]) -> torch.Tensor:
         if arg["kind"] == "const":

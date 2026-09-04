@@ -710,6 +710,82 @@ pub fn bmm(a: &BorrowedTensor, b: &BorrowedTensor) -> PyResult<OwnedTensor> {
 // Linear: (B, I) x (I, O) + (O,) -> (B, O) or (I,) x (I, O) + (O,) -> (O,)
 // ---------------------------------------------------------------------------
 
+#[inline(always)]
+fn apply_epilogue_f32(out_data: &mut [f32], ep: &crate::fusion::ActSpec) {
+    if out_data.len() >= 16 * 1024 {
+        use rayon::prelude::*;
+        out_data
+            .par_chunks_mut(16 * 1024)
+            .for_each(|chunk| match ep.kind {
+                crate::fusion::UnaryKind::Relu => {
+                    for v in chunk.iter_mut() {
+                        if *v < 0.0 {
+                            *v = 0.0;
+                        }
+                    }
+                }
+                _ => {
+                    for v in chunk.iter_mut() {
+                        *v = crate::fusion::apply_unary_f32(ep.kind, *v, ep.params);
+                    }
+                }
+            });
+    } else {
+        match ep.kind {
+            crate::fusion::UnaryKind::Relu => {
+                for v in out_data.iter_mut() {
+                    if *v < 0.0 {
+                        *v = 0.0;
+                    }
+                }
+            }
+            _ => {
+                for v in out_data.iter_mut() {
+                    *v = crate::fusion::apply_unary_f32(ep.kind, *v, ep.params);
+                }
+            }
+        }
+    }
+}
+
+#[inline(always)]
+fn apply_epilogue_f64(out_data: &mut [f64], ep: &crate::fusion::ActSpec) {
+    if out_data.len() >= 16 * 1024 {
+        use rayon::prelude::*;
+        out_data
+            .par_chunks_mut(16 * 1024)
+            .for_each(|chunk| match ep.kind {
+                crate::fusion::UnaryKind::Relu => {
+                    for v in chunk.iter_mut() {
+                        if *v < 0.0 {
+                            *v = 0.0;
+                        }
+                    }
+                }
+                _ => {
+                    for v in chunk.iter_mut() {
+                        *v = crate::fusion::apply_unary_f64(ep.kind, *v, ep.params);
+                    }
+                }
+            });
+    } else {
+        match ep.kind {
+            crate::fusion::UnaryKind::Relu => {
+                for v in out_data.iter_mut() {
+                    if *v < 0.0 {
+                        *v = 0.0;
+                    }
+                }
+            }
+            _ => {
+                for v in out_data.iter_mut() {
+                    *v = crate::fusion::apply_unary_f64(ep.kind, *v, ep.params);
+                }
+            }
+        }
+    }
+}
+
 // aten.addmm(bias, mat1, mat2) = mat1 @ mat2 + bias, where mat2 is (I, O)
 // (NOT transposed — unlike `linear`, whose weight is (O, I)).
 pub fn addmm(
@@ -778,9 +854,7 @@ pub fn addmm(
                 gemm_f32_into_accum(&a_c, &b_c, out_data, m, k, n);
             }
             if let Some(ep) = epilogue {
-                for v in out_data.iter_mut() {
-                    *v = crate::fusion::apply_unary_f32(ep.kind, *v, ep.params);
-                }
+                apply_epilogue_f32(out_data, ep);
             }
         }
         DType::F64 => {
@@ -816,9 +890,7 @@ pub fn addmm(
                 gemm_f64_into_accum(&a_c, &b_c, out_data, m, k, n);
             }
             if let Some(ep) = epilogue {
-                for v in out_data.iter_mut() {
-                    *v = crate::fusion::apply_unary_f64(ep.kind, *v, ep.params);
-                }
+                apply_epilogue_f64(out_data, ep);
             }
         }
 
@@ -914,9 +986,7 @@ pub fn linear(
             let w_ptr = weight.data as *const f32;
             gemm_f32_trans_b_into_accum(a_ptr, n_batch, i, w_ptr, i, out_data.as_mut_ptr(), o);
             if let Some(ep) = epilogue {
-                for v in out_data.iter_mut() {
-                    *v = crate::fusion::apply_unary_f32(ep.kind, *v, ep.params);
-                }
+                apply_epilogue_f32(out_data, ep);
             }
         }
         DType::F64 => {
@@ -953,9 +1023,7 @@ pub fn linear(
             let w_ptr = weight.data as *const f64;
             gemm_f64_trans_b_into_accum(a_ptr, n_batch, i, w_ptr, i, out_data.as_mut_ptr(), o);
             if let Some(ep) = epilogue {
-                for v in out_data.iter_mut() {
-                    *v = crate::fusion::apply_unary_f64(ep.kind, *v, ep.params);
-                }
+                apply_epilogue_f64(out_data, ep);
             }
         }
 

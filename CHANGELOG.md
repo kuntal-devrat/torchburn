@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-09-04
+
+### Added
+- **Chunked SIMD Activation Parallelization**: Replaced unchunked Rayon iterations in `src/activations.rs` with `PAR_CHUNK = 16 * 1024` and vectorized `exact_gelu_f32x8` via `wide` SIMD, delivering a 7.7× speedup in GELU operations (9.83 ms → 1.28 ms).
+- **Single-Pass Kernel Loop Fusion**: Enhanced `src/fusion.rs` with `Sin`, `Cos`, `Tan` in `UnaryKind` and `Fp` traits. Implemented stack-allocated `run_chunk_single_pass` (`[T; 32]`), eliminating intermediate heap scratch allocations across fused multi-input DAGs.
+- **Prepared Graph Pre-Planning**: Introduced `PreplannedExecution` cache in `src/engine.rs` (`PreparedGraph`), bypassing repeated runtime AST cloning, fusion re-planning, and HashMap allocation on consecutive inference iterations.
+- **Vectorized Linear & GEMM Epilogues**: Replaced scalar loops in `src/linalg.rs` with chunked parallelized `apply_epilogue_f32` and `apply_epilogue_f64` for fused GEMM activations.
+- **Engine Architecture Documentation**: Documented the 3 core engines (`native_cpu`, `burn_ndarray`, `burn_wgpu`), clarifying the essential role of `burn_ndarray` as the pure-Rust golden reference and headless CI fallback.
+
+### Fixed
+- **Native CPU Default Execution**: Explicitly defaulted runtime execution to zero-copy `native_cpu` instead of automatically escalating to integrated GPU / WGPU on headless runners, preventing uninitialized buffer readback on macOS CI.
+- **CI Pipeline Hardening**: Updated `.github/workflows/ci.yml` test matrix and `cibuildwheel` environments to explicitly set `TORCHBURN_ENGINE="native_cpu"`, resolving CI test failures on macOS runners.
+- **Clippy Strict Compliance**: Replaced approximate float constants in `src/activations.rs` with `std::f32::consts::LOG2_E` and `std::f32::consts::LN_2`.
+- **Clean SVG Logo**: Removed pulsing keyframe animations and glowing drop-shadow filters from `assets/logo.svg`, retaining a clean, crisp static vector icon.
+
+### Changed
+- Version bump `0.5.0` → `0.5.1` across `Cargo.toml`, `pyproject.toml`, and package metadata.
+
 ## [0.5.0] - 2026-08-30
 
 ### Added

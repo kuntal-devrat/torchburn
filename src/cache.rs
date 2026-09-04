@@ -28,9 +28,11 @@ impl LruCache {
     }
     fn get(&mut self, key: &str) -> Option<&Value> {
         if self.map.contains_key(key) {
-            // Move to back (most recent)
-            self.order.retain(|k| k != key);
-            self.order.push_back(key.to_string());
+            // Move to back (most recent) only if not already at back
+            if !self.order.back().is_some_and(|k| k == key) {
+                self.order.retain(|k| k != key);
+                self.order.push_back(key.to_string());
+            }
             self.map.get(key)
         } else {
             None

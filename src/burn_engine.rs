@@ -73,6 +73,11 @@ fn read_inputs(payload: &Payload, capsules: &[Bound<'_, PyCapsule>]) -> PyResult
             return Err(unsupported("burn engine requires contiguous inputs"));
         }
         let n = t.elem_count();
+        if n == 0 {
+            return Err(unsupported(
+                "burn engine does not support empty tensors; fallback to native",
+            ));
+        }
         // SAFETY: the DLPack buffer is alive for this call and holds n f32s.
         let slice = unsafe { std::slice::from_raw_parts(t.data as *const f32, n) };
         inputs.push(slice.to_vec());

@@ -7,11 +7,19 @@ use crate::dlpack::{unsupported, BorrowedTensor, DType, OwnedTensor};
 use pyo3::prelude::*;
 
 unsafe fn typed_slice<T>(t: &BorrowedTensor) -> &[T] {
-    std::slice::from_raw_parts(t.data as *const T, t.buffer_len())
+    if t.buffer_len() == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(t.data as *const T, t.buffer_len())
+    }
 }
 
 unsafe fn typed_mut_slice<T>(t: &mut OwnedTensor) -> &mut [T] {
-    std::slice::from_raw_parts_mut(t.data.as_mut_ptr() as *mut T, t.elem_count())
+    if t.elem_count() == 0 {
+        &mut []
+    } else {
+        std::slice::from_raw_parts_mut(t.data.as_mut_ptr() as *mut T, t.elem_count())
+    }
 }
 
 fn require_contiguous(t: &BorrowedTensor, what: &str) -> PyResult<()> {
@@ -119,6 +127,9 @@ fn max_pool2d_f32(
     let out_data = unsafe { typed_mut_slice::<f32>(&mut out) };
 
     let plane_elems = c * out_h * out_w;
+    if plane_elems == 0 || out_data.is_empty() {
+        return Ok(out);
+    }
     use rayon::prelude::*;
     out_data
         .par_chunks_mut(plane_elems)
@@ -201,6 +212,9 @@ fn max_pool2d_f64(
     let out_data = unsafe { typed_mut_slice::<f64>(&mut out) };
 
     let plane_elems = c * out_h * out_w;
+    if plane_elems == 0 || out_data.is_empty() {
+        return Ok(out);
+    }
     use rayon::prelude::*;
     out_data
         .par_chunks_mut(plane_elems)
@@ -323,6 +337,9 @@ fn avg_pool2d_f32(
     let out_data = unsafe { typed_mut_slice::<f32>(&mut out) };
 
     let plane_elems = c * out_h * out_w;
+    if plane_elems == 0 || out_data.is_empty() {
+        return Ok(out);
+    }
     use rayon::prelude::*;
     out_data
         .par_chunks_mut(plane_elems)
@@ -405,6 +422,9 @@ fn avg_pool2d_f64(
     let out_data = unsafe { typed_mut_slice::<f64>(&mut out) };
 
     let plane_elems = c * out_h * out_w;
+    if plane_elems == 0 || out_data.is_empty() {
+        return Ok(out);
+    }
     use rayon::prelude::*;
     out_data
         .par_chunks_mut(plane_elems)

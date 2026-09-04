@@ -445,6 +445,7 @@ _FUNCTION_TO_OP: dict[str, str] = {
     "torch.nn.functional.gru_cell": "gru_cell",
     "torch.nn.functional.lstm_cell": "lstm_cell",
     "torch.nn.functional.multi_head_attention_forward": "multi_head_attention_forward",
+    "torch._transformer_encoder_layer_fwd": "transformer_encoder_layer_fwd",
     "torch.linalg.lu_solve": "lu_solve",
     "torch.lu_unpack": "lu_unpack",
     "torch.linalg.solve": "linalg_solve",
@@ -512,7 +513,8 @@ _FUNCTION_TO_OP: dict[str, str] = {
     "torch.tensor_split": "tensor_split",
     "torch.take_along_dim": "take_along_dim",
     "torch.index_reduce": "index_reduce",
-    "torch.scatter": "scatter_max",
+    "torch.scatter_max": "scatter_max",
+    "torch.scatter_min": "scatter_min",
     "torch.linalg.multi_dot": "linalg_multi_dot",
     "torch.linalg.vander": "linalg_vander",
     "torch.linalg.vecdot": "linalg_vecdot",
@@ -897,6 +899,13 @@ _ATEN_TO_OP: dict[str, str] = {
     # Attention
     "aten._scaled_dot_product_flash_attention.default": "scaled_dot_product_attention",
     "aten._scaled_dot_product_efficient_attention.default": "scaled_dot_product_attention",
+    # Batch norm fused variants return (out, running_mean, running_var); the
+    # engine returns just the normalised output and getitem(0) aliases it.
+    # Schema arg order is (input, weight, bias, running_mean, running_var, ...)
+    # — see the parse_graph normalisation below.
+    "aten._native_batch_norm_legit_no_training.default": "batch_norm",
+    "aten._native_batch_norm_legit_no_training.training": "batch_norm",
+    "aten.div.Scalar": "div",
 }
 
 # Tensor method names (call_method nodes) -> canonical op names
@@ -936,6 +945,8 @@ _METHOD_TO_OP: dict[str, str] = {
     "contiguous": "contiguous",
     # Phase 10: missing method targets
     "transpose": "transpose",
+    "unbind": "unbind",
+    "chunk": "chunk",
     "repeat": "repeat",
     "sort": "sort",
     "scatter": "scatter",
@@ -967,10 +978,6 @@ _METHOD_TO_OP: dict[str, str] = {
     "round_": "round",
     "reciprocal_": "reciprocal",
     "sign_": "sign",
-    "add_": "add",
-    "sub_": "sub",
-    "mul_": "mul",
-    "div_": "div",
     "view_as": "view_as",
     "expand_as": "expand_as",
     "isreal": "isreal",
@@ -1126,6 +1133,7 @@ _REDUCE_POSITIONAL_KWARGS: dict[str, list[str]] = {
     "clamp": ["min", "max"],
     "clamp_min": ["min"],
     "clamp_max": ["max"],
+    "gelu": ["approximate"],
     "isclose": ["rtol", "atol", "equal_nan"],
     "allclose": ["rtol", "atol", "equal_nan"],
     "nanprod": ["dim", "keepdim"],
@@ -1184,6 +1192,15 @@ _SDPA_POSITIONAL_KWARGS: dict[str, list[str]] = {
     "scaled_dot_product_attention": ["dropout_p", "is_causal"],
 }
 
+# Fused TransformerEncoderLayer (_transformer_encoder_layer_fwd).  The scalar
+# params (embed_dim, num_heads, use_gelu, norm_first, eps) arrive as positional
+# consts interleaved with tensor args; promote them to kwargs.  Tensor args stay
+# positional in original order (src, qkv_w, qkv_b, proj_w, proj_b, nw1, nb1,
+# nw2, nb2, ffn_w1, ffn_b1, ffn_w2, ffn_b2, mask?, bias?).
+_TRANSFORMER_POSITIONAL_KWARGS: dict[str, list[str]] = {
+    "transformer_encoder_layer_fwd": ["embed_dim", "num_heads", "use_gelu", "norm_first", "eps"],
+}
+
 # Ops whose engine kernel consumes a fixed prefix of tensor args.  Dynamo
 # replays a function's full positional signature (defaults included), so e.g.
 # F.embedding arrives with padding_idx/max_norm/norm_type/scale_grad_by_freq/
@@ -1207,7 +1224,7 @@ _LOSS_POSITIONAL_KWARGS: dict[str, list[str]] = {
 # the engine produces element 0 natively; getitem(0) aliases it, a consumed
 # getitem(1) forces eager.
 _TUPLE_OUTPUT_OPS = frozenset({"max_reduce", "min_reduce", "nll_loss_forward", "scaled_dot_product_attention", "sort", "unbind", "chunk",
-"var_mean","std_mean","linalg_cholesky_ex","linalg_inv_ex","linalg_solve_ex","linalg_lu_factor","split","vsplit","hsplit","dsplit","tensor_split","broadcast_tensors","qr","svd","eig","eigh","lu","linalg_slogdet","linalg_cholesky","lstm_cell"})
+"var_mean","std_mean","linalg_cholesky_ex","linalg_inv_ex","linalg_solve_ex","linalg_lu_factor","split","vsplit","hsplit","dsplit","tensor_split","broadcast_tensors","qr","svd","eig","eigh","lu","linalg_slogdet","linalg_cholesky","lstm_cell","batch_norm","max_pool2d","adaptive_max_pool2d"})
 
 
 def _promote_positional_args_to_kwargs(
@@ -1227,6 +1244,7 @@ def _promote_positional_args_to_kwargs(
         or _SDPA_POSITIONAL_KWARGS.get(op)
         or _LOSS_POSITIONAL_KWARGS.get(op)
         or _TRANSPOSE_POSITIONAL_KWARGS.get(op)
+        or _TRANSFORMER_POSITIONAL_KWARGS.get(op)
     )
     if names is None:
         return args, existing_kwargs
@@ -1488,6 +1506,14 @@ def parse_graph(
                 if op == "embedding" and target_key.startswith("torch.nn.functional"):
                     if len(args) == 2:
                         args = [args[1], args[0]]
+                # aten *_native_batch_norm* variants carry schema order
+                # (input, weight, bias, running_mean, running_var); the engine
+                # kernel expects F.batch_norm order (input, running_mean,
+                # running_var, weight, bias).  Consts were already promoted to
+                # kwargs, so only the 5 tensor refs remain.
+                if op == "batch_norm" and target_key.startswith("aten.") and "native_batch_norm" in target_key:
+                    if len(args) >= 5:
+                        args = [args[0], args[3], args[4], args[1], args[2]]
                 # aten.std.correction / aten.var.correction pass ``correction``
                 # (torch's divisor adjustment) as a kwarg, but the engine reads
                 # ``unbiased`` (bool).  Map 0 -> False, 1 -> True; anything else
@@ -1521,6 +1547,13 @@ def parse_graph(
                     if len(vals) >= 3:
                         extracted_kwargs["step"] = vals[1]
                     args = []
+                    # torch.arange defaults to int64; the engine defaults to f32.
+                    # Emit i64 when every bound is integral so index tensors fed
+                    # to embedding stay integer (the kernel rejects float ids).
+                    if "dtype" not in extracted_kwargs and vals and all(
+                        isinstance(v, int) and not isinstance(v, bool) for v in vals
+                    ):
+                        extracted_kwargs["dtype"] = "i64"
                 # einsum: equation string is args[0] (const), tensors start at args[1]
                 if op == "einsum" and args and isinstance(args[0], dict) and args[0].get("kind") == "const":
                     extracted_kwargs["equation"] = args[0]["value"]

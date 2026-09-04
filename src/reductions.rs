@@ -120,6 +120,14 @@ fn sum_f64(a: &BorrowedTensor, dim: usize, keepdim: bool) -> OwnedTensor {
 }
 
 pub fn sum(a: &BorrowedTensor, dim: Option<isize>, keepdim: bool) -> PyResult<OwnedTensor> {
+    let _contig;
+    let a = if !a.is_contiguous() {
+        _contig = crate::shape_ops::to_contiguous(a)?;
+        BorrowedTensor::from_owned(&_contig)
+    } else {
+        a.clone()
+    };
+    let a = &a;
     match dim {
         Some(d) => {
             let d = norm_dim(d, a.shape.len());
@@ -225,6 +233,48 @@ pub fn mean(a: &BorrowedTensor, dim: Option<isize>, keepdim: bool) -> PyResult<O
 }
 
 // ---------------------------------------------------------------------------
+// Multi-dim reductions (dim as a list, e.g. aten.mean.dim with [1, 2])
+// ---------------------------------------------------------------------------
+
+pub fn sum_dims(a: &BorrowedTensor, dims: &[isize], keepdim: bool) -> PyResult<OwnedTensor> {
+    let rank = a.shape.len();
+    let norm: Vec<usize> = dims.iter().map(|&d| norm_dim(d, rank)).collect();
+    if norm.len() <= 1 {
+        return sum(a, norm.first().map(|&d| d as isize), keepdim);
+    }
+    // Reduce with keepdim=true on every step except the last so positions stay
+    // valid for the remaining dims; the final step honours the caller's flag.
+    let mut cur = sum(a, Some(norm[0] as isize), true)?;
+    for (i, &d) in norm.iter().enumerate().skip(1) {
+        let last = i == norm.len() - 1;
+        let view = cur.as_view();
+        cur = sum(&view, Some(d as isize), if last { keepdim } else { true })?;
+    }
+    Ok(cur)
+}
+
+pub fn mean_dims(a: &BorrowedTensor, dims: &[isize], keepdim: bool) -> PyResult<OwnedTensor> {
+    let rank = a.shape.len();
+    let norm: Vec<usize> = dims.iter().map(|&d| norm_dim(d, rank)).collect();
+    let divisor: f64 = norm.iter().map(|&d| a.shape[d] as f64).product();
+    let mut cur = sum_dims(a, dims, keepdim)?;
+    match a.dtype {
+        DType::F32 => {
+            for v in unsafe { typed_mut_slice::<f32>(&mut cur) }.iter_mut() {
+                *v /= divisor as f32;
+            }
+        }
+        DType::F64 => {
+            for v in unsafe { typed_mut_slice::<f64>(&mut cur) }.iter_mut() {
+                *v /= divisor;
+            }
+        }
+        _ => return Err(unsupported("mean_dims: only f32/f64 tensors supported")),
+    }
+    Ok(cur)
+}
+
+// ---------------------------------------------------------------------------
 // Max / Min
 // ---------------------------------------------------------------------------
 
@@ -317,6 +367,14 @@ pub fn max_reduce(
     dim: Option<isize>,
     keepdim: bool,
 ) -> PyResult<(OwnedTensor, OwnedTensor)> {
+    let _contig;
+    let a = if !a.is_contiguous() {
+        _contig = crate::shape_ops::to_contiguous(a)?;
+        BorrowedTensor::from_owned(&_contig)
+    } else {
+        a.clone()
+    };
+    let a = &a;
     match dim {
         Some(d) => {
             let d = norm_dim(d, a.shape.len());
@@ -474,6 +532,14 @@ pub fn min_reduce(
     dim: Option<isize>,
     keepdim: bool,
 ) -> PyResult<(OwnedTensor, OwnedTensor)> {
+    let _contig;
+    let a = if !a.is_contiguous() {
+        _contig = crate::shape_ops::to_contiguous(a)?;
+        BorrowedTensor::from_owned(&_contig)
+    } else {
+        a.clone()
+    };
+    let a = &a;
     match dim {
         Some(d) => {
             let d = norm_dim(d, a.shape.len());
@@ -622,6 +688,14 @@ fn variance(
     keepdim: bool,
     unbiased: bool,
 ) -> PyResult<OwnedTensor> {
+    let _contig;
+    let a = if !a.is_contiguous() {
+        _contig = crate::shape_ops::to_contiguous(a)?;
+        BorrowedTensor::from_owned(&_contig)
+    } else {
+        a.clone()
+    };
+    let a = &a;
     let m = mean(a, dim, keepdim)?;
     // var = mean((x - mean)^2), then divide by n or n-1
     match dim {
@@ -826,6 +900,14 @@ pub fn cumsum(a: &BorrowedTensor, dim: isize) -> PyResult<OwnedTensor> {
 // ---------------------------------------------------------------------------
 
 pub fn prod(a: &BorrowedTensor, dim: Option<isize>, keepdim: bool) -> PyResult<OwnedTensor> {
+    let _contig;
+    let a = if !a.is_contiguous() {
+        _contig = crate::shape_ops::to_contiguous(a)?;
+        BorrowedTensor::from_owned(&_contig)
+    } else {
+        a.clone()
+    };
+    let a = &a;
     match dim {
         Some(d) => {
             let d = norm_dim(d, a.shape.len());

@@ -163,6 +163,7 @@ pub fn elem_count(shape: &[i64]) -> usize {
 // Borrowed (zero-copy) view over a PyTorch-owned buffer
 // ---------------------------------------------------------------------------
 
+#[derive(Clone)]
 pub struct BorrowedTensor {
     /// Raw pointer to element data (already offset by `byte_offset`).
     pub data: *const u8,
@@ -244,29 +245,35 @@ impl BorrowedTensor {
             } else {
                 std::slice::from_raw_parts(dl.strides, ndim).to_vec()
             };
-            let data = dl.data.cast::<u8>();
-            if data.is_null() {
+            let is_empty = elem_count(&shape) == 0;
+            let data = if is_empty {
+                std::ptr::NonNull::<u64>::dangling().as_ptr() as *const u8
+            } else if dl.data.is_null() {
                 return Err(PyValueError::new_err("null data pointer in DLPack tensor"));
-            }
-            if dl.byte_offset > 1_000_000_000 {
-                return Err(PyValueError::new_err(format!(
-                    "byte_offset too large: {}",
-                    dl.byte_offset
-                )));
-            }
-            let data = match (data as usize).checked_add(dl.byte_offset as usize) {
-                Some(addr) => addr as *const u8,
-                None => return Err(PyValueError::new_err("byte_offset overflow")),
+            } else {
+                let d = dl.data.cast::<u8>();
+                if dl.byte_offset > 1_000_000_000 {
+                    return Err(PyValueError::new_err(format!(
+                        "byte_offset too large: {}",
+                        dl.byte_offset
+                    )));
+                }
+                match (d as usize).checked_add(dl.byte_offset as usize) {
+                    Some(addr) => addr as *const u8,
+                    None => return Err(PyValueError::new_err("byte_offset overflow")),
+                }
             };
-            // Validate that byte_offset is element-aligned
-            let elem_size = dtype.elem_size();
-            if (dl.byte_offset as usize) % elem_size != 0 {
-                return Err(PyValueError::new_err(format!(
-                    "byte_offset {} not aligned to dtype {} ({} bytes)",
-                    dl.byte_offset,
-                    dtype.name(),
-                    elem_size
-                )));
+            // Validate that byte_offset is element-aligned for non-empty tensors
+            if !is_empty {
+                let elem_size = dtype.elem_size();
+                if (dl.byte_offset as usize) % elem_size != 0 {
+                    return Err(PyValueError::new_err(format!(
+                        "byte_offset {} not aligned to dtype {} ({} bytes)",
+                        dl.byte_offset,
+                        dtype.name(),
+                        elem_size
+                    )));
+                }
             }
             Ok(BorrowedTensor {
                 data,

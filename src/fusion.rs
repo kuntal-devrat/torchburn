@@ -66,6 +66,9 @@ pub enum UnaryKind {
     Mish,
     Pow,
     Clamp,
+    Sin,
+    Cos,
+    Tan,
 }
 
 impl UnaryKind {
@@ -95,6 +98,9 @@ impl UnaryKind {
             "mish" => Some(UnaryKind::Mish),
             "pow" => Some(UnaryKind::Pow),
             "clamp" => Some(UnaryKind::Clamp),
+            "sin" => Some(UnaryKind::Sin),
+            "cos" => Some(UnaryKind::Cos),
+            "tan" => Some(UnaryKind::Tan),
             _ => None,
         }
     }
@@ -181,6 +187,9 @@ pub trait Fp:
     fn fp_neg(self) -> Self;
     fn fp_ceil(self) -> Self;
     fn fp_floor(self) -> Self;
+    fn fp_sin(self) -> Self;
+    fn fp_cos(self) -> Self;
+    fn fp_tan(self) -> Self;
 }
 
 impl Fp for f32 {
@@ -215,6 +224,15 @@ impl Fp for f32 {
     fn fp_floor(self) -> Self {
         self.floor()
     }
+    fn fp_sin(self) -> Self {
+        self.sin()
+    }
+    fn fp_cos(self) -> Self {
+        self.cos()
+    }
+    fn fp_tan(self) -> Self {
+        self.tan()
+    }
 }
 
 impl Fp for f64 {
@@ -248,6 +266,15 @@ impl Fp for f64 {
     }
     fn fp_floor(self) -> Self {
         self.floor()
+    }
+    fn fp_sin(self) -> Self {
+        self.sin()
+    }
+    fn fp_cos(self) -> Self {
+        self.cos()
+    }
+    fn fp_tan(self) -> Self {
+        self.tan()
     }
 }
 
@@ -325,6 +352,9 @@ pub fn apply_unary<T: Fp>(k: UnaryKind, x: T, p: [f64; 2]) -> T {
         UnaryKind::Mish => x * (one + x.fp_exp()).fp_ln().fp_tanh(),
         UnaryKind::Pow => x.fp_powf(T::from_f64(p[0])),
         UnaryKind::Clamp => clamp_scalar(x, T::from_f64(p[0]), T::from_f64(p[1])),
+        UnaryKind::Sin => x.fp_sin(),
+        UnaryKind::Cos => x.fp_cos(),
+        UnaryKind::Tan => x.fp_tan(),
     }
 }
 
@@ -514,6 +544,28 @@ fn single_consumer(nodes: &[Node], i: usize, base: usize) -> Option<usize> {
     found
 }
 
+/// Check that all consumers of node `m` (if any) reside within `chain`.
+fn all_consumers_in_chain(nodes: &[Node], m: usize, chain: &[usize], base: usize) -> bool {
+    let target_slot = base + m;
+    for (idx, node) in nodes.iter().enumerate() {
+        if !chain.contains(&idx) {
+            for arg in &node.args {
+                if arg.index == Some(target_slot) {
+                    return false;
+                }
+                if let Some(Value::Array(arr)) = &arg.value {
+                    for v in arr {
+                        if v.as_u64() == Some(target_slot as u64) {
+                            return false;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    true
+}
+
 /// Build the fused execution plan for a payload's node list.
 ///
 /// `nodes` are the payload nodes (slot indices: inputs are `0..base`, node
@@ -591,36 +643,35 @@ pub fn plan(nodes: &[Node], base: usize) -> FusionPlan {
             i += 2;
             continue;
         }
-        // Elementwise chain: grow while the node is fusable, has exactly one
-        // consumer, and that consumer is the adjacent node and also fusable.
+        // Elementwise chain: grow while contiguous nodes are fusable,
+        // and internal chain outputs have all their consumers within the chain.
         if is_fusable_node(node) {
             let mut chain = vec![i];
             let mut j = i;
-            while j + 1 < n
-                && is_fusable_node(&nodes[j])
-                && consumers[j] == 1
-                && single_consumer(nodes, j, base) == Some(j + 1)
-                && is_fusable_node(&nodes[j + 1])
-            {
+            while j + 1 < n && is_fusable_node(&nodes[j + 1]) {
+                chain.push(j + 1);
                 j += 1;
-                chain.push(j);
+            }
+            while chain.len() >= 2 {
+                let all_internals_safe = (0..chain.len() - 1)
+                    .all(|idx| all_consumers_in_chain(nodes, chain[idx], &chain, base));
+                if all_internals_safe {
+                    break;
+                }
+                chain.pop();
             }
             if chain.len() >= 2 {
-                match build_chain_exprs(nodes, &chain, base) {
-                    Ok(exprs) => {
-                        let cplan = ChainPlan {
-                            nodes: chain.clone(),
-                            exprs,
-                        };
-                        steps.push(Step::Chain(cplan));
-                        for &m in &chain {
-                            node_step[m] = steps.len() - 1;
-                        }
-                        i = j + 1;
-                        continue;
+                if let Ok(exprs) = build_chain_exprs(nodes, &chain, base) {
+                    let cplan = ChainPlan {
+                        nodes: chain.clone(),
+                        exprs,
+                    };
+                    steps.push(Step::Chain(cplan));
+                    for &m in &chain {
+                        node_step[m] = steps.len() - 1;
                     }
-                    // Malformed chain (missing args): fall back to unfused.
-                    Err(_) => {}
+                    i = chain.last().copied().unwrap() + 1;
+                    continue;
                 }
             }
         }
@@ -1157,6 +1208,80 @@ fn run_chunk_vectorized<T: Fp>(
     }
 }
 
+#[inline(always)]
+fn run_chunk_single_pass<T: Fp>(
+    rexprs: &[RExpr],
+    leaves: &[LeafInfo],
+    leaf_data: &[&[T]],
+    start: usize,
+    chunk: &mut [T],
+) {
+    let n_exprs = rexprs.len();
+    if n_exprs <= 32 {
+        for (off, o) in chunk.iter_mut().enumerate() {
+            let f = start + off;
+            let mut vals = [T::ZERO; 32];
+            for (k, e) in rexprs.iter().enumerate() {
+                let av = match e.a {
+                    RArg::Chain(m) => vals[m],
+                    RArg::Leaf(li) => match leaves[li].map {
+                        LeafMap::Identity => leaf_data[li][f],
+                        LeafMap::Scalar => leaf_data[li][0],
+                        _ => unsafe { std::hint::unreachable_unchecked() },
+                    },
+                };
+                let v = match e.op {
+                    ChainOp::Unary(u) => apply_unary(u, av, e.params),
+                    ChainOp::Binary(b) => {
+                        let bv = match e.b.expect("binary op has second operand") {
+                            RArg::Chain(m) => vals[m],
+                            RArg::Leaf(li) => match leaves[li].map {
+                                LeafMap::Identity => leaf_data[li][f],
+                                LeafMap::Scalar => leaf_data[li][0],
+                                _ => unsafe { std::hint::unreachable_unchecked() },
+                            },
+                        };
+                        apply_binary(b, av, bv)
+                    }
+                };
+                vals[k] = v;
+            }
+            *o = vals[n_exprs - 1];
+        }
+    } else {
+        let mut vals = vec![T::ZERO; n_exprs];
+        for (off, o) in chunk.iter_mut().enumerate() {
+            let f = start + off;
+            for (k, e) in rexprs.iter().enumerate() {
+                let av = match e.a {
+                    RArg::Chain(m) => vals[m],
+                    RArg::Leaf(li) => match leaves[li].map {
+                        LeafMap::Identity => leaf_data[li][f],
+                        LeafMap::Scalar => leaf_data[li][0],
+                        _ => unsafe { std::hint::unreachable_unchecked() },
+                    },
+                };
+                let v = match e.op {
+                    ChainOp::Unary(u) => apply_unary(u, av, e.params),
+                    ChainOp::Binary(b) => {
+                        let bv = match e.b.expect("binary op has second operand") {
+                            RArg::Chain(m) => vals[m],
+                            RArg::Leaf(li) => match leaves[li].map {
+                                LeafMap::Identity => leaf_data[li][f],
+                                LeafMap::Scalar => leaf_data[li][0],
+                                _ => unsafe { std::hint::unreachable_unchecked() },
+                            },
+                        };
+                        apply_binary(b, av, bv)
+                    }
+                };
+                vals[k] = v;
+            }
+            *o = vals[n_exprs - 1];
+        }
+    }
+}
+
 fn run_chain_typed<T: Fp>(
     rexprs: &[RExpr],
     leaves: &[LeafInfo],
@@ -1181,7 +1306,7 @@ fn run_chain_typed<T: Fp>(
         .iter()
         .any(|l| matches!(l.map, LeafMap::General { .. }));
 
-    // Fast cache-tiled SIMD path for contiguous inputs (Identity/Scalar)
+    // Fast cache-tiled single-pass path for contiguous inputs (Identity/Scalar)
     if !needs_coords {
         if out_n >= CHAIN_PAR_THRESHOLD {
             use rayon::prelude::*;
@@ -1190,16 +1315,10 @@ fn run_chain_typed<T: Fp>(
                 .enumerate()
                 .for_each(|(ci, chunk)| {
                     let start = ci * CHAIN_PAR_CHUNK;
-                    let mut scratch: Vec<Vec<T>> = (0..rexprs.len())
-                        .map(|_| vec![T::ZERO; chunk.len()])
-                        .collect();
-                    run_chunk_vectorized(rexprs, leaves, &leaf_data, start, chunk, &mut scratch);
+                    run_chunk_single_pass(rexprs, leaves, &leaf_data, start, chunk);
                 });
         } else {
-            let mut scratch: Vec<Vec<T>> = (0..rexprs.len())
-                .map(|_| vec![T::ZERO; out_data.len()])
-                .collect();
-            run_chunk_vectorized(rexprs, leaves, &leaf_data, 0, out_data, &mut scratch);
+            run_chunk_single_pass(rexprs, leaves, &leaf_data, 0, out_data);
         }
         return Ok(());
     }

@@ -27,9 +27,18 @@ use std::sync::{OnceLock, RwLock};
 // Global graph cache: prepare_graph / execute_prepared
 // ---------------------------------------------------------------------------
 
+use crate::fusion::Step;
+
+pub(crate) struct PreplannedExecution {
+    pub nodes: Vec<Node>,
+    pub fp: fusion::FusionPlan,
+    pub node_slot: HashMap<u32, usize>,
+}
+
 /// A prepared graph: parsed nodes + metadata, ready for execution.
 pub(crate) struct PreparedGraph {
     payload: Payload,
+    preplanned: Option<PreplannedExecution>,
 }
 
 struct GraphCache {
@@ -55,9 +64,78 @@ pub const MAX_PAYLOAD_BYTES: usize = 10 * 1024 * 1024;
 /// Parse a Python dict into a PreparedGraph and cache it. Returns a handle.
 pub fn prepare_graph(dict: &Bound<'_, pyo3::types::PyDict>) -> PyResult<i64> {
     let payload = dict_to_payload(dict)?;
+    let base = payload.inputs.len();
+    let mut nodes = payload.nodes.clone();
+    let fp = fusion::plan(&nodes, base);
+    let requested: std::collections::HashSet<u32> = payload.outputs.iter().copied().collect();
+    let mut unsafe_output = false;
+    for step in &fp.steps {
+        if let Step::Chain(plan) = step {
+            for &m in &plan.nodes[..plan.nodes.len() - 1] {
+                if requested.contains(&nodes[m].id) {
+                    unsafe_output = true;
+                }
+            }
+        }
+        if let Step::Gemm { linear, .. } = step {
+            if requested.contains(&nodes[*linear].id) {
+                unsafe_output = true;
+            }
+        }
+        if let Step::ConvBnRelu(spec) = step {
+            if requested.contains(&nodes[spec.conv].id) || requested.contains(&nodes[spec.bn].id) {
+                unsafe_output = true;
+            }
+        }
+    }
+    let preplanned = if !unsafe_output {
+        let mut remap = Vec::with_capacity(base + nodes.len());
+        remap.extend(0..base);
+        remap.extend((0..nodes.len()).map(|i| base + fp.node_step[i]));
+        for node in nodes.iter_mut() {
+            for arg in node.args.iter_mut() {
+                if let Some(s) = arg.index {
+                    if s < remap.len() {
+                        arg.index = Some(remap[s]);
+                    }
+                }
+                if let Some(Value::Array(arr)) = arg.value.as_mut() {
+                    for v in arr.iter_mut() {
+                        if let Some(u) = v.as_u64() {
+                            let s = u as usize;
+                            if s < remap.len() {
+                                *v = Value::from(remap[s] as u64);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let mut node_slot = HashMap::with_capacity(nodes.len());
+        for (si, step) in fp.steps.iter().enumerate() {
+            let out_slot = base + si;
+            for member in step.member_nodes() {
+                node_slot.insert(nodes[member].id, out_slot);
+            }
+        }
+        Some(PreplannedExecution {
+            nodes,
+            fp,
+            node_slot,
+        })
+    } else {
+        None
+    };
+
     let handle = NEXT_HANDLE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let mut cache = graph_cache().write().unwrap_or_else(|e| e.into_inner());
-    cache.graphs.insert(handle, PreparedGraph { payload });
+    cache.graphs.insert(
+        handle,
+        PreparedGraph {
+            payload,
+            preplanned,
+        },
+    );
     cache.order.push_back(handle);
     // Evict oldest if over 1024 prepared graphs.
     while cache.graphs.len() > 1024 {
@@ -75,6 +153,30 @@ pub fn release_graph(handle: i64) {
     let mut cache = graph_cache().write().unwrap_or_else(|e| e.into_inner());
     cache.graphs.remove(&handle);
     cache.order.retain(|&h| h != handle);
+}
+
+pub(crate) fn execute_prepared_native(
+    graph: &PreparedGraph,
+    capsules: &[CapsuleRef],
+) -> PyResult<Vec<OwnedTensor>> {
+    if let Some(ref plan) = graph.preplanned {
+        let mut slots = init_input_slots(&graph.payload, capsules)?;
+        let mut ok = true;
+        for step in &plan.fp.steps {
+            match execute_step(step, &plan.nodes, &mut slots, capsules) {
+                Ok(()) => {}
+                Err(e) if e.to_string().contains(fusion::FUSION_SKIP_MARKER) => {
+                    ok = false;
+                    break;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        if ok {
+            return collect_outputs(&graph.payload, &plan.node_slot, &mut slots);
+        }
+    }
+    execute_native(&graph.payload, capsules)
 }
 
 /// Execute a prepared graph with new input tensors.
@@ -97,7 +199,7 @@ pub fn execute_prepared(
         .iter()
         .map(crate::dlpack::capsule_ref)
         .collect::<PyResult<_>>()?;
-    let native_out = py.allow_threads(|| execute_native(&graph.payload, &refs))?;
+    let native_out = py.allow_threads(|| execute_prepared_native(graph, &refs))?;
 
     let mut out = Vec::with_capacity(native_out.len());
     for owned in native_out {
@@ -105,7 +207,6 @@ pub fn execute_prepared(
     }
     Ok(out)
 }
-use crate::fusion::Step;
 
 #[derive(Deserialize)]
 pub struct Payload {
@@ -241,7 +342,9 @@ pub fn supported_targets() -> Vec<String> {
         // Phase 2: reductions
         "sum".into(),
         "mean".into(),
+        "max".into(),
         "max_reduce".into(),
+        "min".into(),
         "min_reduce".into(),
         "argmax".into(),
         "argmin".into(),
@@ -572,6 +675,7 @@ pub fn supported_targets() -> Vec<String> {
         "gru_cell".into(),
         "lstm_cell".into(),
         "multi_head_attention_forward".into(),
+        "transformer_encoder_layer_fwd".into(),
         "lu_solve".into(),
         "lu_unpack".into(),
         "linalg_solve".into(),
@@ -776,7 +880,15 @@ fn kw_bool(node: &Node, key: &str, default: bool) -> bool {
 fn kw_isize(node: &Node, key: &str, default: isize) -> isize {
     node.kwargs
         .get(key)
-        .and_then(|v| v.as_i64())
+        .and_then(|v| {
+            if let Some(n) = v.as_i64() {
+                Some(n)
+            } else if let Some(arr) = v.as_array() {
+                arr.first().and_then(|x| x.as_i64())
+            } else {
+                None
+            }
+        })
         .map(|v| v as isize)
         .unwrap_or(default)
 }
@@ -814,6 +926,26 @@ fn kw_opt_dim(node: &Node) -> PyResult<Option<isize>> {
     }
 }
 
+/// Read an optional reduction dim LIST from kwargs: scalar int, [int], or
+/// [int, ...].  Returns an empty vec when absent.  Multi-dim lists are handled
+/// natively by sum_dims/mean_dims (iterative single-dim reduction).
+fn kw_opt_dims(node: &Node) -> Vec<isize> {
+    match node.kwargs.get("dim") {
+        None => vec![],
+        Some(v) => {
+            if let Some(x) = v.as_i64() {
+                vec![x as isize]
+            } else if let Some(arr) = v.as_array() {
+                arr.iter()
+                    .filter_map(|v| v.as_i64().map(|x| x as isize))
+                    .collect()
+            } else {
+                vec![]
+            }
+        }
+    }
+}
+
 fn kw_i64_vec(node: &Node, key: &str) -> Vec<i64> {
     node.kwargs
         .get(key)
@@ -840,7 +972,15 @@ fn kw_isize_vec(node: &Node, key: &str) -> Vec<isize> {
 fn kw_usize(node: &Node, key: &str, default: usize) -> usize {
     node.kwargs
         .get(key)
-        .and_then(|v| v.as_i64())
+        .and_then(|v| {
+            if let Some(n) = v.as_i64() {
+                Some(n)
+            } else if let Some(arr) = v.as_array() {
+                arr.first().and_then(|x| x.as_i64())
+            } else {
+                None
+            }
+        })
         .map(|v| v as usize)
         .unwrap_or(default)
 }
@@ -848,7 +988,15 @@ fn kw_usize(node: &Node, key: &str, default: usize) -> usize {
 fn kw_i64(node: &Node, key: &str, default: i64) -> i64 {
     node.kwargs
         .get(key)
-        .and_then(|v| v.as_i64())
+        .and_then(|v| {
+            if let Some(n) = v.as_i64() {
+                Some(n)
+            } else if let Some(arr) = v.as_array() {
+                arr.first().and_then(|x| x.as_i64())
+            } else {
+                None
+            }
+        })
         .unwrap_or(default)
 }
 
@@ -1009,7 +1157,8 @@ fn dispatch_node(node: &Node, slots: &mut Vec<Slot>, capsules: &[CapsuleRef]) ->
         }
         "gelu" => {
             let a = slot_view(slots, capsules, arg_index(node, 0)?)?;
-            slots.push(Slot::Owned(activations::gelu(&a)?));
+            let approx = kw_str(node, "approximate", "tanh");
+            slots.push(Slot::Owned(activations::gelu(&a, approx)?));
         }
         "silu" => {
             let a = slot_view(slots, capsules, arg_index(node, 0)?)?;
@@ -1063,24 +1212,40 @@ fn dispatch_node(node: &Node, slots: &mut Vec<Slot>, capsules: &[CapsuleRef]) ->
         // Phase 2: reductions
         "sum" => {
             let a = slot_view(slots, capsules, arg_index(node, 0)?)?;
-            let dim = kw_opt_dim(node)?;
+            let dims = kw_opt_dims(node);
             let keepdim = kw_bool(node, "keepdim", false);
-            slots.push(Slot::Owned(reductions::sum(&a, dim, keepdim)?));
+            if dims.len() > 1 {
+                slots.push(Slot::Owned(reductions::sum_dims(&a, &dims, keepdim)?));
+            } else {
+                slots.push(Slot::Owned(reductions::sum(
+                    &a,
+                    dims.first().copied(),
+                    keepdim,
+                )?));
+            }
         }
         "mean" => {
             let a = slot_view(slots, capsules, arg_index(node, 0)?)?;
-            let dim = kw_opt_dim(node)?;
+            let dims = kw_opt_dims(node);
             let keepdim = kw_bool(node, "keepdim", false);
-            slots.push(Slot::Owned(reductions::mean(&a, dim, keepdim)?));
+            if dims.len() > 1 {
+                slots.push(Slot::Owned(reductions::mean_dims(&a, &dims, keepdim)?));
+            } else {
+                slots.push(Slot::Owned(reductions::mean(
+                    &a,
+                    dims.first().copied(),
+                    keepdim,
+                )?));
+            }
         }
-        "max_reduce" => {
+        "max" | "max_reduce" => {
             let a = slot_view(slots, capsules, arg_index(node, 0)?)?;
             let dim = kw_opt_dim(node)?;
             let keepdim = kw_bool(node, "keepdim", false);
             let (val, idx) = reductions::max_reduce(&a, dim, keepdim)?;
             slots.push(Slot::Tuple(vec![val, idx]));
         }
-        "min_reduce" => {
+        "min" | "min_reduce" => {
             let a = slot_view(slots, capsules, arg_index(node, 0)?)?;
             let dim = kw_opt_dim(node)?;
             let keepdim = kw_bool(node, "keepdim", false);
@@ -1449,8 +1614,12 @@ fn dispatch_node(node: &Node, slots: &mut Vec<Slot>, capsules: &[CapsuleRef]) ->
                     "getitem: index {elem} out of range for tuple of len {len}"
                 )));
             }
-            if let Some(taken) = slots[slot_idx].take_tuple_elem(elem) {
-                slots.push(Slot::Owned(taken));
+            if let Slot::Tuple(elems) = &slots[slot_idx] {
+                slots.push(Slot::Owned(elems[elem].clone()));
+            } else {
+                return Err(unsupported(&format!(
+                    "getitem: slot {slot_idx} is not a tuple"
+                )));
             }
         }
         "chunk_narrow" => {
@@ -1767,9 +1936,13 @@ fn dispatch_node(node: &Node, slots: &mut Vec<Slot>, capsules: &[CapsuleRef]) ->
         "max_pool2d" => {
             let input = slot_view(slots, capsules, arg_index(node, 0)?)?;
             let ceil_mode = kw_bool(node, "ceil_mode", false);
+            let kernel = node
+                .kwargs
+                .get("kernel")
+                .or_else(|| node.kwargs.get("kernel_size"));
             slots.push(Slot::Owned(pooling::max_pool2d(
                 &input,
-                node.kwargs.get("kernel"),
+                kernel,
                 node.kwargs.get("stride"),
                 node.kwargs.get("padding"),
                 node.kwargs.get("dilation"),
@@ -1780,9 +1953,13 @@ fn dispatch_node(node: &Node, slots: &mut Vec<Slot>, capsules: &[CapsuleRef]) ->
             let input = slot_view(slots, capsules, arg_index(node, 0)?)?;
             let ceil_mode = kw_bool(node, "ceil_mode", false);
             let count_include_pad = kw_bool(node, "count_include_pad", true);
+            let kernel = node
+                .kwargs
+                .get("kernel")
+                .or_else(|| node.kwargs.get("kernel_size"));
             slots.push(Slot::Owned(pooling::avg_pool2d(
                 &input,
-                node.kwargs.get("kernel"),
+                kernel,
                 node.kwargs.get("stride"),
                 node.kwargs.get("padding"),
                 ceil_mode,
@@ -3493,6 +3670,50 @@ fn dispatch_node(node: &Node, slots: &mut Vec<Slot>, capsules: &[CapsuleRef]) ->
                 &q, &k, &v,
             )?));
         }
+        "transformer_encoder_layer_fwd" => {
+            let src = slot_view(slots, capsules, arg_index(node, 0)?)?;
+            let num_heads = kw_usize(node, "num_heads", 1);
+            let use_gelu = kw_bool(node, "use_gelu", true);
+            let norm_first = kw_bool(node, "norm_first", false);
+            let eps = kw_f64(node, "eps", 1e-5);
+            let qkv_w = slot_view(slots, capsules, arg_index(node, 1)?)?;
+            let qkv_b = slot_view(slots, capsules, arg_index(node, 2)?)?;
+            let proj_w = slot_view(slots, capsules, arg_index(node, 3)?)?;
+            let proj_b = slot_view(slots, capsules, arg_index(node, 4)?)?;
+            let nw1 = slot_view(slots, capsules, arg_index(node, 5)?)?;
+            let nb1 = slot_view(slots, capsules, arg_index(node, 6)?)?;
+            let nw2 = slot_view(slots, capsules, arg_index(node, 7)?)?;
+            let nb2 = slot_view(slots, capsules, arg_index(node, 8)?)?;
+            let ffn_w1 = slot_view(slots, capsules, arg_index(node, 9)?)?;
+            let ffn_b1 = slot_view(slots, capsules, arg_index(node, 10)?)?;
+            let ffn_w2 = slot_view(slots, capsules, arg_index(node, 11)?)?;
+            let ffn_b2 = slot_view(slots, capsules, arg_index(node, 12)?)?;
+            let mask = if node.args.len() > 13 {
+                Some(slot_view(slots, capsules, arg_index(node, 13)?)?)
+            } else {
+                None
+            };
+            slots.push(Slot::Owned(extra_ops3::transformer_encoder_layer_fwd(
+                &src,
+                num_heads,
+                use_gelu,
+                norm_first,
+                eps,
+                &qkv_w,
+                &qkv_b,
+                &proj_w,
+                &proj_b,
+                &nw1,
+                &nb1,
+                &nw2,
+                &nb2,
+                &ffn_w1,
+                &ffn_b1,
+                &ffn_w2,
+                &ffn_b2,
+                mask.as_ref(),
+            )?));
+        }
         "lu_solve" => {
             let b = slot_view(slots, capsules, arg_index(node, 0)?)?;
             let lu_d = slot_view(slots, capsules, arg_index(node, 1)?)?;
@@ -4072,12 +4293,21 @@ fn collect_outputs(
     node_slot: &HashMap<u32, usize>,
     slots: &mut [Slot],
 ) -> PyResult<Vec<OwnedTensor>> {
+    let parse_output_id = |id: u32| -> (u32, bool, usize) {
+        if node_slot.contains_key(&id) {
+            (id, false, 0)
+        } else if node_slot.contains_key(&(id >> 16)) {
+            (id >> 16, true, (id & 0xFFFF) as usize)
+        } else if node_slot.contains_key(&(id & 0xFFFF)) {
+            (id & 0xFFFF, true, (id >> 16) as usize)
+        } else {
+            (id, false, 0)
+        }
+    };
+
     let mut ref_counts: HashMap<usize, usize> = HashMap::new();
     for id in &payload.outputs {
-        let elem = (*id >> 16) as usize;
-        let node_id = (*id & 0xFFFF) as u32;
-        let use_tuple_elem = node_id != *id || elem > 0;
-        let effective_id = if use_tuple_elem { node_id } else { *id };
+        let (effective_id, _, _) = parse_output_id(*id);
         if let Some(&idx) = node_slot.get(&effective_id) {
             *ref_counts.entry(idx).or_insert(0) += 1;
         }
@@ -4085,12 +4315,7 @@ fn collect_outputs(
 
     let mut out = Vec::with_capacity(payload.outputs.len());
     for id in &payload.outputs {
-        // Check if this is an element-encoded output: high 16 bits = node_id,
-        // low 16 bits = element index within the tuple.
-        let elem = (*id >> 16) as usize;
-        let node_id = (*id & 0xFFFF) as u32;
-        let use_tuple_elem = node_id != *id || elem > 0;
-        let effective_id = if use_tuple_elem { node_id } else { *id };
+        let (effective_id, use_tuple_elem, elem) = parse_output_id(*id);
 
         let slot_idx = node_slot.get(&effective_id).ok_or_else(|| {
             unsupported(&format!("output references unknown node {effective_id}"))
@@ -4315,6 +4540,11 @@ pub fn execute_native(payload: &Payload, capsules: &[CapsuleRef]) -> PyResult<Ve
                 unsafe_output = true;
             }
         }
+        if let Step::ConvBnRelu(spec) = step {
+            if requested.contains(&nodes[spec.conv].id) || requested.contains(&nodes[spec.bn].id) {
+                unsafe_output = true;
+            }
+        }
     }
     if !unsafe_output {
         // Remap every argument slot to the step that produces it.
@@ -4460,13 +4690,19 @@ fn engine_is_burn() -> bool {
     ) {
         return true;
     }
-    // GPU First: Default to Burn WGPU if available on the system
-    #[cfg(feature = "burn-wgpu")]
-    {
-        if crate::wgpu_backend::gpu_available() {
-            return true;
+    // Accept explicit GPU device selection:
+    if matches!(
+        std::env::var("TORCHBURN_DEVICE").as_deref(),
+        Ok("gpu") | Ok("wgpu") | Ok("cuda")
+    ) {
+        #[cfg(feature = "burn-wgpu")]
+        {
+            if crate::wgpu_backend::gpu_available() {
+                return true;
+            }
         }
     }
+    // Default: native CPU execution
     false
 }
 

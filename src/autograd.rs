@@ -2421,18 +2421,35 @@ pub fn backward_single(
             let input = saved_inputs[0];
             let target = saved_inputs[1];
             let n = elem_count(&input.shape);
-            let reduction = kwargs
+            let reduction: i64 = kwargs
                 .get("reduction")
-                .and_then(|v| v.as_i64())
+                .and_then(|v| {
+                    if let Some(i) = v.as_i64() {
+                        Some(i)
+                    } else if let Some(s) = v.as_str() {
+                        match s {
+                            "none" => Some(0),
+                            "mean" => Some(1),
+                            "sum" => Some(2),
+                            _ => None,
+                        }
+                    } else {
+                        None
+                    }
+                })
                 .unwrap_or(1);
             let scale = match reduction {
-                1 => 2.0 / n as f64, // mean
-                2 => 2.0,            // sum
-                _ => 2.0,            // none
+                1 => 2.0 / n.max(1) as f64, // mean
+                2 => 2.0,                   // sum
+                _ => 2.0,                   // none
             };
             let mut grad = OwnedTensor::new(input.dtype, input.shape.clone());
+            let un = elem_count(&upstream.shape);
             match input.dtype {
                 DType::F32 => {
+                    let up = unsafe {
+                        std::slice::from_raw_parts(upstream.data.as_ptr() as *const f32, un)
+                    };
                     let inp =
                         unsafe { std::slice::from_raw_parts(input.data.as_ptr() as *const f32, n) };
                     let tgt = unsafe {
@@ -2445,12 +2462,26 @@ pub fn backward_single(
                         std::slice::from_raw_parts_mut(grad.data.as_mut_ptr() as *mut f32, n)
                     };
                     let tn = elem_count(&target.shape);
-                    for i in 0..n {
-                        let ti = if tn == 1 { 0 } else { i % tn };
-                        o[i] = (scale as f32) * (inp[i] - tgt[ti]);
+                    let s = scale as f32;
+                    if reduction == 0 {
+                        for i in 0..n {
+                            let ti = if tn == 1 { 0 } else { i % tn };
+                            let ui = if un == 1 { 0 } else { i % un.max(1) };
+                            let u_val = if un > 0 { up[ui] } else { 1.0 };
+                            o[i] = u_val * s * (inp[i] - tgt[ti]);
+                        }
+                    } else {
+                        let u_val = if un > 0 { up[0] } else { 1.0 };
+                        for i in 0..n {
+                            let ti = if tn == 1 { 0 } else { i % tn };
+                            o[i] = u_val * s * (inp[i] - tgt[ti]);
+                        }
                     }
                 }
                 DType::F64 => {
+                    let up = unsafe {
+                        std::slice::from_raw_parts(upstream.data.as_ptr() as *const f64, un)
+                    };
                     let inp =
                         unsafe { std::slice::from_raw_parts(input.data.as_ptr() as *const f64, n) };
                     let tgt = unsafe {
@@ -2463,9 +2494,19 @@ pub fn backward_single(
                         std::slice::from_raw_parts_mut(grad.data.as_mut_ptr() as *mut f64, n)
                     };
                     let tn = elem_count(&target.shape);
-                    for i in 0..n {
-                        let ti = if tn == 1 { 0 } else { i % tn };
-                        o[i] = scale * (inp[i] - tgt[ti]);
+                    if reduction == 0 {
+                        for i in 0..n {
+                            let ti = if tn == 1 { 0 } else { i % tn };
+                            let ui = if un == 1 { 0 } else { i % un.max(1) };
+                            let u_val = if un > 0 { up[ui] } else { 1.0 };
+                            o[i] = u_val * scale * (inp[i] - tgt[ti]);
+                        }
+                    } else {
+                        let u_val = if un > 0 { up[0] } else { 1.0 };
+                        for i in 0..n {
+                            let ti = if tn == 1 { 0 } else { i % tn };
+                            o[i] = u_val * scale * (inp[i] - tgt[ti]);
+                        }
                     }
                 }
                 _ => {}

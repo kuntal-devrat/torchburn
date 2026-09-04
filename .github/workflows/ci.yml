@@ -150,7 +150,7 @@ jobs:
             python -m pytest tests/ -x -q --timeout=300
           fi
         env:
-          TORCHBURN_ENGINE: ${{ matrix.feature || '' }}
+          TORCHBURN_ENGINE: ${{ matrix.feature || 'native_cpu' }}
           RUST_BACKTRACE: 1
 
   # ── Build Wheels (all platforms) ───────────────────────────────────
@@ -194,9 +194,9 @@ jobs:
           CIBW_ARCHS_LINUX: "x86_64"
           CIBW_ARCHS_WINDOWS: "AMD64"
           CIBW_BEFORE_ALL_LINUX: "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y"
-          CIBW_ENVIRONMENT_LINUX: 'PATH="$HOME/.cargo/bin:$PATH" RUSTFLAGS="" CARGO_BUILD_RUSTFLAGS="" MATURIN_PEP517_ARGS="--features openblas"'
-          CIBW_ENVIRONMENT_MACOS: 'MACOSX_DEPLOYMENT_TARGET="11.0" RUSTFLAGS="" CARGO_BUILD_RUSTFLAGS=""'
-          CIBW_ENVIRONMENT_WINDOWS: 'RUSTFLAGS="" CARGO_BUILD_RUSTFLAGS=""'
+          CIBW_ENVIRONMENT_LINUX: 'PATH="$HOME/.cargo/bin:$PATH" RUSTFLAGS="" CARGO_BUILD_RUSTFLAGS="" MATURIN_PEP517_ARGS="--features openblas" TORCHBURN_ENGINE="native_cpu"'
+          CIBW_ENVIRONMENT_MACOS: 'MACOSX_DEPLOYMENT_TARGET="11.0" RUSTFLAGS="" CARGO_BUILD_RUSTFLAGS="" TORCHBURN_ENGINE="native_cpu"'
+          CIBW_ENVIRONMENT_WINDOWS: 'RUSTFLAGS="" CARGO_BUILD_RUSTFLAGS="" TORCHBURN_ENGINE="native_cpu"'
           CIBW_BEFORE_BUILD: "rm -f .cargo/config.toml"
           CIBW_TEST_REQUIRES: "pytest pytest-timeout numpy torch"
           CIBW_TEST_COMMAND: 'python -m pytest {project}/tests -x -q --timeout=300 -k "not TestBertTiny and not TestBenchmarkSuite"'

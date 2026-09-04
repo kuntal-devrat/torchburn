@@ -7,6 +7,7 @@ use crate::dlpack::{
     contiguous_strides, elem_count, unsupported, BorrowedTensor, DType, OwnedTensor,
 };
 use pyo3::prelude::*;
+use wide::{f32x8, CmpGt};
 
 const PAR_CHUNK: usize = 16 * 1024;
 
@@ -33,10 +34,23 @@ fn apply_elementwise_f32<F: Fn(f32) -> f32 + Sync + Send>(
     let out_data = unsafe { typed_mut_slice::<f32>(out) };
     let contig = a.strides == contiguous_strides(&a.shape);
     if contig {
-        use rayon::prelude::*;
-        out_data.par_iter_mut().enumerate().for_each(|(i, o)| {
-            *o = f(a_data[i]);
-        });
+        if n >= PAR_CHUNK {
+            use rayon::prelude::*;
+            out_data
+                .par_chunks_mut(PAR_CHUNK)
+                .enumerate()
+                .for_each(|(ci, chunk)| {
+                    let base = ci * PAR_CHUNK;
+                    let a_slice = &a_data[base..base + chunk.len()];
+                    for i in 0..chunk.len() {
+                        chunk[i] = f(a_slice[i]);
+                    }
+                });
+        } else {
+            for i in 0..n {
+                out_data[i] = f(a_data[i]);
+            }
+        }
     } else {
         let rank = a.shape.len();
         let mut coords = vec![0usize; rank];
@@ -68,10 +82,23 @@ fn apply_elementwise_f64<F: Fn(f64) -> f64 + Sync + Send>(
     let out_data = unsafe { typed_mut_slice::<f64>(out) };
     let contig = a.strides == contiguous_strides(&a.shape);
     if contig {
-        use rayon::prelude::*;
-        out_data.par_iter_mut().enumerate().for_each(|(i, o)| {
-            *o = f(a_data[i]);
-        });
+        if n >= PAR_CHUNK {
+            use rayon::prelude::*;
+            out_data
+                .par_chunks_mut(PAR_CHUNK)
+                .enumerate()
+                .for_each(|(ci, chunk)| {
+                    let base = ci * PAR_CHUNK;
+                    let a_slice = &a_data[base..base + chunk.len()];
+                    for i in 0..chunk.len() {
+                        chunk[i] = f(a_slice[i]);
+                    }
+                });
+        } else {
+            for i in 0..n {
+                out_data[i] = f(a_data[i]);
+            }
+        }
     } else {
         let rank = a.shape.len();
         let mut coords = vec![0usize; rank];
@@ -156,10 +183,23 @@ fn apply_elementwise_param_f32(
     let out_data = unsafe { typed_mut_slice::<f32>(out) };
     let contig = a.strides == contiguous_strides(&a.shape);
     if contig {
-        use rayon::prelude::*;
-        out_data.par_iter_mut().enumerate().for_each(|(i, o)| {
-            *o = f(a_data[i]);
-        });
+        if n >= PAR_CHUNK {
+            use rayon::prelude::*;
+            out_data
+                .par_chunks_mut(PAR_CHUNK)
+                .enumerate()
+                .for_each(|(ci, chunk)| {
+                    let base = ci * PAR_CHUNK;
+                    let a_slice = &a_data[base..base + chunk.len()];
+                    for i in 0..chunk.len() {
+                        chunk[i] = f(a_slice[i]);
+                    }
+                });
+        } else {
+            for i in 0..n {
+                out_data[i] = f(a_data[i]);
+            }
+        }
     } else {
         let rank = a.shape.len();
         let mut coords = vec![0usize; rank];
@@ -191,10 +231,23 @@ fn apply_elementwise_param_f64(
     let out_data = unsafe { typed_mut_slice::<f64>(out) };
     let contig = a.strides == contiguous_strides(&a.shape);
     if contig {
-        use rayon::prelude::*;
-        out_data.par_iter_mut().enumerate().for_each(|(i, o)| {
-            *o = f(a_data[i]);
-        });
+        if n >= PAR_CHUNK {
+            use rayon::prelude::*;
+            out_data
+                .par_chunks_mut(PAR_CHUNK)
+                .enumerate()
+                .for_each(|(ci, chunk)| {
+                    let base = ci * PAR_CHUNK;
+                    let a_slice = &a_data[base..base + chunk.len()];
+                    for i in 0..chunk.len() {
+                        chunk[i] = f(a_slice[i]);
+                    }
+                });
+        } else {
+            for i in 0..n {
+                out_data[i] = f(a_data[i]);
+            }
+        }
     } else {
         let rank = a.shape.len();
         let mut coords = vec![0usize; rank];
@@ -231,9 +284,129 @@ pub fn tanh_act(a: &BorrowedTensor) -> PyResult<OwnedTensor> {
     apply_elementwise(a, |x| x.tanh(), |x| x.tanh())
 }
 
-pub fn gelu(a: &BorrowedTensor) -> PyResult<OwnedTensor> {
-    // PyTorch approximate="tanh" : 0.5*x*(1+tanh(sqrt(2/pi)*(x+0.044715*x^3)))
-    apply_elementwise(a, fast_gelu_f32, fast_gelu_f64)
+#[inline(always)]
+pub fn fast_exp_f32x8(x: f32x8) -> f32x8 {
+    let min_val = f32x8::splat(-87.3);
+    let max_val = f32x8::splat(88.7);
+    let xc = x.fast_max(min_val).fast_min(max_val);
+
+    let log2e = f32x8::splat(std::f32::consts::LOG2_E);
+    let ln2 = f32x8::splat(std::f32::consts::LN_2);
+    let z = xc * log2e;
+
+    let z_arr = z.to_array();
+    let mut n_arr = [0.0f32; 8];
+    let mut p2n_arr = [0.0f32; 8];
+    for i in 0..8 {
+        let ni = z_arr[i].round() as i32;
+        n_arr[i] = ni as f32;
+        p2n_arr[i] = f32::from_bits(((ni + 127) << 23) as u32);
+    }
+    let n = f32x8::new(n_arr);
+    let p2n = f32x8::new(p2n_arr);
+    let f = xc - n * ln2;
+
+    let one = f32x8::splat(1.0);
+    let c2 = f32x8::splat(0.5);
+    let c3 = f32x8::splat(0.16666666666666666);
+    let c4 = f32x8::splat(0.041666666666666664);
+    let c5 = f32x8::splat(0.008333333333333333);
+
+    let poly = one + f * (one + f * (c2 + f * (c3 + f * (c4 + f * c5))));
+    poly * p2n
+}
+
+#[inline(always)]
+pub fn fast_erf_f32x8(x: f32x8) -> f32x8 {
+    let zero = f32x8::splat(0.0);
+    let one = f32x8::splat(1.0);
+    let neg_one = f32x8::splat(-1.0);
+    let sign = zero.cmp_gt(x).blend(neg_one, one);
+    let ax = x.fast_max(-x);
+    let p = f32x8::splat(0.3275911);
+    let t = one / (one + p * ax);
+
+    let c1 = f32x8::splat(0.254829592);
+    let c2 = f32x8::splat(-0.284496736);
+    let c3 = f32x8::splat(1.421413741);
+    let c4 = f32x8::splat(-1.453152027);
+    let c5 = f32x8::splat(1.061405429);
+    let poly = t * (c1 + t * (c2 + t * (c3 + t * (c4 + t * c5))));
+
+    let exp_neg_x2 = fast_exp_f32x8(-ax * ax);
+    let r = one - poly * exp_neg_x2;
+    sign * r
+}
+
+#[inline(always)]
+pub fn exact_gelu_f32x8(x: f32x8) -> f32x8 {
+    let inv_sqrt2 = f32x8::splat(0.7071067811865475);
+    let half = f32x8::splat(0.5);
+    let one = f32x8::splat(1.0);
+    half * x * (one + fast_erf_f32x8(x * inv_sqrt2))
+}
+
+#[inline(always)]
+pub fn exact_gelu_f32(x: f32) -> f32 {
+    const INV_SQRT2: f32 = 0.7071067811865475;
+    0.5 * x * (1.0 + fast_erf_f32(x * INV_SQRT2))
+}
+
+#[inline(always)]
+pub fn exact_gelu_f64(x: f64) -> f64 {
+    const INV_SQRT2: f64 = 0.7071067811865475;
+    0.5 * x * (1.0 + fast_erf_f32((x * INV_SQRT2) as f32) as f64)
+}
+
+pub fn gelu(a: &BorrowedTensor, approximate: &str) -> PyResult<OwnedTensor> {
+    if a.dtype == DType::F32 && a.strides == contiguous_strides(&a.shape) {
+        let a_data = unsafe { typed_slice::<f32>(a) };
+        let mut out = OwnedTensor::new(a.dtype, a.shape.clone());
+        let out_data = unsafe { typed_mut_slice::<f32>(&mut out) };
+        let n = out_data.len();
+        if approximate == "none" {
+            if n >= PAR_CHUNK {
+                use rayon::prelude::*;
+                out_data
+                    .par_chunks_mut(PAR_CHUNK)
+                    .enumerate()
+                    .for_each(|(ci, chunk)| {
+                        let base = ci * PAR_CHUNK;
+                        let a_slice = &a_data[base..base + chunk.len()];
+                        let n_simd = chunk.len() / 8;
+                        for j in 0..n_simd {
+                            let offset = j * 8;
+                            let v = f32x8::from(
+                                *<&[f32; 8]>::try_from(&a_slice[offset..offset + 8]).unwrap(),
+                            );
+                            let res = exact_gelu_f32x8(v);
+                            chunk[offset..offset + 8].copy_from_slice(&res.to_array());
+                        }
+                        for j in (n_simd * 8)..chunk.len() {
+                            chunk[j] = exact_gelu_f32(a_slice[j]);
+                        }
+                    });
+            } else {
+                let n_simd = n / 8;
+                for j in 0..n_simd {
+                    let offset = j * 8;
+                    let v =
+                        f32x8::from(*<&[f32; 8]>::try_from(&a_data[offset..offset + 8]).unwrap());
+                    let res = exact_gelu_f32x8(v);
+                    out_data[offset..offset + 8].copy_from_slice(&res.to_array());
+                }
+                for j in (n_simd * 8)..n {
+                    out_data[j] = exact_gelu_f32(a_data[j]);
+                }
+            }
+            return Ok(out);
+        }
+    }
+    if approximate == "none" {
+        apply_elementwise(a, exact_gelu_f32, exact_gelu_f64)
+    } else {
+        apply_elementwise(a, fast_gelu_f32, fast_gelu_f64)
+    }
 }
 
 pub fn silu(a: &BorrowedTensor) -> PyResult<OwnedTensor> {
@@ -343,84 +516,45 @@ fn softmax_f32(a: &BorrowedTensor, dim: isize, out: &mut OwnedTensor) {
     };
 
     let dim_size = shape[d] as usize;
-    let mut outer_stride = 1i64;
-    for i in 0..d {
-        outer_stride *= shape[i];
-    }
     let mut inner_stride = 1i64;
     for i in (d + 1)..rank {
         inner_stride *= shape[i];
     }
-
-    let outer_size = outer_stride as usize;
     let inner_size = inner_stride as usize;
 
-    // 2-pass with wide f32x8 for exp + normalize fused
-    use wide::f32x8;
-    for outer in 0..outer_size {
-        for inner in 0..inner_size {
-            let mut max_val = f32::NEG_INFINITY;
-            for i in 0..dim_size {
-                let idx = outer * (dim_size * inner_size) + i * inner_size + inner;
-                if a_data[idx] > max_val {
-                    max_val = a_data[idx];
-                }
-            }
-            // wide exp for 8 at a time
-            let mut sum = 0.0f32;
-            let mut i = 0;
-            while i + 8 <= dim_size {
-                let mut vals = [0.0f32; 8];
-                for j in 0..8 {
-                    let idx = outer * (dim_size * inner_size) + (i + j) * inner_size + inner;
-                    vals[j] = a_data[idx] - max_val;
-                }
-                let _av = f32x8::new(vals);
-                // fast exp via libm per lane (wide doesn't have exp poly for all, use scalar fallback for now)
-                let mut exp_vals = [0.0f32; 8];
-                for j in 0..8 {
-                    exp_vals[j] = vals[j].exp();
-                }
-                for j in 0..8 {
-                    let idx = outer * (dim_size * inner_size) + (i + j) * inner_size + inner;
-                    out_data[idx] = exp_vals[j];
-                    sum += exp_vals[j];
-                }
-                i += 8;
-            }
-            while i < dim_size {
-                let idx = outer * (dim_size * inner_size) + i * inner_size + inner;
-                let val = (a_data[idx] - max_val).exp();
-                out_data[idx] = val;
-                sum += val;
-                i += 1;
-            }
-            let inv_sum = 1.0 / sum;
-            // vectorized divide
-            let mut i = 0;
-            while i + 8 <= dim_size {
-                let base = outer * (dim_size * inner_size) + i * inner_size + inner;
-                // gather 8 strided values into contiguous for SIMD divide
-                let mut tmp = [0.0f32; 8];
-                for j in 0..8 {
-                    tmp[j] = out_data[base + j * inner_size];
-                }
-                let av = f32x8::new(tmp);
-                let rv = av * f32x8::splat(inv_sum);
-                let arr = rv.to_array();
-                for j in 0..8 {
-                    let idx = outer * (dim_size * inner_size) + (i + j) * inner_size + inner;
-                    out_data[idx] = arr[j];
-                }
-                i += 8;
-            }
-            while i < dim_size {
-                let idx = outer * (dim_size * inner_size) + i * inner_size + inner;
-                out_data[idx] *= inv_sum;
-                i += 1;
-            }
-        }
+    let chunk_size = dim_size * inner_size;
+    if chunk_size == 0 || out_data.is_empty() {
+        return;
     }
+
+    use rayon::prelude::*;
+    out_data
+        .par_chunks_mut(chunk_size)
+        .enumerate()
+        .for_each(|(outer, out_chunk)| {
+            let a_chunk = &a_data[outer * chunk_size..(outer + 1) * chunk_size];
+            for inner in 0..inner_size {
+                let mut max_val = f32::NEG_INFINITY;
+                for i in 0..dim_size {
+                    let idx = i * inner_size + inner;
+                    if a_chunk[idx] > max_val {
+                        max_val = a_chunk[idx];
+                    }
+                }
+                let mut sum = 0.0f32;
+                for i in 0..dim_size {
+                    let idx = i * inner_size + inner;
+                    let val = (a_chunk[idx] - max_val).exp();
+                    out_chunk[idx] = val;
+                    sum += val;
+                }
+                let inv_sum = 1.0 / sum;
+                for i in 0..dim_size {
+                    let idx = i * inner_size + inner;
+                    out_chunk[idx] *= inv_sum;
+                }
+            }
+        });
 }
 
 fn softmax_f64(a: &BorrowedTensor, dim: isize, out: &mut OwnedTensor) {
@@ -435,43 +569,56 @@ fn softmax_f64(a: &BorrowedTensor, dim: isize, out: &mut OwnedTensor) {
     };
 
     let dim_size = shape[d] as usize;
-    let mut outer_stride = 1i64;
-    for i in 0..d {
-        outer_stride *= shape[i];
-    }
     let mut inner_stride = 1i64;
     for i in (d + 1)..rank {
         inner_stride *= shape[i];
     }
-
-    let outer_size = outer_stride as usize;
     let inner_size = inner_stride as usize;
 
-    for outer in 0..outer_size {
-        for inner in 0..inner_size {
-            let mut max_val = f64::NEG_INFINITY;
-            for i in 0..dim_size {
-                let idx = outer * (dim_size * inner_size) + i * inner_size + inner;
-                if a_data[idx] > max_val {
-                    max_val = a_data[idx];
+    let chunk_size = dim_size * inner_size;
+    if chunk_size == 0 || out_data.is_empty() {
+        return;
+    }
+
+    use rayon::prelude::*;
+    out_data
+        .par_chunks_mut(chunk_size)
+        .enumerate()
+        .for_each(|(outer, out_chunk)| {
+            let a_chunk = &a_data[outer * chunk_size..(outer + 1) * chunk_size];
+            for inner in 0..inner_size {
+                let mut max_val = f64::NEG_INFINITY;
+                for i in 0..dim_size {
+                    let idx = i * inner_size + inner;
+                    if a_chunk[idx] > max_val {
+                        max_val = a_chunk[idx];
+                    }
+                }
+                let mut sum = 0.0f64;
+                for i in 0..dim_size {
+                    let idx = i * inner_size + inner;
+                    let val = (a_chunk[idx] - max_val).exp();
+                    out_chunk[idx] = val;
+                    sum += val;
+                }
+                let inv_sum = 1.0 / sum;
+                for i in 0..dim_size {
+                    let idx = i * inner_size + inner;
+                    out_chunk[idx] *= inv_sum;
                 }
             }
-            let mut sum = 0.0f64;
-            for i in 0..dim_size {
-                let idx = outer * (dim_size * inner_size) + i * inner_size + inner;
-                let val = (a_data[idx] - max_val).exp();
-                out_data[idx] = val;
-                sum += val;
-            }
-            for i in 0..dim_size {
-                let idx = outer * (dim_size * inner_size) + i * inner_size + inner;
-                out_data[idx] /= sum;
-            }
-        }
-    }
+        });
 }
 
 pub fn softmax(a: &BorrowedTensor, dim: isize) -> PyResult<OwnedTensor> {
+    let _contig;
+    let a = if !a.is_contiguous() {
+        _contig = crate::shape_ops::to_contiguous(a)?;
+        BorrowedTensor::from_owned(&_contig)
+    } else {
+        a.clone()
+    };
+    let a = &a;
     let mut out = OwnedTensor::new(a.dtype, a.shape.clone());
     match a.dtype {
         DType::F32 => softmax_f32(a, dim, &mut out),
@@ -485,6 +632,14 @@ pub fn softmax(a: &BorrowedTensor, dim: isize) -> PyResult<OwnedTensor> {
 }
 
 pub fn log_softmax(a: &BorrowedTensor, dim: isize) -> PyResult<OwnedTensor> {
+    let _contig;
+    let a = if !a.is_contiguous() {
+        _contig = crate::shape_ops::to_contiguous(a)?;
+        BorrowedTensor::from_owned(&_contig)
+    } else {
+        a.clone()
+    };
+    let a = &a;
     let mut out = OwnedTensor::new(a.dtype, a.shape.clone());
     match a.dtype {
         DType::F32 => {
