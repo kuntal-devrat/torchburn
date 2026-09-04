@@ -384,46 +384,13 @@ fn backward_single(
     let kwargs: std::collections::HashMap<String, serde_json::Value> =
         serde_json::from_str(kwargs_json).unwrap_or_default();
 
-    let saved_borrowed: Vec<dlpack::BorrowedTensor> = saved_inputs
+    let saved_owned: Vec<dlpack::OwnedTensor> = saved_inputs
         .iter()
-        .map(|c| unsafe { dlpack::BorrowedTensor::from_capsule(c) })
-        .collect::<PyResult<_>>()?;
-    // Convert BorrowedTensor → OwnedTensor for the backward functions
-    let saved_owned: Vec<dlpack::OwnedTensor> = saved_borrowed
-        .iter()
-        .map(|b| unsafe {
-            let n = dlpack::elem_count(&b.shape);
-            let mut o = dlpack::OwnedTensor::new(b.dtype, b.shape.clone());
-            match b.dtype {
-                dlpack::DType::F32 => {
-                    let src = std::slice::from_raw_parts(b.data as *const f32, n);
-                    let dst = std::slice::from_raw_parts_mut(o.data.as_mut_ptr() as *mut f32, n);
-                    dst.copy_from_slice(src);
-                }
-                dlpack::DType::F64 => {
-                    let src = std::slice::from_raw_parts(b.data as *const f64, n);
-                    let dst = std::slice::from_raw_parts_mut(o.data.as_mut_ptr() as *mut f64, n);
-                    dst.copy_from_slice(src);
-                }
-                dlpack::DType::I64 => {
-                    let src = std::slice::from_raw_parts(b.data as *const i64, n);
-                    let dst = std::slice::from_raw_parts_mut(o.data.as_mut_ptr() as *mut i64, n);
-                    dst.copy_from_slice(src);
-                }
-                dlpack::DType::I32 => {
-                    let src = std::slice::from_raw_parts(b.data as *const i32, n);
-                    let dst = std::slice::from_raw_parts_mut(o.data.as_mut_ptr() as *mut i32, n);
-                    dst.copy_from_slice(src);
-                }
-                dlpack::DType::Bool => {
-                    let src = std::slice::from_raw_parts(b.data as *const u8, n);
-                    let dst = std::slice::from_raw_parts_mut(o.data.as_mut_ptr() as *mut u8, n);
-                    dst.copy_from_slice(src);
-                }
-            }
-            o
+        .map(|c| unsafe {
+            let b = dlpack::BorrowedTensor::from_capsule(c)?;
+            Ok(capsule_to_owned(&b))
         })
-        .collect();
+        .collect::<PyResult<_>>()?;
     let saved_refs: Vec<&dlpack::OwnedTensor> = saved_owned.iter().collect();
 
     let grads = crate::autograd::backward_single(target, &upstream, &saved_refs, &kwargs);
@@ -480,24 +447,24 @@ unsafe fn capsule_to_owned(view: &dlpack::BorrowedTensor) -> dlpack::OwnedTensor
 fn backward_batch(
     py: Python<'_>,
     targets: Vec<String>,
-    saved_all: Vec<Vec<Bound<'_, PyCapsule>>>,
+    all_inputs: Vec<Vec<Bound<'_, PyCapsule>>>,
     all_kwargs: Vec<String>,
     output_ids: Vec<usize>,
     input_ids_all: Vec<Vec<usize>>,
     saved_shapes_all: Vec<Vec<Vec<i64>>>,
-    initial_upstream: &Bound<'_, PyCapsule>,
+    upstream_capsule: &Bound<'_, PyCapsule>,
     initial_output_id: usize,
 ) -> PyResult<Vec<(usize, Py<PyCapsule>)>> {
     // 1. Convert initial upstream capsule -> OwnedTensor
-    let init_view = unsafe { dlpack::BorrowedTensor::from_capsule(initial_upstream)? };
+    let init_view = unsafe { dlpack::BorrowedTensor::from_capsule(upstream_capsule)? };
     let init_owned = unsafe { capsule_to_owned(&init_view) };
 
     // 2. Build batch tape entries (all capsule->OwnedTensor conversions here)
     let mut tape = Vec::with_capacity(targets.len());
     for i in 0..targets.len() {
         // Saved input capsules -> Vec<OwnedTensor>
-        let mut saved_owned = Vec::with_capacity(saved_all[i].len());
-        for c in &saved_all[i] {
+        let mut saved_owned = Vec::with_capacity(all_inputs[i].len());
+        for c in &all_inputs[i] {
             let view = unsafe { dlpack::BorrowedTensor::from_capsule(c)? };
             saved_owned.push(unsafe { capsule_to_owned(&view) });
         }
@@ -538,25 +505,7 @@ fn dropout_forward(
 ) -> PyResult<Py<PyCapsule>> {
     let view = unsafe { dlpack::BorrowedTensor::from_capsule(input)? };
     if !training || p == 0.0 {
-        // No-op: clone the input into an owned tensor and return.
-        let owned = unsafe {
-            let mut o = crate::dlpack::OwnedTensor::new(view.dtype, view.shape.clone());
-            let n = dlpack::elem_count(&view.shape);
-            match view.dtype {
-                dlpack::DType::F32 => {
-                    let src = std::slice::from_raw_parts(view.data as *const f32, n);
-                    let dst = std::slice::from_raw_parts_mut(o.data.as_mut_ptr() as *mut f32, n);
-                    dst.copy_from_slice(src);
-                }
-                dlpack::DType::F64 => {
-                    let src = std::slice::from_raw_parts(view.data as *const f64, n);
-                    let dst = std::slice::from_raw_parts_mut(o.data.as_mut_ptr() as *mut f64, n);
-                    dst.copy_from_slice(src);
-                }
-                _ => {}
-            }
-            o
-        };
+        let owned = unsafe { capsule_to_owned(&view) };
         return dlpack::owned_to_capsule_owned(py, owned);
     }
     let n = dlpack::elem_count(&view.shape);
@@ -593,9 +542,6 @@ fn dropout_forward(
         }
     }
 
-    // Note: dropout autograd recording is handled by the Python wrapper,
-    // not from this raw capsule-level function.
-
     dlpack::owned_to_capsule_owned(py, out)
 }
 
@@ -622,6 +568,203 @@ fn clear_memory_pool() -> PyResult<()> {
     pool::clear_pool();
     pool::reset_pool_stats();
     Ok(())
+}
+
+#[pyfunction]
+#[pyo3(signature = (x, w, scales, bias=None))]
+fn w8a32_linear(
+    py: Python<'_>,
+    x: &Bound<'_, PyCapsule>,
+    w: &Bound<'_, PyCapsule>,
+    scales: &Bound<'_, PyCapsule>,
+    bias: Option<&Bound<'_, PyCapsule>>,
+) -> PyResult<Py<PyCapsule>> {
+    let x_view = unsafe { dlpack::BorrowedTensor::from_capsule(x)? };
+    let w_view = unsafe { dlpack::BorrowedTensor::from_capsule(w)? };
+    let s_view = unsafe { dlpack::BorrowedTensor::from_capsule(scales)? };
+    let b_view = match bias {
+        Some(b) => Some(unsafe { dlpack::BorrowedTensor::from_capsule(b)? }),
+        None => None,
+    };
+
+    let out = py.allow_threads(|| {
+        crate::quantization::w8a32_linear(&x_view, &w_view, &s_view, b_view.as_ref())
+    })?;
+
+    dlpack::owned_to_capsule_owned(py, out)
+}
+
+#[pyfunction]
+#[pyo3(signature = (x, w_packed, scales, bias=None))]
+fn w4a32_linear(
+    py: Python<'_>,
+    x: &Bound<'_, PyCapsule>,
+    w_packed: &Bound<'_, PyCapsule>,
+    scales: &Bound<'_, PyCapsule>,
+    bias: Option<&Bound<'_, PyCapsule>>,
+) -> PyResult<Py<PyCapsule>> {
+    let x_view = unsafe { dlpack::BorrowedTensor::from_capsule(x)? };
+    let w_view = unsafe { dlpack::BorrowedTensor::from_capsule(w_packed)? };
+    let s_view = unsafe { dlpack::BorrowedTensor::from_capsule(scales)? };
+    let b_view = match bias {
+        Some(b) => Some(unsafe { dlpack::BorrowedTensor::from_capsule(b)? }),
+        None => None,
+    };
+
+    let out = py.allow_threads(|| {
+        crate::quantization::w4a32_linear(&x_view, &w_view, &s_view, b_view.as_ref())
+    })?;
+
+    dlpack::owned_to_capsule_owned(py, out)
+}
+
+#[pyfunction]
+#[pyo3(signature = (x, w_packed, scales, bias=None, group_size=64))]
+fn w4a32_grouped_linear(
+    py: Python<'_>,
+    x: &Bound<'_, PyCapsule>,
+    w_packed: &Bound<'_, PyCapsule>,
+    scales: &Bound<'_, PyCapsule>,
+    bias: Option<&Bound<'_, PyCapsule>>,
+    group_size: usize,
+) -> PyResult<Py<PyCapsule>> {
+    let x_view = unsafe { dlpack::BorrowedTensor::from_capsule(x)? };
+    let w_view = unsafe { dlpack::BorrowedTensor::from_capsule(w_packed)? };
+    let s_view = unsafe { dlpack::BorrowedTensor::from_capsule(scales)? };
+    let b_view = match bias {
+        Some(b) => Some(unsafe { dlpack::BorrowedTensor::from_capsule(b)? }),
+        None => None,
+    };
+
+    let out = py.allow_threads(|| {
+        crate::quantization::w4a32_grouped_linear(&x_view, &w_view, &s_view, b_view.as_ref(), group_size)
+    })?;
+
+    dlpack::owned_to_capsule_owned(py, out)
+}
+
+#[pyfunction]
+#[pyo3(signature = (x, gate_w, gate_s, gate_b, up_w, up_s, up_b, down_w, down_s, down_b))]
+fn fused_swiglu_mlp_w8a32(
+    py: Python<'_>,
+    x: &Bound<'_, PyCapsule>,
+    gate_w: &Bound<'_, PyCapsule>,
+    gate_s: &Bound<'_, PyCapsule>,
+    gate_b: Option<&Bound<'_, PyCapsule>>,
+    up_w: &Bound<'_, PyCapsule>,
+    up_s: &Bound<'_, PyCapsule>,
+    up_b: Option<&Bound<'_, PyCapsule>>,
+    down_w: &Bound<'_, PyCapsule>,
+    down_s: &Bound<'_, PyCapsule>,
+    down_b: Option<&Bound<'_, PyCapsule>>,
+) -> PyResult<Py<PyCapsule>> {
+    let x_view = unsafe { dlpack::BorrowedTensor::from_capsule(x)? };
+    let gw_view = unsafe { dlpack::BorrowedTensor::from_capsule(gate_w)? };
+    let gs_view = unsafe { dlpack::BorrowedTensor::from_capsule(gate_s)? };
+    let gb_view = match gate_b {
+        Some(b) => Some(unsafe { dlpack::BorrowedTensor::from_capsule(b)? }),
+        None => None,
+    };
+    let uw_view = unsafe { dlpack::BorrowedTensor::from_capsule(up_w)? };
+    let us_view = unsafe { dlpack::BorrowedTensor::from_capsule(up_s)? };
+    let ub_view = match up_b {
+        Some(b) => Some(unsafe { dlpack::BorrowedTensor::from_capsule(b)? }),
+        None => None,
+    };
+    let dw_view = unsafe { dlpack::BorrowedTensor::from_capsule(down_w)? };
+    let ds_view = unsafe { dlpack::BorrowedTensor::from_capsule(down_s)? };
+    let db_view = match down_b {
+        Some(b) => Some(unsafe { dlpack::BorrowedTensor::from_capsule(b)? }),
+        None => None,
+    };
+
+    let out = py.allow_threads(|| {
+        crate::quantization::fused_swiglu_mlp_w8a32(
+            &x_view,
+            &gw_view, &gs_view, gb_view.as_ref(),
+            &uw_view, &us_view, ub_view.as_ref(),
+            &dw_view, &ds_view, db_view.as_ref(),
+        )
+    })?;
+
+    dlpack::owned_to_capsule_owned(py, out)
+}
+
+#[pyfunction]
+#[pyo3(signature = (x, gate_w, gate_s, gate_b, up_w, up_s, up_b, down_w, down_s, down_b, group_size=64))]
+fn fused_swiglu_mlp_w4a32(
+    py: Python<'_>,
+    x: &Bound<'_, PyCapsule>,
+    gate_w: &Bound<'_, PyCapsule>,
+    gate_s: &Bound<'_, PyCapsule>,
+    gate_b: Option<&Bound<'_, PyCapsule>>,
+    up_w: &Bound<'_, PyCapsule>,
+    up_s: &Bound<'_, PyCapsule>,
+    up_b: Option<&Bound<'_, PyCapsule>>,
+    down_w: &Bound<'_, PyCapsule>,
+    down_s: &Bound<'_, PyCapsule>,
+    down_b: Option<&Bound<'_, PyCapsule>>,
+    group_size: usize,
+) -> PyResult<Py<PyCapsule>> {
+    let x_view = unsafe { dlpack::BorrowedTensor::from_capsule(x)? };
+    let gw_view = unsafe { dlpack::BorrowedTensor::from_capsule(gate_w)? };
+    let gs_view = unsafe { dlpack::BorrowedTensor::from_capsule(gate_s)? };
+    let gb_view = match gate_b {
+        Some(b) => Some(unsafe { dlpack::BorrowedTensor::from_capsule(b)? }),
+        None => None,
+    };
+    let uw_view = unsafe { dlpack::BorrowedTensor::from_capsule(up_w)? };
+    let us_view = unsafe { dlpack::BorrowedTensor::from_capsule(up_s)? };
+    let ub_view = match up_b {
+        Some(b) => Some(unsafe { dlpack::BorrowedTensor::from_capsule(b)? }),
+        None => None,
+    };
+    let dw_view = unsafe { dlpack::BorrowedTensor::from_capsule(down_w)? };
+    let ds_view = unsafe { dlpack::BorrowedTensor::from_capsule(down_s)? };
+    let db_view = match down_b {
+        Some(b) => Some(unsafe { dlpack::BorrowedTensor::from_capsule(b)? }),
+        None => None,
+    };
+
+    let out = py.allow_threads(|| {
+        crate::quantization::fused_swiglu_mlp_w4a32(
+            &x_view,
+            &gw_view, &gs_view, gb_view.as_ref(),
+            &uw_view, &us_view, ub_view.as_ref(),
+            &dw_view, &ds_view, db_view.as_ref(),
+            group_size,
+        )
+    })?;
+
+    dlpack::owned_to_capsule_owned(py, out)
+}
+
+#[pyfunction]
+fn quantize_linear_int8(
+    py: Python<'_>,
+    w: &Bound<'_, PyCapsule>,
+) -> PyResult<(Py<PyCapsule>, Py<PyCapsule>)> {
+    let w_view = unsafe { dlpack::BorrowedTensor::from_capsule(w)? };
+    let (out_w, out_s) = py.allow_threads(|| {
+        crate::quantization::quantize_linear_weights_int8(&w_view)
+    })?;
+    let cap_w = dlpack::owned_to_capsule_typed(py, out_w, dlpack::DL_DTYPE_INT, 8)?;
+    let cap_s = dlpack::owned_to_capsule_owned(py, out_s)?;
+    Ok((cap_w, cap_s))
+}
+
+#[pyfunction]
+fn quantize_linear_int4(
+    py: Python<'_>,
+    w: &Bound<'_, PyCapsule>,
+) -> PyResult<(Py<PyCapsule>, Py<PyCapsule>)> {
+    let w_view = unsafe { dlpack::BorrowedTensor::from_capsule(w)? };
+    let (out_w, out_s) = py.allow_threads(|| {
+        crate::quantization::quantize_linear_weights_int4(&w_view)
+    })?;
+    let cap_w = dlpack::owned_to_capsule_typed(py, out_w, dlpack::DL_DTYPE_UINT, 8)?;
+    let cap_s = dlpack::owned_to_capsule_owned(py, out_s)?;
+    Ok((cap_w, cap_s))
 }
 
 #[pymodule]
@@ -657,5 +800,12 @@ fn _torchburn(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(cache::cache_clear, m)?)?;
     m.add_function(wrap_pyfunction!(memory_pool_stats, m)?)?;
     m.add_function(wrap_pyfunction!(clear_memory_pool, m)?)?;
+    m.add_function(wrap_pyfunction!(w8a32_linear, m)?)?;
+    m.add_function(wrap_pyfunction!(w4a32_linear, m)?)?;
+    m.add_function(wrap_pyfunction!(w4a32_grouped_linear, m)?)?;
+    m.add_function(wrap_pyfunction!(fused_swiglu_mlp_w8a32, m)?)?;
+    m.add_function(wrap_pyfunction!(fused_swiglu_mlp_w4a32, m)?)?;
+    m.add_function(wrap_pyfunction!(quantize_linear_int8, m)?)?;
+    m.add_function(wrap_pyfunction!(quantize_linear_int4, m)?)?;
     Ok(())
 }

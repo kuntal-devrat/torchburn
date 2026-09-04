@@ -7,6 +7,7 @@
 
 use crate::dlpack::{contiguous_strides, unsupported, BorrowedTensor, DType, OwnedTensor};
 use pyo3::prelude::*;
+use wide::f32x8;
 
 #[cfg(not(feature = "openblas"))]
 use matrixmultiply::{dgemm, sgemm};
@@ -62,6 +63,23 @@ fn gemm_f32_into(a: &[f32], b: &[f32], out: &mut [f32], m: usize, k: usize, n: u
     }
     #[cfg(not(feature = "openblas"))]
     unsafe {
+        if m == 1 && n >= 32 {
+            use rayon::prelude::*;
+            let a_p = a.as_ptr() as usize;
+            let b_p = b.as_ptr() as usize;
+            let out_p = out.as_mut_ptr() as usize;
+            (0..n).into_par_iter().for_each(|j| {
+                let a_ptr = a_p as *const f32;
+                let b_ptr = b_p as *const f32;
+                let out_ptr = out_p as *mut f32;
+                let mut sum = 0.0f32;
+                for p in 0..k {
+                    sum += *a_ptr.add(p) * *b_ptr.add(p * n + j);
+                }
+                *out_ptr.add(j) = sum;
+            });
+            return;
+        }
         sgemm(
             m,
             k,
@@ -197,8 +215,56 @@ fn gemm_f64_into_accum(a: &[f64], b: &[f64], out: &mut [f64], m: usize, k: usize
 }
 
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
 // Transposed-B GEMM: C = A @ B^T
 // ---------------------------------------------------------------------------
+
+#[inline(always)]
+unsafe fn dot_f32(a: *const f32, b: *const f32, len: usize) -> f32 {
+    let mut sum0 = f32x8::ZERO;
+    let mut sum1 = f32x8::ZERO;
+    let mut sum2 = f32x8::ZERO;
+    let mut sum3 = f32x8::ZERO;
+    let chunks32 = len / 32;
+    let mut offset = 0;
+
+    for _ in 0..chunks32 {
+        let a0 = f32x8::from(std::ptr::read_unaligned(a.add(offset) as *const [f32; 8]));
+        let b0 = f32x8::from(std::ptr::read_unaligned(b.add(offset) as *const [f32; 8]));
+        sum0 = a0.mul_add(b0, sum0);
+
+        let a1 = f32x8::from(std::ptr::read_unaligned(a.add(offset + 8) as *const [f32; 8]));
+        let b1 = f32x8::from(std::ptr::read_unaligned(b.add(offset + 8) as *const [f32; 8]));
+        sum1 = a1.mul_add(b1, sum1);
+
+        let a2 = f32x8::from(std::ptr::read_unaligned(a.add(offset + 16) as *const [f32; 8]));
+        let b2 = f32x8::from(std::ptr::read_unaligned(b.add(offset + 16) as *const [f32; 8]));
+        sum2 = a2.mul_add(b2, sum2);
+
+        let a3 = f32x8::from(std::ptr::read_unaligned(a.add(offset + 24) as *const [f32; 8]));
+        let b3 = f32x8::from(std::ptr::read_unaligned(b.add(offset + 24) as *const [f32; 8]));
+        sum3 = a3.mul_add(b3, sum3);
+
+        offset += 32;
+    }
+
+    let mut sum = (sum0 + sum1) + (sum2 + sum3);
+
+    let chunks8 = (len - offset) / 8;
+    for _ in 0..chunks8 {
+        let a0 = f32x8::from(std::ptr::read_unaligned(a.add(offset) as *const [f32; 8]));
+        let b0 = f32x8::from(std::ptr::read_unaligned(b.add(offset) as *const [f32; 8]));
+        sum = a0.mul_add(b0, sum);
+        offset += 8;
+    }
+
+    let mut total = sum.reduce_add();
+    while offset < len {
+        total += *a.add(offset) * *b.add(offset);
+        offset += 1;
+    }
+    total
+}
 
 /// C = A @ B^T where A is (M, K), B is (N, K) in memory (i.e. B^T is (K, N)).
 /// B is stored row-major (N, K): row_stride = K, col_stride = 1.
@@ -213,6 +279,25 @@ fn gemm_f32_trans_b_into(
     out: *mut f32,
     n: usize,
 ) {
+    if m <= 8 && n >= 32 {
+        use rayon::prelude::*;
+        let a_p = a as usize;
+        let b_p = b as usize;
+        let out_p = out as usize;
+        (0..n).into_par_iter().for_each(|j| {
+            let a_ptr = a_p as *const f32;
+            let b_ptr = (b_p as *const f32).wrapping_add(j * k);
+            let out_ptr = out_p as *mut f32;
+            for r in 0..m {
+                let a_row = unsafe { a_ptr.add(r * k) };
+                let val = unsafe { dot_f32(a_row, b_ptr, k) };
+                unsafe {
+                    *out_ptr.add(r * n + j) = val;
+                }
+            }
+        });
+        return;
+    }
     unsafe {
         sgemm(
             m,
@@ -243,6 +328,25 @@ fn gemm_f32_trans_b_into_accum(
     out: *mut f32,
     n: usize,
 ) {
+    if m <= 8 && n >= 32 {
+        use rayon::prelude::*;
+        let a_p = a as usize;
+        let b_p = b as usize;
+        let out_p = out as usize;
+        (0..n).into_par_iter().for_each(|j| {
+            let a_ptr = a_p as *const f32;
+            let b_ptr = (b_p as *const f32).wrapping_add(j * k);
+            let out_ptr = out_p as *mut f32;
+            for r in 0..m {
+                let a_row = unsafe { a_ptr.add(r * k) };
+                let val = unsafe { dot_f32(a_row, b_ptr, k) };
+                unsafe {
+                    *out_ptr.add(r * n + j) += val;
+                }
+            }
+        });
+        return;
+    }
     unsafe {
         sgemm(
             m,
@@ -571,6 +675,24 @@ pub fn bmm(a: &BorrowedTensor, b: &BorrowedTensor) -> PyResult<OwnedTensor> {
             a.shape[2], b.shape[1]
         )));
     }
+
+    let _a_contig;
+    let a = if a.strides != contiguous_strides(&a.shape) {
+        _a_contig = crate::shape_ops::to_contiguous(a)?;
+        BorrowedTensor::from_owned(&_a_contig)
+    } else {
+        a.clone()
+    };
+    let a = &a;
+
+    let _b_contig;
+    let b = if b.strides != contiguous_strides(&b.shape) {
+        _b_contig = crate::shape_ops::to_contiguous(b)?;
+        BorrowedTensor::from_owned(&_b_contig)
+    } else {
+        b.clone()
+    };
+    let b = &b;
 
     let batch = a.shape[0] as usize;
     let m = a.shape[1] as usize;
@@ -1137,6 +1259,24 @@ pub fn matmul(a: &BorrowedTensor, b: &BorrowedTensor) -> PyResult<OwnedTensor> {
     if a_rank == 2 && b_rank == 2 {
         return matmul_2d(a, b);
     }
+
+    let _a_contig;
+    let a = if a.strides != contiguous_strides(&a.shape) {
+        _a_contig = crate::shape_ops::to_contiguous(a)?;
+        BorrowedTensor::from_owned(&_a_contig)
+    } else {
+        a.clone()
+    };
+    let a = &a;
+
+    let _b_contig;
+    let b = if b.strides != contiguous_strides(&b.shape) {
+        _b_contig = crate::shape_ops::to_contiguous(b)?;
+        BorrowedTensor::from_owned(&_b_contig)
+    } else {
+        b.clone()
+    };
+    let b = &b;
 
     // For batched: fall back to naive batch loop
     // Compute batch shape (broadcast leading dims)

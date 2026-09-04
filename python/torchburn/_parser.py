@@ -914,6 +914,12 @@ _METHOD_TO_OP: dict[str, str] = {
     "sub": "sub",
     "mul": "mul",
     "div": "div",
+    "pow": "pow",
+    "mean": "mean",
+    "sum": "sum",
+    "rsqrt": "rsqrt",
+    "silu": "silu",
+    "gelu": "gelu",
     "relu": "relu",
     "sigmoid": "sigmoid",
     "tanh": "tanh",
@@ -1039,6 +1045,9 @@ def _is_tuple_source(node: torch.fx.Node) -> bool:
         # aten ops producing a tuple
         if "aten." in key and any(s in key for s in ("_shape_as_tensor", "max", "min", "sort", "topk", "unbind", "chunk")):
             return True
+        mapped = canonical_op(node)
+        if mapped is not None and mapped[0] in _TUPLE_OUTPUT_OPS:
+            return True
         return False
     if node.op == "call_method":
         return str(node.target) in ("size", "shape", "unbind", "chunk")
@@ -1151,6 +1160,7 @@ _REDUCE_POSITIONAL_KWARGS: dict[str, list[str]] = {
     "adaptive_max_pool1d": ["output_size"],
     "lp_pool3d": ["norm_type", "kernel_size", "stride"],
     "local_response_norm": ["size", "alpha", "beta", "k"],
+    "pow": ["exp"],
 }
 
 # aten.transpose(x, d0, d1) — the two dims are positional consts.
@@ -1412,6 +1422,8 @@ def parse_graph(
                 break
         if has_consumed_nonzero:
             force_eager.add(n)
+            for gi_node in getitem_by_idx.values():
+                force_eager.add(gi_node)
         else:
             # Only element-0 is consumed (or no consumers at all).
             # Alias getitem(0) to the tuple-producing node; drop all dead getitems.

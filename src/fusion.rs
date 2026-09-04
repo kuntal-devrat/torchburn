@@ -481,6 +481,29 @@ pub struct FusionPlan {
     pub node_step: Vec<usize>,
 }
 
+impl FusionPlan {
+    /// Remap leaf slot arguments in fused steps (e.g. ChainPlan) according to
+    /// the global slot remapping table.
+    pub fn remap(&mut self, remap: &[usize]) {
+        for step in &mut self.steps {
+            if let Step::Chain(ref mut cplan) = step {
+                for expr in &mut cplan.exprs {
+                    if let Arg::Leaf(ref mut slot) = expr.a {
+                        if *slot < remap.len() {
+                            *slot = remap[*slot];
+                        }
+                    }
+                    if let Some(Arg::Leaf(ref mut slot)) = expr.b.as_mut() {
+                        if *slot < remap.len() {
+                            *slot = remap[*slot];
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 fn is_fusable_unary(target: &str) -> bool {
     UnaryKind::from_target(target).is_some()
 }
@@ -821,8 +844,8 @@ fn broadcast_strides(out_shape: &[i64], leaf_shape: &[i64]) -> Option<Vec<usize>
         acc *= leaf_shape[d].max(0) as usize;
     }
     for d in 0..rank {
-        let ld = d + lrank - rank;
-        if ld < lrank {
+        if d + lrank >= rank {
+            let ld = d + lrank - rank;
             let ldim = leaf_shape[ld].max(0) as usize;
             let odim = out_shape[d].max(0) as usize;
             if ldim == odim {

@@ -8,7 +8,7 @@ __pycache__/
 *.pdb
 *.so
 .pytest_cache/
-.venv/
+.venv*/
 
 # Distribution
 dist/
@@ -32,3 +32,6 @@ vendor/
 *.lib
 *.a
 *.zip
+*.safetensors
+nocudaAI/weights/
+scratch/

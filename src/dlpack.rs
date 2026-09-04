@@ -89,7 +89,7 @@ pub enum DType {
     I64,
     /// Signed 32-bit integers (compact indices).
     I32,
-    /// Boolean masks (attention masks, `where` conditions).
+    /// Boolean masks and 8-bit quantized buffers (int8, uint8, bool).
     Bool,
 }
 
@@ -139,7 +139,7 @@ pub fn dtype_from_spec(spec: &str) -> Option<DType> {
         "f64" => Some(DType::F64),
         "i64" => Some(DType::I64),
         "i32" => Some(DType::I32),
-        "bool" => Some(DType::Bool),
+        "i8" | "u8" | "bool" => Some(DType::Bool),
         _ => None,
     }
 }
@@ -216,6 +216,8 @@ impl BorrowedTensor {
                 (DL_DTYPE_FLOAT, 64) => DType::F64,
                 (DL_DTYPE_INT, 64) => DType::I64,
                 (DL_DTYPE_INT, 32) => DType::I32,
+                (DL_DTYPE_INT, 8) => DType::Bool,
+                (DL_DTYPE_UINT, 8) => DType::Bool,
                 (DL_DTYPE_BOOL, 8) => DType::Bool,
                 (code, bits) => {
                     return Err(unsupported(&format!(
@@ -499,6 +501,54 @@ pub fn owned_to_capsule_owned(py: Python<'_>, tensor: OwnedTensor) -> PyResult<P
                 dtype: DLDataType {
                     code: dtype.dl_code(),
                     bits: dtype.dl_bits(),
+                    lanes: 1,
+                },
+                shape: shape_ptr,
+                strides: std::ptr::null_mut(),
+                byte_offset: 0,
+            },
+            manager_ctx: std::ptr::null_mut(),
+            deleter: Some(managed_buffer_deleter),
+        },
+        data,
+        shape,
+    };
+    let raw = Box::into_raw(Box::new(buffer)) as *mut DLManagedTensor;
+    let capsule_ptr = unsafe {
+        pyo3::ffi::PyCapsule_New(
+            raw as *mut c_void,
+            c"dltensor".as_ptr(),
+            Some(dlpack_capsule_destructor),
+        )
+    };
+    let capsule: Bound<'_, PyCapsule> =
+        unsafe { Bound::from_owned_ptr_or_err(py, capsule_ptr)?.downcast_into_unchecked() };
+    Ok(capsule.unbind())
+}
+
+/// Export an owned tensor as a DLPack capsule with custom DLDataType code and bits (e.g. DL_DTYPE_INT, 8 for int8).
+pub fn owned_to_capsule_typed(
+    py: Python<'_>,
+    tensor: OwnedTensor,
+    code: u8,
+    bits: u8,
+) -> PyResult<Py<PyCapsule>> {
+    let data = tensor.data;
+    let shape = tensor.shape;
+    let data_ptr = data.as_ptr() as *mut c_void;
+    let shape_ptr = shape.as_ptr() as *mut i64;
+    let buffer = ManagedBuffer {
+        dl: DLManagedTensor {
+            dl_tensor: DLTensor {
+                data: data_ptr,
+                device: DLDevice {
+                    device_type: DL_DEVICE_CPU,
+                    device_id: 0,
+                },
+                ndim: shape.len() as i32,
+                dtype: DLDataType {
+                    code,
+                    bits,
                     lanes: 1,
                 },
                 shape: shape_ptr,

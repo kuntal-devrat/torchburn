@@ -14,6 +14,7 @@ The mixin holds all shared state; subclasses provide `gm`/`function_map`/`plan`.
 
 from __future__ import annotations
 
+import os
 import threading
 import warnings
 import weakref
@@ -35,6 +36,8 @@ _MIXED_FLOAT = (torch.float16, torch.bfloat16)
 
 
 def _warn_fallback(target: str, reason: str = "") -> None:
+    if os.getenv("TORCHBURN_SUPPRESS_FALLBACK_WARNINGS") == "1" or os.getenv("TORCHBURN_QUIET") == "1":
+        return
     # Dedup on the operator alone: the same op can fall back through both the
     # native-phase path (with reason) and the eager-phase path (without), which
     # would otherwise emit two warnings for one event.
@@ -314,7 +317,57 @@ class _BaseInterpreter:
                 node = p["node"]
                 env[node["id"]] = self._run_eager(node, env)
 
+    def _arg_resolvable(self, arg: dict[str, Any], chunk_ids: set[int], env: dict[int, Any]) -> bool:
+        kind = arg.get("kind", "")
+        if kind == "node" and arg.get("index") in chunk_ids:
+            return True
+        if kind == "const":
+            return True
+        if kind == "seq":
+            for item in arg.get("value", []):
+                if isinstance(item, dict):
+                    if item.get("kind") in ("input", "node", "attr") and item.get("index") in chunk_ids:
+                        continue
+                    if item.get("kind") == "const":
+                        if item.get("value") is None:
+                            return False
+                    else:
+                        v = env.get(item.get("index"))
+                        if v is None or not isinstance(v, torch.Tensor):
+                            return False
+            return True
+        v = env.get(arg.get("index"))
+        if v is None or not isinstance(v, torch.Tensor):
+            return False
+        return True
+
     def _exec_native_phase(self, nodes: list[dict[str, Any]], env: dict[int, Any]) -> None:
+        if not nodes:
+            return
+        subchunk: list[dict[str, Any]] = []
+        subchunk_ids: set[int] = set()
+
+        def _flush_subchunk():
+            if subchunk:
+                self._exec_single_native_chunk(subchunk, env)
+                subchunk.clear()
+                subchunk_ids.clear()
+
+        for node in nodes:
+            can_run_native = True
+            for arg in node.get("args", []):
+                if not self._arg_resolvable(arg, subchunk_ids, env):
+                    can_run_native = False
+                    break
+            if can_run_native:
+                subchunk.append(node)
+                subchunk_ids.add(node["id"])
+            else:
+                _flush_subchunk()
+                env[node["id"]] = self._run_eager(node, env)
+        _flush_subchunk()
+
+    def _exec_single_native_chunk(self, nodes: list[dict[str, Any]], env: dict[int, Any]) -> None:
         if not nodes:
             return
         chunk_ids = {n["id"] for n in nodes}
@@ -487,8 +540,17 @@ class _BaseInterpreter:
         op = node["fx_op"]
         if op == "call_function":
             fn = self.function_map[node["fx_target"]]
+            if (
+                node["fx_target"] in ("aten.view.default", "torch.ops.aten.view.default", "view")
+                and len(args) >= 2
+                and isinstance(args[0], torch.Tensor)
+                and not args[0].is_contiguous()
+            ):
+                return args[0].reshape(args[1])
             return fn(*args, **kwargs)
         if op == "call_method":
+            if node["fx_target"] == "view" and isinstance(args[0], torch.Tensor) and not args[0].is_contiguous():
+                return args[0].reshape(*args[1:], **kwargs)
             return getattr(args[0], node["fx_target"])(*args[1:], **kwargs)
         if op == "call_module":
             return getattr(self.gm, node["fx_target"])(*args, **kwargs)

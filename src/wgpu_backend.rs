@@ -131,6 +131,22 @@ fn ensure_shader_cache() {
     }
 }
 
+#[cfg(feature = "burn-wgpu")]
+pub fn init_wgpu_runtime() {
+    static INIT: OnceLock<()> = OnceLock::new();
+    INIT.get_or_init(|| {
+        ensure_shader_cache();
+        let device = <Backend as BurnBackend>::Device::default();
+        burn::backend::wgpu::init_setup::<burn::backend::wgpu::graphics::AutoGraphicsApi>(
+            &device,
+            burn::backend::wgpu::RuntimeOptions {
+                tasks_max: 32,
+                memory_config: burn::backend::wgpu::MemoryConfiguration::ExclusivePages,
+            },
+        );
+    });
+}
+
 fn probe_gpu() -> GPUInfo {
     // First, respect explicit CPU override.
     if force_cpu() {
@@ -145,7 +161,7 @@ fn probe_gpu() -> GPUInfo {
     // Try to enumerate adapters via wgpu crate for real info (when available).
     #[cfg(feature = "burn-wgpu")]
     {
-        ensure_shader_cache();
+        init_wgpu_runtime();
         if let Some(info) = probe_via_wgpu() {
             // Validate that Burn can actually create a device (adapter not just enumerated).
             let burn_ok = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {

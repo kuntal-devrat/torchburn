@@ -59,6 +59,15 @@ import torch
 from ._backend import register, torchburn_backend
 from ._cache import cache_clear, cache_stats
 from ._compiled import BurnCompiledCallable
+# Default RAYON_NUM_THREADS to physical core count if not set to prevent hyperthread contention
+if "RAYON_NUM_THREADS" not in os.environ:
+    try:
+        import psutil
+        _phys_cores = psutil.cpu_count(logical=False) or 4
+    except Exception:
+        _phys_cores = 4
+    os.environ["RAYON_NUM_THREADS"] = str(_phys_cores)
+
 from .capture import TorchBurnModule, capture
 from . import _torchburn as _native
 from .profiler import (
@@ -72,6 +81,18 @@ from .profiler import (
     clear_memory_pool,
     trace,
     op_coverage,
+)
+from . import quantization
+from .quantization import (
+    QuantizedLinear,
+    quantize_model,
+    w8a32_linear,
+    w4a32_linear,
+    w4a32_grouped_linear,
+    fused_swiglu_mlp,
+    quantize_weight_int8,
+    quantize_weight_int4,
+    quantize_weight_int4_grouped,
 )
 
 try:
@@ -107,11 +128,17 @@ def gpu_backend() -> str:
     return _native.gpu_backend()
 
 
+def rayon_threads() -> int:
+    """Return the active number of Rayon worker threads."""
+    return _native.rayon_threads()
+
+
 __all__ = [
     "BurnCompiledCallable",
     "TorchBurnModule",
     "cache_clear",
     "cache_stats",
+    "rayon_threads",
     "capture",
     "compile",
     "gpu_available",
@@ -130,6 +157,16 @@ __all__ = [
     "clear_memory_pool",
     "trace",
     "op_coverage",
+    "quantization",
+    "QuantizedLinear",
+    "quantize_model",
+    "w8a32_linear",
+    "w4a32_linear",
+    "w4a32_grouped_linear",
+    "fused_swiglu_mlp",
+    "quantize_weight_int8",
+    "quantize_weight_int4",
+    "quantize_weight_int4_grouped",
 ]
 
 

@@ -2,7 +2,7 @@
 //!
 //! These are reduction + elementwise operations over the normalized dimensions.
 
-use crate::dlpack::{unsupported, BorrowedTensor, DType, OwnedTensor};
+use crate::dlpack::{contiguous_strides, unsupported, BorrowedTensor, DType, OwnedTensor};
 use pyo3::prelude::*;
 
 unsafe fn typed_slice<T>(t: &BorrowedTensor) -> &[T] {
@@ -28,6 +28,15 @@ pub fn layer_norm(
             "layer_norm: dtype mismatch between input, weight, bias",
         ));
     }
+
+    let _input_contig;
+    let input = if input.strides != contiguous_strides(&input.shape) {
+        _input_contig = crate::shape_ops::to_contiguous(input)?;
+        BorrowedTensor::from_owned(&_input_contig)
+    } else {
+        input.clone()
+    };
+    let input = &input;
 
     let shape = &input.shape;
     let rank = shape.len();
@@ -375,6 +384,15 @@ pub fn rms_norm(
     if input.dtype != weight.dtype {
         return Err(unsupported("rms_norm: dtype mismatch"));
     }
+
+    let _input_contig;
+    let input = if input.strides != contiguous_strides(&input.shape) {
+        _input_contig = crate::shape_ops::to_contiguous(input)?;
+        BorrowedTensor::from_owned(&_input_contig)
+    } else {
+        input.clone()
+    };
+    let input = &input;
 
     let shape = &input.shape;
     let normalized_size: usize = weight.shape.iter().map(|&d| d.max(0) as usize).product();

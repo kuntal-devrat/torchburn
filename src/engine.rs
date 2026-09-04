@@ -66,7 +66,7 @@ pub fn prepare_graph(dict: &Bound<'_, pyo3::types::PyDict>) -> PyResult<i64> {
     let payload = dict_to_payload(dict)?;
     let base = payload.inputs.len();
     let mut nodes = payload.nodes.clone();
-    let fp = fusion::plan(&nodes, base);
+    let mut fp = fusion::plan(&nodes, base);
     let requested: std::collections::HashSet<u32> = payload.outputs.iter().copied().collect();
     let mut unsafe_output = false;
     for step in &fp.steps {
@@ -111,6 +111,7 @@ pub fn prepare_graph(dict: &Bound<'_, pyo3::types::PyDict>) -> PyResult<i64> {
                 }
             }
         }
+        fp.remap(&remap);
         let mut node_slot = HashMap::with_capacity(nodes.len());
         for (si, step) in fp.steps.iter().enumerate() {
             let out_slot = base + si;
@@ -3874,6 +3875,32 @@ fn dispatch_node(node: &Node, slots: &mut Vec<Slot>, capsules: &[CapsuleRef]) ->
                 &packed, &scales, &zeros, group_size,
             )?));
         }
+        "w8a32_linear" => {
+            let x = slot_view(slots, capsules, arg_index(node, 0)?)?;
+            let w = slot_view(slots, capsules, arg_index(node, 1)?)?;
+            let scales = slot_view(slots, capsules, arg_index(node, 2)?)?;
+            let bias = if node.args.len() > 3 {
+                Some(slot_view(slots, capsules, arg_index(node, 3)?)?)
+            } else {
+                None
+            };
+            slots.push(Slot::Owned(quantization::w8a32_linear(
+                &x, &w, &scales, bias.as_ref(),
+            )?));
+        }
+        "w4a32_linear" => {
+            let x = slot_view(slots, capsules, arg_index(node, 0)?)?;
+            let w_packed = slot_view(slots, capsules, arg_index(node, 1)?)?;
+            let scales = slot_view(slots, capsules, arg_index(node, 2)?)?;
+            let bias = if node.args.len() > 3 {
+                Some(slot_view(slots, capsules, arg_index(node, 3)?)?)
+            } else {
+                None
+            };
+            slots.push(Slot::Owned(quantization::w4a32_linear(
+                &x, &w_packed, &scales, bias.as_ref(),
+            )?));
+        }
 
         // Universal FFT & Complex Suite
         "fft" => {
@@ -4511,7 +4538,7 @@ pub fn execute_native(payload: &Payload, capsules: &[CapsuleRef]) -> PyResult<Ve
     // TORCHBURN_NO_FUSION=1 skips the planner for benchmarking.
     let mut nodes = payload.nodes.clone();
     let no_fusion = std::env::var("TORCHBURN_NO_FUSION").map_or(false, |v| v == "1" || v == "true");
-    let fp = if no_fusion {
+    let mut fp = if no_fusion {
         fusion::FusionPlan {
             steps: (0..nodes.len()).map(|i| Step::Node(i)).collect(),
             node_step: (0..nodes.len()).collect(),
@@ -4570,6 +4597,7 @@ pub fn execute_native(payload: &Payload, capsules: &[CapsuleRef]) -> PyResult<Ve
                 }
             }
         }
+        fp.remap(&remap);
 
         let mut slots = init_input_slots(payload, capsules)?;
         let mut node_slot: HashMap<u32, usize> = HashMap::with_capacity(nodes.len());

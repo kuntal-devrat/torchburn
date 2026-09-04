@@ -104,7 +104,7 @@ fn run_rank<B, const R: usize>(
 where
     B: BurnBackend<FloatElem = f32>,
 {
-    let mut env: Vec<Tensor<B, R>> = Vec::with_capacity(payload.nodes.len() + inputs.len());
+    let mut env: Vec<Option<Tensor<B, R>>> = Vec::with_capacity(payload.nodes.len() + inputs.len());
     // Original rank of every env slot (inputs as declared; node outputs are R).
     // linalg arms use it to reject matrix-vector forms burn cannot express.
     let mut orig_ranks: Vec<usize> = Vec::with_capacity(env.capacity());
@@ -138,14 +138,17 @@ where
             }
         }
         // Move `values` directly into TensorData without redundant cloning.
-        env.push(Tensor::from_data(TensorData::new(values, dims), &device));
+        env.push(Some(Tensor::from_data(
+            TensorData::new(values, dims),
+            &device,
+        )));
         orig_ranks.push(orig_rank);
     }
 
     let mut node_slot: std::collections::HashMap<u32, usize> = std::collections::HashMap::new();
     for node in &payload.nodes {
         let out = run_node::<B, R>(node, &env, &orig_ranks)?;
-        env.push(out);
+        env.push(Some(out));
         orig_ranks.push(R);
         node_slot.insert(node.id, env.len() - 1);
     }
@@ -165,10 +168,15 @@ where
         let count = ref_counts.get_mut(&idx).unwrap();
         *count -= 1;
         let tensor = if *count == 0 {
-            // Last reference: avoid cloning the Burn tensor.
-            std::mem::replace(&mut env[idx], Tensor::empty([0; R], &device))
+            // Last reference: avoid cloning and avoid creating a 0-sized tensor on GPU device.
+            env[idx]
+                .take()
+                .ok_or_else(|| unsupported("slot already consumed"))?
         } else {
-            env[idx].clone()
+            env[idx]
+                .as_ref()
+                .ok_or_else(|| unsupported("slot already consumed"))?
+                .clone()
         };
         let data = tensor.into_data();
         let shape: Vec<i64> = data.shape.iter().map(|&d| d as i64).collect();
@@ -177,6 +185,10 @@ where
             .map_err(|_| unsupported("burn engine: could not read output data"))?;
         out.push(owned_from_values(values, shape));
     }
+    drop(env);
+    drop(node_slot);
+    drop(ref_counts);
+    B::sync(&device);
     Ok(out)
 }
 
@@ -220,7 +232,7 @@ where
 
 fn run_node<B, const R: usize>(
     node: &Node,
-    env: &[Tensor<B, R>],
+    env: &[Option<Tensor<B, R>>],
     orig_ranks: &[usize],
 ) -> PyResult<Tensor<B, R>>
 where
@@ -231,8 +243,20 @@ where
             unsupported(&format!("node '{}' has an unindexed argument", node.target))
         })
     };
-    let unary = |pos: usize| -> PyResult<Tensor<B, R>> { Ok(env[arg(pos)?].clone()) };
-    let binary = |pos: usize| -> PyResult<Tensor<B, R>> { Ok(env[arg(pos)?].clone()) };
+    let unary = |pos: usize| -> PyResult<Tensor<B, R>> {
+        let idx = arg(pos)?;
+        env.get(idx)
+            .and_then(|t| t.as_ref())
+            .cloned()
+            .ok_or_else(|| unsupported(&format!("slot {idx} is empty or out of bounds")))
+    };
+    let binary = |pos: usize| -> PyResult<Tensor<B, R>> {
+        let idx = arg(pos)?;
+        env.get(idx)
+            .and_then(|t| t.as_ref())
+            .cloned()
+            .ok_or_else(|| unsupported(&format!("slot {idx} is empty or out of bounds")))
+    };
     let kw_f64 = |key: &str, default: f64| -> f64 {
         node.kwargs
             .get(key)
@@ -677,6 +701,7 @@ pub fn execute_plan(
         BurnBackendChoice::Wgpu => {
             #[cfg(feature = "burn-wgpu")]
             {
+                crate::wgpu_backend::init_wgpu_runtime();
                 if crate::wgpu_backend::gpu_available() {
                     // wgpu panics (not returns) on OOM, device loss and validation
                     // errors.  Catch the panic so a GPU failure degrades to the
