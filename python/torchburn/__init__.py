@@ -83,14 +83,18 @@ from .profiler import (
     op_coverage,
 )
 from . import quantization
+from .llm import LLM, GenerationConfig, EngineConfig, ModelConfig
 from .quantization import (
     QuantizedLinear,
     quantize_model,
     w8a32_linear,
     w4a32_linear,
     w4a32_grouped_linear,
+    wgpu_w4a32_grouped_linear,
     fused_swiglu_mlp,
     fused_attention_step,
+    create_rust_qwen_decoder,
+    create_wgpu_qwen_decoder,
     quantize_weight_int8,
     quantize_weight_int4,
     quantize_weight_int4_grouped,
@@ -165,9 +169,17 @@ __all__ = [
     "w4a32_linear",
     "w4a32_grouped_linear",
     "fused_swiglu_mlp",
+    "fused_attention_step",
+    "fused_transformer_layer_step",
+    "create_rust_qwen_decoder",
+    "create_wgpu_qwen_decoder",
     "quantize_weight_int8",
     "quantize_weight_int4",
     "quantize_weight_int4_grouped",
+    "LLM",
+    "GenerationConfig",
+    "EngineConfig",
+    "ModelConfig",
 ]
 
 
