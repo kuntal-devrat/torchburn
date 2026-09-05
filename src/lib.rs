@@ -73,18 +73,19 @@ mod convolution;
 mod dlpack;
 mod embedding;
 mod engine;
-mod extra_ops;
-mod extra_ops2;
-mod extra_ops3;
-mod extra_ops4;
+pub mod ops;
+pub use ops::extra as extra_ops;
+pub use ops::extra2 as extra_ops2;
+pub use ops::extra3 as extra_ops3;
+pub use ops::extra4 as extra_ops4;
+pub use ops::phase7 as ops_phase7;
 mod fft_complex;
 mod fusion;
 mod linalg;
+mod llm;
 mod losses;
 mod math_ops;
 mod norm;
-mod ops;
-mod ops_phase7;
 mod pool;
 mod pooling;
 mod quantization;
@@ -99,9 +100,7 @@ pub mod blas;
 mod burn_engine;
 
 #[cfg(feature = "burn-wgpu")]
-mod wgpu_backend;
-#[cfg(feature = "burn-wgpu")]
-mod wgpu_decoder;
+pub mod wgpu;
 
 use pyo3::prelude::*;
 use pyo3::types::PyCapsule;
@@ -181,7 +180,7 @@ fn rayon_threads() -> usize {
 fn gpu_info(py: Python<'_>) -> PyResult<pyo3::PyObject> {
     #[cfg(feature = "burn-wgpu")]
     {
-        let (available, name, backend, vram) = crate::wgpu_backend::gpu_info();
+        let (available, name, backend, vram) = crate::wgpu::backend::gpu_info();
         let dict = pyo3::types::PyDict::new(py);
         dict.set_item("available", available)?;
         dict.set_item("adapter_name", &name)?;
@@ -189,7 +188,7 @@ fn gpu_info(py: Python<'_>) -> PyResult<pyo3::PyObject> {
         dict.set_item("vram_bytes", vram)?;
         dict.set_item(
             "device_override",
-            crate::wgpu_backend::device_override().unwrap_or_default(),
+            crate::wgpu::backend::device_override().unwrap_or_default(),
         )?;
         Ok(dict.into())
     }
@@ -213,8 +212,8 @@ fn gpu_info(py: Python<'_>) -> PyResult<pyo3::PyObject> {
 fn gpu_backend() -> String {
     #[cfg(feature = "burn-wgpu")]
     {
-        if crate::wgpu_backend::gpu_available() {
-            crate::wgpu_backend::gpu_info().2
+        if crate::wgpu::backend::gpu_available() {
+            crate::wgpu::backend::gpu_info().2
         } else {
             "none".to_string()
         }
@@ -230,7 +229,7 @@ fn gpu_backend() -> String {
 fn gpu_available() -> bool {
     #[cfg(feature = "burn-wgpu")]
     {
-        crate::wgpu_backend::gpu_available()
+        crate::wgpu::backend::gpu_available()
     }
     #[cfg(not(feature = "burn-wgpu"))]
     {
@@ -639,7 +638,13 @@ fn w4a32_grouped_linear(
     };
 
     let out = py.allow_threads(|| {
-        crate::quantization::w4a32_grouped_linear(&x_view, &w_view, &s_view, b_view.as_ref(), group_size)
+        crate::quantization::w4a32_grouped_linear(
+            &x_view,
+            &w_view,
+            &s_view,
+            b_view.as_ref(),
+            group_size,
+        )
     })?;
 
     dlpack::owned_to_capsule_owned(py, out)
@@ -666,14 +671,22 @@ fn wgpu_w4a32_grouped_linear(
     #[cfg(feature = "burn-wgpu")]
     {
         let out = py.allow_threads(|| {
-            crate::quantization::wgpu_w4a32_grouped_linear(&x_view, &w_view, &s_view, b_view.as_ref(), group_size)
+            crate::quantization::wgpu_w4a32_grouped_linear(
+                &x_view,
+                &w_view,
+                &s_view,
+                b_view.as_ref(),
+                group_size,
+            )
         })?;
         dlpack::owned_to_capsule_owned(py, out)
     }
     #[cfg(not(feature = "burn-wgpu"))]
     {
-        let _ = (x_view, w_view, s_view, b_view, group_size);
-        Err(pyo3::exceptions::PyRuntimeError::new_err("burn-wgpu feature not enabled"))
+        let _ = (py, x_view, w_view, s_view, b_view, group_size);
+        Err(pyo3::exceptions::PyRuntimeError::new_err(
+            "burn-wgpu feature not enabled",
+        ))
     }
 }
 
@@ -715,9 +728,15 @@ fn fused_swiglu_mlp_w8a32(
     let out = py.allow_threads(|| {
         crate::quantization::fused_swiglu_mlp_w8a32(
             &x_view,
-            &gw_view, &gs_view, gb_view.as_ref(),
-            &uw_view, &us_view, ub_view.as_ref(),
-            &dw_view, &ds_view, db_view.as_ref(),
+            &gw_view,
+            &gs_view,
+            gb_view.as_ref(),
+            &uw_view,
+            &us_view,
+            ub_view.as_ref(),
+            &dw_view,
+            &ds_view,
+            db_view.as_ref(),
         )
     })?;
 
@@ -763,9 +782,15 @@ fn fused_swiglu_mlp_w4a32(
     let out = py.allow_threads(|| {
         crate::quantization::fused_swiglu_mlp_w4a32(
             &x_view,
-            &gw_view, &gs_view, gb_view.as_ref(),
-            &uw_view, &us_view, ub_view.as_ref(),
-            &dw_view, &ds_view, db_view.as_ref(),
+            &gw_view,
+            &gs_view,
+            gb_view.as_ref(),
+            &uw_view,
+            &us_view,
+            ub_view.as_ref(),
+            &dw_view,
+            &ds_view,
+            db_view.as_ref(),
             group_size,
         )
     })?;
@@ -779,9 +804,8 @@ fn quantize_linear_int8(
     w: &Bound<'_, PyCapsule>,
 ) -> PyResult<(Py<PyCapsule>, Py<PyCapsule>)> {
     let w_view = unsafe { dlpack::BorrowedTensor::from_capsule(w)? };
-    let (out_w, out_s) = py.allow_threads(|| {
-        crate::quantization::quantize_linear_weights_int8(&w_view)
-    })?;
+    let (out_w, out_s) =
+        py.allow_threads(|| crate::quantization::quantize_linear_weights_int8(&w_view))?;
     let cap_w = dlpack::owned_to_capsule_typed(py, out_w, dlpack::DL_DTYPE_INT, 8)?;
     let cap_s = dlpack::owned_to_capsule_owned(py, out_s)?;
     Ok((cap_w, cap_s))
@@ -793,9 +817,8 @@ fn quantize_linear_int4(
     w: &Bound<'_, PyCapsule>,
 ) -> PyResult<(Py<PyCapsule>, Py<PyCapsule>)> {
     let w_view = unsafe { dlpack::BorrowedTensor::from_capsule(w)? };
-    let (out_w, out_s) = py.allow_threads(|| {
-        crate::quantization::quantize_linear_weights_int4(&w_view)
-    })?;
+    let (out_w, out_s) =
+        py.allow_threads(|| crate::quantization::quantize_linear_weights_int4(&w_view))?;
     let cap_w = dlpack::owned_to_capsule_typed(py, out_w, dlpack::DL_DTYPE_UINT, 8)?;
     let cap_s = dlpack::owned_to_capsule_owned(py, out_s)?;
     Ok((cap_w, cap_s))
@@ -1031,9 +1054,9 @@ fn fused_transformer_layer_step_w4a32(
 #[pymodule]
 fn _torchburn(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
-    m.add_class::<crate::quantization::RustQwenDecoder>()?;
+    m.add_class::<crate::llm::RustQwenDecoder>()?;
     #[cfg(feature = "burn-wgpu")]
-    m.add_class::<crate::wgpu_decoder::WgpuQwenDecoder>()?;
+    m.add_class::<crate::wgpu::WgpuQwenDecoder>()?;
     m.add_function(wrap_pyfunction!(execute, m)?)?;
     m.add_function(wrap_pyfunction!(execute_from_dict, m)?)?;
     m.add_function(wrap_pyfunction!(prepare_graph, m)?)?;

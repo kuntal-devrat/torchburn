@@ -287,6 +287,12 @@ class _BaseInterpreter:
         if self._graph_handle is None:
             self._exec_phases_sequentially(env)
             return
+        if torch.is_grad_enabled() and any(
+            isinstance(env.get(k[1]), torch.Tensor) and env[k[1]].requires_grad
+            for k in self._combined_input_keys if k[0] != "const"
+        ):
+            self._exec_phases_sequentially(env)
+            return
         try:
             capsules = [t.__dlpack__() for t in run_inputs]
             out_capsules = _native.execute_prepared(self._graph_handle, capsules)
@@ -370,6 +376,16 @@ class _BaseInterpreter:
     def _exec_single_native_chunk(self, nodes: list[dict[str, Any]], env: dict[int, Any]) -> None:
         if not nodes:
             return
+        if torch.is_grad_enabled():
+            for node in nodes:
+                for arg in node.get("args", []):
+                    kind = arg.get("kind", "")
+                    if kind in ("input", "node", "attr"):
+                        val = env.get(arg.get("index"))
+                        if isinstance(val, torch.Tensor) and val.requires_grad:
+                            for n in nodes:
+                                env[n["id"]] = self._run_eager(n, env)
+                            return
         chunk_ids = {n["id"] for n in nodes}
         pos = {n["id"]: p for p, n in enumerate(nodes)}
         run_inputs: list[torch.Tensor] = []

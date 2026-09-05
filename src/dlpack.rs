@@ -385,7 +385,13 @@ impl OwnedTensor {
     pub fn from_pool(dtype: DType, shape: Vec<i64>, mut data: Vec<u64>) -> Self {
         let bytes = elem_count(&shape) * dtype.elem_size();
         let words = bytes.div_ceil(8);
-        data.resize(words, 0u64);
+        if data.capacity() >= words {
+            unsafe {
+                data.set_len(words);
+            }
+        } else {
+            data.resize(words, 0u64);
+        }
         OwnedTensor { data, shape, dtype }
     }
 

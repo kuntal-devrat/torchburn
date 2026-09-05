@@ -258,7 +258,9 @@ fn probe_via_wgpu() -> Option<GPUInfo> {
 fn block_on<F: std::future::Future>(mut future: F) -> F::Output {
     use std::pin::Pin;
     use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
-    fn noop_clone(_: *const ()) -> RawWaker { RawWaker::new(std::ptr::null(), &VTABLE) }
+    fn noop_clone(_: *const ()) -> RawWaker {
+        RawWaker::new(std::ptr::null(), &VTABLE)
+    }
     fn noop(_: *const ()) {}
     static VTABLE: RawWakerVTable = RawWakerVTable::new(noop_clone, noop, noop, noop);
     let raw_waker = RawWaker::new(std::ptr::null(), &VTABLE);
@@ -340,17 +342,30 @@ pub fn get_wgpu_int4_context() -> Option<&'static WgpuInt4Context> {
             info.name, info.device_type, info.backend, rows_per_wg, wg_size
         );
 
+        // Several GPU buffers can exceed wgpu's conservative defaults: storage
+        // buffers (weight matrices on large models, up to 128 MB default
+        // binding size) and any single buffer above 256 MB. Raise the limits
+        // we depend on to what this adapter actually supports (never beyond).
+        let adapter_limits = adapter.limits();
+        let required_limits = wgpu::Limits {
+            max_buffer_size: adapter_limits.max_buffer_size,
+            max_storage_buffer_binding_size: adapter_limits.max_storage_buffer_binding_size,
+            max_compute_workgroup_storage_size: adapter_limits.max_compute_workgroup_storage_size,
+            ..Default::default()
+        };
+
         let (device, queue) = block_on(adapter.request_device(
             &wgpu::DeviceDescriptor {
                 label: Some("TorchBurn INT4 Vulkan Device"),
                 required_features: wgpu::Features::empty(),
-                required_limits: wgpu::Limits::default(),
+                required_limits,
                 memory_hints: wgpu::MemoryHints::Performance,
                 ..Default::default()
             },
-        )).ok()?;
+        ))
+        .ok()?;
 
-        let shader_raw = include_str!("shaders/gemv_w4a32.wgsl");
+        let shader_raw = include_str!("../shaders/gemv_w4a32.wgsl");
         let shader_src = shader_raw
             .replace("const ROWS_PER_WG: u32 = 4u;", &format!("const ROWS_PER_WG: u32 = {}u;", rows_per_wg))
             .replace("const WG_SIZE: u32 = 64u;", &format!("const WG_SIZE: u32 = {}u;", wg_size));
@@ -450,13 +465,64 @@ struct PersistentWeightBuffers {
     staging_buf: wgpu::Buffer,
     num_rows: usize,
     num_cols: usize,
+    group_size: usize,
+    /// Cheap strided content fingerprint of the packed weights. If a tensor is
+    /// freed and a *different* tensor is later allocated at the same address
+    /// (the hazard of pointer-keyed caches), the fingerprint changes and the
+    /// buffers are transparently re-uploaded instead of silently reusing stale
+    /// weights.
+    tag: u64,
+    /// Monotonic insertion counter, used to evict the oldest entry when the
+    /// cache grows past its bound.
+    seq: u64,
 }
 
 #[cfg(feature = "burn-wgpu")]
-static PERSISTENT_WEIGHTS: OnceLock<std::sync::Mutex<std::collections::HashMap<usize, PersistentWeightBuffers>>> = OnceLock::new();
+static PERSISTENT_WEIGHTS: OnceLock<
+    std::sync::Mutex<std::collections::HashMap<usize, PersistentWeightBuffers>>,
+> = OnceLock::new();
 
 #[cfg(feature = "burn-wgpu")]
-fn get_persistent_weights() -> &'static std::sync::Mutex<std::collections::HashMap<usize, PersistentWeightBuffers>> {
+static WEIGHT_CACHE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Maximum number of distinct weight matrices cached on the GPU. Bounding the
+/// map keeps the pointer-keyed cache from growing without limit when many
+/// models (or dynamically created tensors) share one process.
+#[cfg(feature = "burn-wgpu")]
+const WEIGHT_CACHE_CAP: usize = 64;
+
+/// Cheap, deterministic fingerprint over `data`: FNV-1a over a strided sample
+/// (>=64 words) plus the first and last bytes. Deliberately not a cryptographic
+/// hash — the cost stays ~O(1) per call — while still catching the realistic
+/// "buffer reused with different weights" collisions pointer keys can cause.
+#[cfg(feature = "burn-wgpu")]
+fn content_tag(data: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf29ce484222325; // FNV-1a offset basis
+    let n = data.len();
+    if n == 0 {
+        return h;
+    }
+    let step = ((n / 64).max(1)) as usize;
+    let mut i = 0usize;
+    while i < n {
+        h ^= data[i] as u64;
+        h = h.wrapping_mul(0x100000001b3);
+        i += step;
+    }
+    // Fold the tail too, so equal-length tensors whose only differences are at
+    // the very end of the buffer are still distinguished.
+    let mut j = 0usize;
+    while j < 16 && j < n {
+        h ^= data[n - 1 - j] as u64;
+        h = h.wrapping_mul(0x100000001b3);
+        j += 1;
+    }
+    h
+}
+
+#[cfg(feature = "burn-wgpu")]
+fn get_persistent_weights(
+) -> &'static std::sync::Mutex<std::collections::HashMap<usize, PersistentWeightBuffers>> {
     PERSISTENT_WEIGHTS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
 }
 
@@ -485,10 +551,18 @@ pub fn wgpu_gemv_w4a32(
 
     let num_groups = (num_cols + group_size - 1) / group_size;
     let key = w_bytes.as_ptr() as usize;
+    let tag = content_tag(w_bytes);
 
     let mut weight_map = get_persistent_weights().lock().map_err(|e| e.to_string())?;
-    if !weight_map.contains_key(&key) || weight_map.get(&key).map(|e| e.num_rows != num_rows || e.num_cols != num_cols).unwrap_or(false) {
+    let stale = weight_map.get(&key).map_or(true, |e| {
+        e.num_rows != num_rows
+            || e.num_cols != num_cols
+            || e.group_size != group_size
+            || e.tag != tag
+    });
+    if stale {
         // Allocate and populate persistent weight buffers ONCE on GPU
+        // (re-uploaded when dims or content change at the same address).
         let w_size = ((w_bytes.len() + 3) & !3).max(16) as u64;
         let w_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("wgpu_persistent_w_buf"),
@@ -505,7 +579,8 @@ pub fn wgpu_gemv_w4a32(
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let s_bytes = unsafe { std::slice::from_raw_parts(scales.as_ptr() as *const u8, scales.len() * 4) };
+        let s_bytes =
+            unsafe { std::slice::from_raw_parts(scales.as_ptr() as *const u8, scales.len() * 4) };
         queue.write_buffer(&s_buf, 0, s_bytes);
 
         let y_size = ((num_rows * 4).max(16)) as u64;
@@ -516,7 +591,12 @@ pub fn wgpu_gemv_w4a32(
             mapped_at_creation: false,
         });
 
-        let params: [u32; 4] = [num_rows as u32, num_cols as u32, group_size as u32, num_groups as u32];
+        let params: [u32; 4] = [
+            num_rows as u32,
+            num_cols as u32,
+            group_size as u32,
+            num_groups as u32,
+        ];
         let params_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("wgpu_persistent_params_buf"),
             size: 16,
@@ -533,15 +613,38 @@ pub fn wgpu_gemv_w4a32(
             mapped_at_creation: false,
         });
 
-        weight_map.insert(key, PersistentWeightBuffers {
-            w_buf,
-            s_buf,
-            params_buf,
-            y_buf,
-            staging_buf,
-            num_rows,
-            num_cols,
-        });
+        let seq = WEIGHT_CACHE_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        weight_map.insert(
+            key,
+            PersistentWeightBuffers {
+                w_buf,
+                s_buf,
+                params_buf,
+                y_buf,
+                staging_buf,
+                num_rows,
+                num_cols,
+                group_size,
+                tag,
+                seq,
+            },
+        );
+
+        // Evict the oldest entries once the cache exceeds its bound.
+        while weight_map.len() > WEIGHT_CACHE_CAP {
+            if let Some((oldest_key, oldest_seq)) = weight_map
+                .iter()
+                .min_by_key(|(_, e)| e.seq)
+                .map(|(k, e)| (*k, e.seq))
+            {
+                if oldest_seq == seq {
+                    break; // never evict the entry we just inserted
+                }
+                weight_map.remove(&oldest_key);
+            } else {
+                break;
+            }
+        }
     }
 
     let p = weight_map.get(&key).unwrap();
@@ -561,11 +664,26 @@ pub fn wgpu_gemv_w4a32(
         label: Some("wgpu_gemv_bg"),
         layout: &ctx.bind_group_layout,
         entries: &[
-            wgpu::BindGroupEntry { binding: 0, resource: x_buf.as_entire_binding() },
-            wgpu::BindGroupEntry { binding: 1, resource: p.w_buf.as_entire_binding() },
-            wgpu::BindGroupEntry { binding: 2, resource: p.s_buf.as_entire_binding() },
-            wgpu::BindGroupEntry { binding: 3, resource: p.y_buf.as_entire_binding() },
-            wgpu::BindGroupEntry { binding: 4, resource: p.params_buf.as_entire_binding() },
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: x_buf.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: p.w_buf.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: p.s_buf.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: p.y_buf.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 4,
+                resource: p.params_buf.as_entire_binding(),
+            },
         ],
     });
 
@@ -596,17 +714,17 @@ pub fn wgpu_gemv_w4a32(
     });
 
     let _ = device.poll(wgpu::PollType::Wait);
-    rx.recv().map_err(|e| e.to_string())?.map_err(|e| e.to_string())?;
+    rx.recv()
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())?;
 
     {
         let view = buffer_slice.get_mapped_range();
-        let f32_data: &[f32] = unsafe {
-            std::slice::from_raw_parts(view.as_ptr() as *const f32, num_rows)
-        };
+        let f32_data: &[f32] =
+            unsafe { std::slice::from_raw_parts(view.as_ptr() as *const f32, num_rows) };
         out.copy_from_slice(f32_data);
     }
     p.staging_buf.unmap();
 
     Ok(())
 }
-

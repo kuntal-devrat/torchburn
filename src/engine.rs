@@ -3885,7 +3885,10 @@ fn dispatch_node(node: &Node, slots: &mut Vec<Slot>, capsules: &[CapsuleRef]) ->
                 None
             };
             slots.push(Slot::Owned(quantization::w8a32_linear(
-                &x, &w, &scales, bias.as_ref(),
+                &x,
+                &w,
+                &scales,
+                bias.as_ref(),
             )?));
         }
         "w4a32_linear" => {
@@ -3898,7 +3901,10 @@ fn dispatch_node(node: &Node, slots: &mut Vec<Slot>, capsules: &[CapsuleRef]) ->
                 None
             };
             slots.push(Slot::Owned(quantization::w4a32_linear(
-                &x, &w_packed, &scales, bias.as_ref(),
+                &x,
+                &w_packed,
+                &scales,
+                bias.as_ref(),
             )?));
         }
 
@@ -4687,7 +4693,7 @@ pub fn engine_name() -> &'static str {
             match crate::burn_engine::backend_choice() {
                 #[cfg(feature = "burn-wgpu")]
                 crate::burn_engine::BurnBackendChoice::Wgpu => {
-                    return if crate::wgpu_backend::gpu_available() {
+                    return if crate::wgpu::backend::gpu_available() {
                         "burn_wgpu"
                     } else {
                         "burn_ndarray"
@@ -4725,7 +4731,7 @@ fn engine_is_burn() -> bool {
     ) {
         #[cfg(feature = "burn-wgpu")]
         {
-            if crate::wgpu_backend::gpu_available() {
+            if crate::wgpu::backend::gpu_available() {
                 return true;
             }
         }

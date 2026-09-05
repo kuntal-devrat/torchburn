@@ -233,16 +233,28 @@ unsafe fn dot_f32(a: *const f32, b: *const f32, len: usize) -> f32 {
         let b0 = f32x8::from(std::ptr::read_unaligned(b.add(offset) as *const [f32; 8]));
         sum0 = a0.mul_add(b0, sum0);
 
-        let a1 = f32x8::from(std::ptr::read_unaligned(a.add(offset + 8) as *const [f32; 8]));
-        let b1 = f32x8::from(std::ptr::read_unaligned(b.add(offset + 8) as *const [f32; 8]));
+        let a1 = f32x8::from(std::ptr::read_unaligned(
+            a.add(offset + 8) as *const [f32; 8]
+        ));
+        let b1 = f32x8::from(std::ptr::read_unaligned(
+            b.add(offset + 8) as *const [f32; 8]
+        ));
         sum1 = a1.mul_add(b1, sum1);
 
-        let a2 = f32x8::from(std::ptr::read_unaligned(a.add(offset + 16) as *const [f32; 8]));
-        let b2 = f32x8::from(std::ptr::read_unaligned(b.add(offset + 16) as *const [f32; 8]));
+        let a2 = f32x8::from(std::ptr::read_unaligned(
+            a.add(offset + 16) as *const [f32; 8]
+        ));
+        let b2 = f32x8::from(std::ptr::read_unaligned(
+            b.add(offset + 16) as *const [f32; 8]
+        ));
         sum2 = a2.mul_add(b2, sum2);
 
-        let a3 = f32x8::from(std::ptr::read_unaligned(a.add(offset + 24) as *const [f32; 8]));
-        let b3 = f32x8::from(std::ptr::read_unaligned(b.add(offset + 24) as *const [f32; 8]));
+        let a3 = f32x8::from(std::ptr::read_unaligned(
+            a.add(offset + 24) as *const [f32; 8]
+        ));
+        let b3 = f32x8::from(std::ptr::read_unaligned(
+            b.add(offset + 24) as *const [f32; 8]
+        ));
         sum3 = a3.mul_add(b3, sum3);
 
         offset += 32;

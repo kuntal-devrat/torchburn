@@ -661,10 +661,10 @@ pub fn backend_choice() -> BurnBackendChoice {
     // TORCHBURN_DEVICE overrides TORCHBURN_ENGINE for device selection.
     #[cfg(feature = "burn-wgpu")]
     {
-        if crate::wgpu_backend::force_cpu() {
+        if crate::wgpu::backend::force_cpu() {
             return BurnBackendChoice::NdArray;
         }
-        if crate::wgpu_backend::force_gpu() {
+        if crate::wgpu::backend::force_gpu() {
             return BurnBackendChoice::Wgpu;
         }
     }
@@ -675,7 +675,7 @@ pub fn backend_choice() -> BurnBackendChoice {
             // Default to GPU first if available on this system
             #[cfg(feature = "burn-wgpu")]
             {
-                if crate::wgpu_backend::gpu_available() {
+                if crate::wgpu::backend::gpu_available() {
                     return BurnBackendChoice::Wgpu;
                 }
             }
@@ -701,13 +701,13 @@ pub fn execute_plan(
         BurnBackendChoice::Wgpu => {
             #[cfg(feature = "burn-wgpu")]
             {
-                crate::wgpu_backend::init_wgpu_runtime();
-                if crate::wgpu_backend::gpu_available() {
+                crate::wgpu::backend::init_wgpu_runtime();
+                if crate::wgpu::backend::gpu_available() {
                     // wgpu panics (not returns) on OOM, device loss and validation
                     // errors.  Catch the panic so a GPU failure degrades to the
                     // CPU backend instead of killing the Python process.
                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        execute_burn_generic::<crate::wgpu_backend::Backend>(py, payload, capsules)
+                        execute_burn_generic::<crate::wgpu::backend::Backend>(py, payload, capsules)
                     }));
                     match result {
                         Ok(Ok(out)) => Ok(out),

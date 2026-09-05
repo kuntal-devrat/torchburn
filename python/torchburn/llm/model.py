@@ -199,10 +199,11 @@ class UniversalAttention(nn.Module):
         # Scaled dot-product attention
         enable_gqa = (self.num_kv_heads < self.num_heads)
         if T > 1 and offset > 0:
-            # Continuation prefill: query row i attends to keys <= offset + i
-            attn_mask = torch.full((T, offset + T), float("-inf"), dtype=q.dtype, device=q.device)
-            for row_idx in range(T):
-                attn_mask[row_idx, : offset + row_idx + 1] = 0.0
+            # Continuation prefill: query row i attends to keys <= offset + i.
+            # Vectorized causal mask (bool => True means "attend"), no python loop.
+            cols = torch.arange(offset + T, device=q.device)
+            row_bounds = torch.arange(T, device=q.device) + offset
+            attn_mask = cols.unsqueeze(0) <= row_bounds.unsqueeze(1)  # (T, offset+T)
             out = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask, enable_gqa=enable_gqa)
         else:
             is_causal = (T > 1 and offset == 0)

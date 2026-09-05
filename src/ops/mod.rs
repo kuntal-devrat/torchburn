@@ -2,6 +2,18 @@
 //!
 //! Inputs are read directly from PyTorch-owned DLPack buffers (zero-copy),
 //! respecting arbitrary stride layouts. Outputs are fresh Rust allocations.
+pub mod elementwise;
+pub mod linalg;
+pub mod reductions;
+pub mod special;
+pub mod tensor_ops;
+
+// Domain aliases for internal crate and engine compatibility:
+pub use elementwise as extra;
+pub use linalg as extra3;
+pub use reductions as extra2;
+pub use special as phase7;
+pub use tensor_ops as extra4;
 
 use crate::dlpack::{
     contiguous_strides, elem_count, unsupported, BorrowedTensor, DType, OwnedTensor,

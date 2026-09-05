@@ -5,9 +5,10 @@ import gc
 import json
 import os
 from pathlib import Path
-from typing import Optional, Dict, Any, List, Union
+from typing import Optional, Dict, Any, List, Union, Tuple
 import torch
 
+from ._registry import offline_candidates, repo_snapshot_dir, resolve_repo_id
 from .config import ModelConfig
 from .model import UniversalTransformer
 
@@ -292,28 +293,11 @@ class ModelLoader:
         local_files_only: bool = False,
     ) -> Tuple[List[str], str, str]:
         """Finds weight file(s) and config.json locally or downloads them via huggingface_hub."""
-        # Check standard local paths and local HuggingFace hub cache snapshots first
-        repo_clean = model_id_or_path
-        if repo_clean in ("qwen", "qwen_0_5b", "qwen2.5-0.5b", "default"):
-            repo_clean = "Qwen/Qwen2.5-0.5B-Instruct"
-        elif repo_clean in ("deepseek", "deepseek_1_5b", "deepseek-1.5b", "deepseek-r1", "r1"):
-            repo_clean = "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
-
-        local_cands = [
-            model_id_or_path,
-            os.path.join(r"d:\torchburn\models", model_id_or_path),
-            os.path.join(r"d:\torchburn\models\qwen_0_5b"),
-            os.path.join(r"d:\torchburn\models\deepseek_1_5b"),
-        ]
-
-        hf_cache_snapshot_dir = os.path.expanduser(f"~/.cache/huggingface/hub/models--{repo_clean.replace('/', '--')}/snapshots")
-        if os.path.isdir(hf_cache_snapshot_dir):
-            try:
-                snaps = sorted(os.listdir(hf_cache_snapshot_dir))
-                if snaps:
-                    local_cands.insert(0, os.path.join(hf_cache_snapshot_dir, snaps[-1]))
-            except Exception:
-                pass
+        # Check local paths first (env TORCHBURN_MODELS_DIR, per-user cache,
+        # HuggingFace hub snapshots) before hitting the network.
+        repo_id = resolve_repo_id(model_id_or_path)
+        local_cands = offline_candidates(model_id_or_path)
+        hf_cache_snapshot_dir = repo_snapshot_dir(repo_id)
 
         for cand in local_cands:
             if os.path.isdir(cand):
@@ -333,13 +317,7 @@ class ModelLoader:
         # Otherwise, download via huggingface_hub
         try:
             from huggingface_hub import hf_hub_download, snapshot_download
-            repo_id = model_id_or_path
-            # Alias resolution
-            if repo_id in ("qwen", "qwen_0_5b", "qwen2.5-0.5b", "default"):
-                repo_id = "Qwen/Qwen2.5-0.5B-Instruct"
-            elif repo_id in ("deepseek", "deepseek_1_5b", "deepseek-1.5b", "deepseek-r1", "r1"):
-                repo_id = "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
-
+            repo_id = resolve_repo_id(model_id_or_path)
 
             print(f"[\033[94mTorchBurn\033[0m] Resolving model '{repo_id}' from Hugging Face...")
             # Download config.json

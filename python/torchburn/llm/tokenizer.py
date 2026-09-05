@@ -5,6 +5,8 @@ import json
 import os
 from typing import List, Dict, Any, Optional, Union
 
+from ._registry import fallback_eos_id, repo_snapshot_dir, resolve_repo_id
+
 
 class UniversalTokenizer:
     """Universal Tokenizer wrapping HuggingFace AutoTokenizer or tokenizers.Tokenizer."""
@@ -30,20 +32,9 @@ class UniversalTokenizer:
             cand_dirs.append(model_id_or_path)
 
         # Check HuggingFace cache snapshots
-        repo_clean = model_id_or_path
-        if repo_clean in ("qwen", "qwen_0_5b", "qwen2.5-0.5b", "default"):
-            repo_clean = "Qwen/Qwen2.5-0.5B-Instruct"
-        elif repo_clean in ("deepseek", "deepseek_1_5b", "deepseek-1.5b", "deepseek-r1", "r1"):
-            repo_clean = "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
-
-        hf_cache_snapshot_dir = os.path.expanduser(f"~/.cache/huggingface/hub/models--{repo_clean.replace('/', '--')}/snapshots")
+        hf_cache_snapshot_dir = repo_snapshot_dir(resolve_repo_id(model_id_or_path))
         if os.path.isdir(hf_cache_snapshot_dir):
-            try:
-                snaps = sorted(os.listdir(hf_cache_snapshot_dir))
-                if snaps:
-                    cand_dirs.append(os.path.join(hf_cache_snapshot_dir, snaps[-1]))
-            except Exception:
-                pass
+            cand_dirs.append(hf_cache_snapshot_dir)
 
         for cand_dir in cand_dirs:
             tok_json = os.path.join(cand_dir, "tokenizer.json")
@@ -63,11 +54,17 @@ class UniversalTokenizer:
                     from tokenizers import Tokenizer
                     tok_fast = Tokenizer.from_file(tok_json)
                     cfg_cand = os.path.join(cand_dir, "tokenizer_config.json")
-                    eos_id = 151643
+                    eos_id = fallback_eos_id(cand_dir)
                     if os.path.isfile(cfg_cand):
                         with open(cfg_cand, "r", encoding="utf-8") as f:
                             cfg = json.load(f)
-                            eos_id = cfg.get("eos_token_id", 151643)
+                            eos_token = cfg.get("eos_token", cfg.get("eos_token_id", fallback_eos_id(cand_dir)))
+                            if isinstance(eos_token, dict):
+                                eos_token = eos_token.get("id", eos_token)
+                            try:
+                                eos_id = int(eos_token)
+                            except (TypeError, ValueError):
+                                eos_id = fallback_eos_id(cand_dir)
                     return cls(tok_fast, eos_token_id=eos_id)
                 except Exception:
                     pass
@@ -102,13 +99,25 @@ class UniversalTokenizer:
             raise RuntimeError(f"Unable to load tokenizer for '{model_id_or_path}': {e}")
 
     def encode(self, text: str, add_special_tokens: bool = False) -> List[int]:
-        """Encodes string text into token IDs."""
-        if hasattr(self._tok, "encode"):
-            res = self._tok.encode(text)
+        """Encodes string text into token IDs.
+
+        ``add_special_tokens`` is honored when the underlying tokenizer supports
+        it (transformers / tokenizers both expose the flag on ``encode``).
+        """
+        try:
+            import inspect
+            enc = self._tok.encode
+            params = inspect.signature(enc).parameters
+            if "add_special_tokens" in params:
+                res = enc(text, add_special_tokens=add_special_tokens)
+            else:
+                res = enc(text)
             if hasattr(res, "ids"):
                 return list(res.ids)
             elif isinstance(res, list):
                 return res
+        except Exception:
+            return []
         return []
 
     def decode(self, token_ids: List[int], skip_special_tokens: bool = False) -> str:

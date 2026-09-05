@@ -55,10 +55,8 @@ if _log_level in ("debug", "info", "warning", "error", "critical"):
     os.environ.setdefault("RUST_LOG", _log_level)
 
 import torch
+from . import _torchburn as _native
 
-from ._backend import register, torchburn_backend
-from ._cache import cache_clear, cache_stats
-from ._compiled import BurnCompiledCallable
 # Default RAYON_NUM_THREADS to physical core count if not set to prevent hyperthread contention
 if "RAYON_NUM_THREADS" not in os.environ:
     try:
@@ -68,8 +66,10 @@ if "RAYON_NUM_THREADS" not in os.environ:
         _phys_cores = 4
     os.environ["RAYON_NUM_THREADS"] = str(_phys_cores)
 
+from ._backend import register, torchburn_backend
+from ._cache import cache_clear, cache_stats
+from ._compiled import BurnCompiledCallable
 from .capture import TorchBurnModule, capture
-from . import _torchburn as _native
 from .profiler import (
     profile,
     coverage_report,
@@ -81,7 +81,10 @@ from .profiler import (
     clear_memory_pool,
     trace,
     op_coverage,
+    visualize,
+    GraphVisualization,
 )
+from . import ops
 from . import quantization
 from .llm import LLM, GenerationConfig, EngineConfig, ModelConfig
 from .quantization import (
@@ -93,6 +96,7 @@ from .quantization import (
     wgpu_w4a32_grouped_linear,
     fused_swiglu_mlp,
     fused_attention_step,
+    fused_transformer_layer_step,
     create_rust_qwen_decoder,
     create_wgpu_qwen_decoder,
     quantize_weight_int8,
@@ -180,6 +184,10 @@ __all__ = [
     "GenerationConfig",
     "EngineConfig",
     "ModelConfig",
+    "export",
+    "ops",
+    "visualize",
+    "GraphVisualization",
 ]
 
 

@@ -12,9 +12,13 @@ fn test_avx512_gemv_w8a32() {
 
         let k = 896;
         let x_f32: Vec<f32> = (0..k).map(|i| (i as f32 * 0.05).sin() * 2.0).collect();
-        let w8: Vec<Vec<i8>> = (0..8).map(|row| {
-            (0..k).map(|col| (((row * 17 + col * 31) % 251) as i16 - 125) as i8).collect()
-        }).collect();
+        let w8: Vec<Vec<i8>> = (0..8)
+            .map(|row| {
+                (0..k)
+                    .map(|col| (((row * 17 + col * 31) % 251) as i16 - 125) as i8)
+                    .collect()
+            })
+            .collect();
 
         // Reference float dot product for all 8 rows
         let mut ref_dots = [0.0f32; 8];
@@ -50,24 +54,40 @@ fn test_avx512_gemv_w8a32() {
                 let x0 = _mm256_loadu_ps(x.add(offset));
                 let x1 = _mm256_loadu_ps(x.add(offset + 8));
 
-                let wf0_0 = _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(_mm_loadl_epi64(w0.add(offset) as *const __m128i)));
+                let wf0_0 = _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(_mm_loadl_epi64(
+                    w0.add(offset) as *const __m128i,
+                )));
                 acc0_0 = _mm256_fmadd_ps(wf0_0, x0, acc0_0);
-                let wf0_1 = _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(_mm_loadl_epi64(w0.add(offset + 8) as *const __m128i)));
+                let wf0_1 = _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(_mm_loadl_epi64(
+                    w0.add(offset + 8) as *const __m128i,
+                )));
                 acc0_1 = _mm256_fmadd_ps(wf0_1, x1, acc0_1);
 
-                let wf1_0 = _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(_mm_loadl_epi64(w1.add(offset) as *const __m128i)));
+                let wf1_0 = _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(_mm_loadl_epi64(
+                    w1.add(offset) as *const __m128i,
+                )));
                 acc1_0 = _mm256_fmadd_ps(wf1_0, x0, acc1_0);
-                let wf1_1 = _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(_mm_loadl_epi64(w1.add(offset + 8) as *const __m128i)));
+                let wf1_1 = _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(_mm_loadl_epi64(
+                    w1.add(offset + 8) as *const __m128i,
+                )));
                 acc1_1 = _mm256_fmadd_ps(wf1_1, x1, acc1_1);
 
-                let wf2_0 = _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(_mm_loadl_epi64(w2.add(offset) as *const __m128i)));
+                let wf2_0 = _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(_mm_loadl_epi64(
+                    w2.add(offset) as *const __m128i,
+                )));
                 acc2_0 = _mm256_fmadd_ps(wf2_0, x0, acc2_0);
-                let wf2_1 = _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(_mm_loadl_epi64(w2.add(offset + 8) as *const __m128i)));
+                let wf2_1 = _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(_mm_loadl_epi64(
+                    w2.add(offset + 8) as *const __m128i,
+                )));
                 acc2_1 = _mm256_fmadd_ps(wf2_1, x1, acc2_1);
 
-                let wf3_0 = _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(_mm_loadl_epi64(w3.add(offset) as *const __m128i)));
+                let wf3_0 = _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(_mm_loadl_epi64(
+                    w3.add(offset) as *const __m128i,
+                )));
                 acc3_0 = _mm256_fmadd_ps(wf3_0, x0, acc3_0);
-                let wf3_1 = _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(_mm_loadl_epi64(w3.add(offset + 8) as *const __m128i)));
+                let wf3_1 = _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(_mm_loadl_epi64(
+                    w3.add(offset + 8) as *const __m128i,
+                )));
                 acc3_1 = _mm256_fmadd_ps(wf3_1, x1, acc3_1);
 
                 offset += 16;
@@ -81,13 +101,21 @@ fn test_avx512_gemv_w8a32() {
             let chunks8 = (len - offset) / 8;
             for _ in 0..chunks8 {
                 let x_vec = _mm256_loadu_ps(x.add(offset));
-                let wf0 = _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(_mm_loadl_epi64(w0.add(offset) as *const __m128i)));
+                let wf0 = _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(_mm_loadl_epi64(
+                    w0.add(offset) as *const __m128i
+                )));
                 sum0 = _mm256_fmadd_ps(wf0, x_vec, sum0);
-                let wf1 = _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(_mm_loadl_epi64(w1.add(offset) as *const __m128i)));
+                let wf1 = _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(_mm_loadl_epi64(
+                    w1.add(offset) as *const __m128i
+                )));
                 sum1 = _mm256_fmadd_ps(wf1, x_vec, sum1);
-                let wf2 = _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(_mm_loadl_epi64(w2.add(offset) as *const __m128i)));
+                let wf2 = _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(_mm_loadl_epi64(
+                    w2.add(offset) as *const __m128i
+                )));
                 sum2 = _mm256_fmadd_ps(wf2, x_vec, sum2);
-                let wf3 = _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(_mm_loadl_epi64(w3.add(offset) as *const __m128i)));
+                let wf3 = _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(_mm_loadl_epi64(
+                    w3.add(offset) as *const __m128i
+                )));
                 sum3 = _mm256_fmadd_ps(wf3, x_vec, sum3);
                 offset += 8;
             }
@@ -157,7 +185,9 @@ fn test_avx512_gemv_w8a32() {
                 let x1 = _mm512_loadu_ps(x.add(offset + 16));
 
                 let load_wf = |w_ptr: *const i8, off: usize| -> __m512 {
-                    _mm512_cvtepi32_ps(_mm512_cvtepi8_epi32(_mm_loadu_si128(w_ptr.add(off) as *const __m128i)))
+                    _mm512_cvtepi32_ps(_mm512_cvtepi8_epi32(_mm_loadu_si128(
+                        w_ptr.add(off) as *const __m128i
+                    )))
                 };
 
                 acc0_0 = _mm512_fmadd_ps(load_wf(w0, offset), x0, acc0_0);
@@ -200,7 +230,9 @@ fn test_avx512_gemv_w8a32() {
             for _ in 0..chunks16 {
                 let x0 = _mm512_loadu_ps(x.add(offset));
                 let load_wf = |w_ptr: *const i8, off: usize| -> __m512 {
-                    _mm512_cvtepi32_ps(_mm512_cvtepi8_epi32(_mm_loadu_si128(w_ptr.add(off) as *const __m128i)))
+                    _mm512_cvtepi32_ps(_mm512_cvtepi8_epi32(_mm_loadu_si128(
+                        w_ptr.add(off) as *const __m128i
+                    )))
                 };
 
                 sum0 = _mm512_fmadd_ps(load_wf(w0, offset), x0, sum0);
@@ -243,14 +275,34 @@ fn test_avx512_gemv_w8a32() {
         }
 
         // Check correctness of both
-        let (a0, a1, a2, a3) = gemv_4rows_avx2(x_f32.as_ptr(), w8[0].as_ptr(), w8[1].as_ptr(), w8[2].as_ptr(), w8[3].as_ptr(), k);
-        let (a4, a5, a6, a7) = gemv_4rows_avx2(x_f32.as_ptr(), w8[4].as_ptr(), w8[5].as_ptr(), w8[6].as_ptr(), w8[7].as_ptr(), k);
+        let (a0, a1, a2, a3) = gemv_4rows_avx2(
+            x_f32.as_ptr(),
+            w8[0].as_ptr(),
+            w8[1].as_ptr(),
+            w8[2].as_ptr(),
+            w8[3].as_ptr(),
+            k,
+        );
+        let (a4, a5, a6, a7) = gemv_4rows_avx2(
+            x_f32.as_ptr(),
+            w8[4].as_ptr(),
+            w8[5].as_ptr(),
+            w8[6].as_ptr(),
+            w8[7].as_ptr(),
+            k,
+        );
         let avx2_res = [a0, a1, a2, a3, a4, a5, a6, a7];
 
         let avx512_res = gemv_8rows_avx512(
             x_f32.as_ptr(),
-            w8[0].as_ptr(), w8[1].as_ptr(), w8[2].as_ptr(), w8[3].as_ptr(),
-            w8[4].as_ptr(), w8[5].as_ptr(), w8[6].as_ptr(), w8[7].as_ptr(),
+            w8[0].as_ptr(),
+            w8[1].as_ptr(),
+            w8[2].as_ptr(),
+            w8[3].as_ptr(),
+            w8[4].as_ptr(),
+            w8[5].as_ptr(),
+            w8[6].as_ptr(),
+            w8[7].as_ptr(),
             k,
         );
 
@@ -262,15 +314,32 @@ fn test_avx512_gemv_w8a32() {
             let diff_avx2 = (ref_v - avx2_v).abs();
             let diff_avx512 = (ref_v - avx512_v).abs();
             println!("Row {r}: Ref={ref_v:.4}, AVX2={avx2_v:.4} (diff={diff_avx2:.2e}), AVX512={avx512_v:.4} (diff={diff_avx512:.2e})");
-            assert!(diff_avx512 < 0.05, "AVX512 mismatch on row {r}: ref={ref_v}, avx512={avx512_v}");
+            assert!(
+                diff_avx512 < 0.05,
+                "AVX512 mismatch on row {r}: ref={ref_v}, avx512={avx512_v}"
+            );
         }
 
         // Benchmark speed
         let iters = 100_000;
         let t0 = Instant::now();
         for _ in 0..iters {
-            let (b0, b1, b2, b3) = gemv_4rows_avx2(x_f32.as_ptr(), w8[0].as_ptr(), w8[1].as_ptr(), w8[2].as_ptr(), w8[3].as_ptr(), k);
-            let (b4, b5, b6, b7) = gemv_4rows_avx2(x_f32.as_ptr(), w8[4].as_ptr(), w8[5].as_ptr(), w8[6].as_ptr(), w8[7].as_ptr(), k);
+            let (b0, b1, b2, b3) = gemv_4rows_avx2(
+                x_f32.as_ptr(),
+                w8[0].as_ptr(),
+                w8[1].as_ptr(),
+                w8[2].as_ptr(),
+                w8[3].as_ptr(),
+                k,
+            );
+            let (b4, b5, b6, b7) = gemv_4rows_avx2(
+                x_f32.as_ptr(),
+                w8[4].as_ptr(),
+                w8[5].as_ptr(),
+                w8[6].as_ptr(),
+                w8[7].as_ptr(),
+                k,
+            );
             std::hint::black_box([b0, b1, b2, b3, b4, b5, b6, b7]);
         }
         let dur_avx2 = t0.elapsed();
@@ -279,8 +348,14 @@ fn test_avx512_gemv_w8a32() {
         for _ in 0..iters {
             let res = gemv_8rows_avx512(
                 x_f32.as_ptr(),
-                w8[0].as_ptr(), w8[1].as_ptr(), w8[2].as_ptr(), w8[3].as_ptr(),
-                w8[4].as_ptr(), w8[5].as_ptr(), w8[6].as_ptr(), w8[7].as_ptr(),
+                w8[0].as_ptr(),
+                w8[1].as_ptr(),
+                w8[2].as_ptr(),
+                w8[3].as_ptr(),
+                w8[4].as_ptr(),
+                w8[5].as_ptr(),
+                w8[6].as_ptr(),
+                w8[7].as_ptr(),
                 k,
             );
             std::hint::black_box(res);
@@ -289,6 +364,9 @@ fn test_avx512_gemv_w8a32() {
 
         println!("AVX2   8 rows x {k} ({iters} iters): {:?}", dur_avx2);
         println!("AVX512 8 rows x {k} ({iters} iters): {:?}", dur_avx512);
-        println!("Speedup: {:.2}x", dur_avx2.as_secs_f64() / dur_avx512.as_secs_f64());
+        println!(
+            "Speedup: {:.2}x",
+            dur_avx2.as_secs_f64() / dur_avx512.as_secs_f64()
+        );
     }
 }

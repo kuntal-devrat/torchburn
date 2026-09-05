@@ -228,7 +228,6 @@ class UniversalEngine:
         else:
             logits, kv_caches, prefill_time = self.prefill(input_tensor)
         all_token_ids = list(input_ids_list)
-        prefix_len = 0
 
         prefill_tok_sec = (seq_len - prefix_len) / max(prefill_time, 1e-6)
 
@@ -286,6 +285,7 @@ class UniversalEngine:
                     cfg.top_k,
                     cfg.repetition_penalty,
                     rec_toks,
+                    cfg.top_p,
                 )
                 step_time = time.perf_counter() - t0
                 decode_times.append(step_time)
@@ -299,6 +299,7 @@ class UniversalEngine:
                     cfg.top_k,
                     cfg.repetition_penalty,
                     rec_toks,
+                    cfg.top_p,
                 )
                 step_time = time.perf_counter() - t0
                 decode_times.append(step_time)

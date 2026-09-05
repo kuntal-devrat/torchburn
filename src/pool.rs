@@ -51,9 +51,11 @@ pub fn take_buffer(dtype: DType, words: usize) -> Vec<u64> {
         if let Some(idx) = best_idx {
             GLOBAL_HIT_COUNT.fetch_add(1, Ordering::Relaxed);
             let mut buf = pool.remove(idx).2;
-            // Reuse allocation: clear logical length, then resize to needed words (zeroed)
-            buf.clear();
-            buf.resize(words, 0u64);
+            // Reuse allocation without zeroing memory: u64 has no trap representation,
+            // the buffer was initialized on original allocation, and words <= cap <= buf.capacity().
+            unsafe {
+                buf.set_len(words);
+            }
             return buf;
         }
         vec![0u64; words]

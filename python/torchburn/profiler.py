@@ -297,3 +297,379 @@ def op_coverage(model, example_inputs, **kwargs) -> dict[str, Any]:
             "engine": active_engine(),
             "error": str(exc),
         }
+
+
+class GraphVisualization:
+    """Interactive visual representation of a TorchBurn compiled execution graph."""
+
+    def __init__(self, plan: dict[str, Any], engine: str, model_name: str = "Model") -> None:
+        self.plan = plan
+        self.engine = engine
+        self.model_name = model_name
+        self.nodes = plan.get("nodes", [])
+        self.inputs = plan.get("inputs", [])
+        self.outputs = plan.get("outputs", [])
+
+        self.native_nodes = [n for n in self.nodes if n.get("op") == "supported"]
+        self.fallback_nodes = [n for n in self.nodes if n.get("op") == "unsupported"]
+        self.io_nodes = [n for n in self.nodes if n.get("op") in ("placeholder", "output", "get_attr")]
+
+        total = len(self.native_nodes) + len(self.fallback_nodes)
+        self.total_compute_nodes = total
+        self.native_ratio = len(self.native_nodes) / total if total > 0 else 1.0
+
+    def summary(self) -> str:
+        """Return a formatted terminal ASCII dashboard."""
+        pct = self.native_ratio * 100.0
+        bar_len = int(pct // 5)
+        status_bar = f"[{'=' * bar_len}{' ' * (20 - bar_len)}] {pct:.1f}%"
+        lines = [
+            "+" + "=" * 78 + "+",
+            f"| TorchBurn Graph Inspector: {self.model_name:<48} |",
+            f"| Engine: {self.engine:<20} | Compute Nodes: {self.total_compute_nodes:<5} | Native: {len(self.native_nodes)} ({pct:.1f}%) |",
+            f"| Acceleration Coverage: {status_bar:<50} |",
+            "+" + "=" * 5 + "+" + "=" * 15 + "+" + "=" * 18 + "+" + "=" * 21 + "+" + "=" * 15 + "+",
+            f"| {'ID':<3} | {'Status':<13} | {'Op Target':<16} | {'FX Target':<19} | {'Inputs':<13} |",
+            "+" + "=" * 5 + "+" + "=" * 15 + "+" + "=" * 18 + "+" + "=" * 21 + "+" + "=" * 15 + "+",
+        ]
+        for n in self.nodes:
+            nid = str(n.get("id", "-"))
+            op_kind = n.get("op", "")
+            if op_kind == "supported":
+                status = "[NATIVE]"
+            elif op_kind == "unsupported":
+                status = "[FALLBACK]"
+            elif op_kind == "placeholder":
+                status = "[INPUT]"
+            elif op_kind == "output":
+                status = "[OUTPUT]"
+            else:
+                status = f"[{op_kind.upper()}]"
+
+            target = str(n.get("target") or n.get("name") or "-")[:16]
+            fx_target = str(n.get("fx_target") or "-")[:19]
+
+            args = n.get("args", [])
+            in_ids = []
+            for a in args:
+                if isinstance(a, dict) and "id" in a:
+                    in_ids.append(f"#{a['id']}")
+                elif isinstance(a, dict) and a.get("kind") == "slot":
+                    in_ids.append(f"s{a.get('index')}")
+            inputs_str = ", ".join(in_ids)[:13] if in_ids else "-"
+
+            lines.append(
+                f"| {nid:<3} | {status:<13} | {target:<16} | {fx_target:<19} | {inputs_str:<13} |"
+            )
+
+        lines.append("+" + "=" * 5 + "+" + "=" * 15 + "+" + "=" * 18 + "+" + "=" * 21 + "+" + "=" * 15 + "+")
+        if self.fallback_nodes:
+            lines.append(f"  * {len(self.fallback_nodes)} node(s) executing via PyTorch eager fallback.")
+        else:
+            lines.append("  * 100% of compute nodes accelerated natively via TorchBurn.")
+        return "\n".join(lines)
+
+    def to_mermaid(self) -> str:
+        """Generate a Mermaid.js flowchart representation."""
+        lines = [
+            "flowchart TD",
+            "    classDef native fill:#059669,stroke:#10b981,stroke-width:2px,color:#ffffff,font-family:sans-serif;",
+            "    classDef fallback fill:#d97706,stroke:#f59e0b,stroke-width:2px,color:#ffffff,font-family:sans-serif;",
+            "    classDef io fill:#1e40af,stroke:#3b82f6,stroke-width:2px,color:#ffffff,font-family:sans-serif;",
+        ]
+        for n in self.nodes:
+            nid = n.get("id", 0)
+            op = n.get("op", "")
+            target = n.get("target") or n.get("name") or "op"
+            fx_target = n.get("fx_target") or ""
+            label = f"{target}"
+            if fx_target and fx_target != target:
+                label += f"<br/><small>{fx_target}</small>"
+
+            if op == "supported":
+                cls = "native"
+                badge = "(Native)"
+            elif op == "unsupported":
+                cls = "fallback"
+                badge = "(Fallback)"
+            else:
+                cls = "io"
+                badge = f"({op})"
+
+            lines.append(f'    node_{nid}["{label}<br/><b>{badge}</b>"]:::{cls}')
+
+        for n in self.nodes:
+            nid = n.get("id", 0)
+            for a in n.get("args", []):
+                if isinstance(a, dict) and "id" in a:
+                    lines.append(f"    node_{a['id']} --> node_{nid}")
+
+        return "\n".join(lines)
+
+    def to_html(self, title: str | None = None) -> str:
+        """Generate a rich, standalone interactive HTML visualization report."""
+        page_title = title or f"TorchBurn Execution Graph — {self.model_name}"
+        mermaid_code = self.to_mermaid()
+        pct = self.native_ratio * 100.0
+
+        rows = []
+        for n in self.nodes:
+            nid = n.get("id", "-")
+            op = n.get("op", "")
+            target = n.get("target") or n.get("name") or "-"
+            fx_target = n.get("fx_target") or "-"
+            if op == "supported":
+                badge = '<span class="badge badge-native">Native Rust</span>'
+                row_cls = "row-native"
+            elif op == "unsupported":
+                badge = '<span class="badge badge-fallback">Eager Fallback</span>'
+                row_cls = "row-fallback"
+            else:
+                badge = f'<span class="badge badge-io">{op}</span>'
+                row_cls = "row-io"
+
+            args = n.get("args", [])
+            in_links = []
+            for a in args:
+                if isinstance(a, dict) and "id" in a:
+                    in_links.append(f"#{a['id']}")
+            inputs_str = ", ".join(in_links) if in_links else "-"
+
+            rows.append(f"""
+            <tr class="{row_cls}">
+                <td><code>#{nid}</code></td>
+                <td>{badge}</td>
+                <td><strong>{target}</strong></td>
+                <td><code>{fx_target}</code></td>
+                <td>{inputs_str}</td>
+            </tr>
+            """)
+
+        table_rows = "\n".join(rows)
+
+        return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{page_title}</title>
+    <style>
+        :root {{
+            --bg: #090d16;
+            --card-bg: #111827;
+            --border: #1f2937;
+            --text: #f3f4f6;
+            --text-dim: #9ca3af;
+            --emerald: #10b981;
+            --amber: #f59e0b;
+            --blue: #3b82f6;
+        }}
+        * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+        body {{
+            background: var(--bg);
+            color: var(--text);
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+            padding: 24px;
+            line-height: 1.5;
+        }}
+        .header {{
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 24px;
+            padding-bottom: 16px;
+            border-bottom: 1px solid var(--border);
+        }}
+        .header h1 {{ font-size: 24px; font-weight: 700; color: #fff; }}
+        .header .subtitle {{ color: var(--text-dim); font-size: 14px; }}
+        .stats-grid {{
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+            gap: 16px;
+            margin-bottom: 24px;
+        }}
+        .card {{
+            background: var(--card-bg);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 18px;
+        }}
+        .card-label {{ font-size: 12px; font-weight: 600; text-transform: uppercase; color: var(--text-dim); margin-bottom: 6px; }}
+        .card-val {{ font-size: 28px; font-weight: 700; color: #fff; }}
+        .card-val.emerald {{ color: var(--emerald); }}
+        .card-val.amber {{ color: var(--amber); }}
+        .card-val.blue {{ color: var(--blue); }}
+        .progress-bar {{
+            background: #1f2937;
+            border-radius: 9999px;
+            height: 8px;
+            overflow: hidden;
+            margin-top: 8px;
+        }}
+        .progress-fill {{
+            height: 100%;
+            background: linear-gradient(90deg, #10b981, #059669);
+            width: {pct:.1f}%;
+        }}
+        .graph-container {{
+            background: var(--card-bg);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 24px;
+            margin-bottom: 24px;
+            overflow-x: auto;
+            text-align: center;
+        }}
+        .badge {{
+            display: inline-block;
+            padding: 3px 8px;
+            border-radius: 6px;
+            font-size: 11px;
+            font-weight: 600;
+        }}
+        .badge-native {{ background: rgba(16, 185, 129, 0.2); color: #34d399; border: 1px solid #059669; }}
+        .badge-fallback {{ background: rgba(245, 158, 11, 0.2); color: #fbbf24; border: 1px solid #d97706; }}
+        .badge-io {{ background: rgba(59, 130, 246, 0.2); color: #60a5fa; border: 1px solid #2563eb; }}
+        table {{
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 14px;
+        }}
+        th, td {{
+            padding: 12px 16px;
+            text-align: left;
+            border-bottom: 1px solid var(--border);
+        }}
+        th {{
+            background: #161f30;
+            color: var(--text-dim);
+            font-weight: 600;
+            font-size: 12px;
+            text-transform: uppercase;
+        }}
+        code {{
+            background: #1f2937;
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-family: monospace;
+            font-size: 12px;
+        }}
+    </style>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+    <script>mermaid.initialize({{ startOnLoad: true, theme: 'dark' }});</script>
+</head>
+<body>
+    <div class="header">
+        <div>
+            <h1>TorchBurn Execution Graph</h1>
+            <div class="subtitle">{self.model_name} • Hardware Engine: {self.engine}</div>
+        </div>
+        <div>
+            <span class="badge {'badge-native' if pct >= 90 else 'badge-fallback'}" style="font-size: 14px; padding: 6px 12px;">
+                {pct:.1f}% Native Acceleration
+            </span>
+        </div>
+    </div>
+
+    <div class="stats-grid">
+        <div class="card">
+            <div class="card-label">Hardware Acceleration</div>
+            <div class="card-val emerald">{pct:.1f}%</div>
+            <div class="progress-bar"><div class="progress-fill"></div></div>
+        </div>
+        <div class="card">
+            <div class="card-label">Compute Nodes</div>
+            <div class="card-val blue">{self.total_compute_nodes}</div>
+            <div style="font-size: 12px; color: var(--text-dim); margin-top: 6px;">Total operators planned</div>
+        </div>
+        <div class="card">
+            <div class="card-label">Native Fast-Path Nodes</div>
+            <div class="card-val emerald">{len(self.native_nodes)}</div>
+            <div style="font-size: 12px; color: var(--text-dim); margin-top: 6px;">Zero-overhead Rust kernels</div>
+        </div>
+        <div class="card">
+            <div class="card-label">Eager Fallbacks</div>
+            <div class="card-val {'amber' if self.fallback_nodes else 'emerald'}">{len(self.fallback_nodes)}</div>
+            <div style="font-size: 12px; color: var(--text-dim); margin-top: 6px;">PyTorch CPU fallback nodes</div>
+        </div>
+    </div>
+
+    <div class="card graph-container">
+        <h2 style="font-size: 16px; margin-bottom: 16px; text-align: left;">Execution DAG</h2>
+        <div class="mermaid">
+{mermaid_code}
+        </div>
+    </div>
+
+    <div class="card" style="padding: 0; overflow: hidden;">
+        <h2 style="font-size: 16px; padding: 18px; border-bottom: 1px solid var(--border);">Operator Node Registry</h2>
+        <table>
+            <thead>
+                <tr>
+                    <th>ID</th>
+                    <th>Status</th>
+                    <th>Operator Target</th>
+                    <th>FX Target</th>
+                    <th>Inputs</th>
+                </tr>
+            </thead>
+            <tbody>
+{table_rows}
+            </tbody>
+        </table>
+    </div>
+</body>
+</html>"""
+
+    def save(self, filepath: str) -> None:
+        """Save the HTML report to a local file."""
+        with open(filepath, "w", encoding="utf-8") as f:
+            f.write(self.to_html())
+
+    def _repr_html_(self) -> str:
+        """Jupyter Notebook / IPython rich HTML display representation."""
+        return self.to_html()
+
+
+def visualize(
+    model: Any,
+    example_inputs: Any,
+    output_html: str | None = None,
+    print_summary: bool = True,
+    **kwargs: Any,
+) -> GraphVisualization:
+    """Analyze and visually inspect a model's compiled execution graph.
+
+    Args:
+        model: PyTorch model or GraphModule to compile and inspect.
+        example_inputs: Sample input tensor(s).
+        output_html: Optional file path to write the standalone interactive HTML report.
+        print_summary: Whether to print the formatted ASCII summary to terminal.
+
+    Returns:
+        GraphVisualization instance with ``.summary()``, ``.to_mermaid()``, and ``.to_html()``.
+    """
+    from torch.fx.experimental.proxy_tensor import make_fx
+    from ._parser import parse_graph
+
+    if not isinstance(example_inputs, (list, tuple)):
+        example_inputs = [example_inputs]
+
+    model_name = getattr(model, "__class__", type(model)).__name__
+
+    try:
+        gm = make_fx(model)(*example_inputs)
+    except Exception:
+        gm = model
+
+    plan, _ = parse_graph(gm, list(example_inputs))
+    viz = GraphVisualization(plan, engine=active_engine(), model_name=model_name)
+
+    if print_summary:
+        print(viz.summary())
+
+    if output_html:
+        viz.save(output_html)
+
+    return viz
+

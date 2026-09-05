@@ -1,6 +1,6 @@
 [package]
 name = "torchburn"
-version = "0.5.2"
+version = "0.5.3"
 edition = "2021"
 description = "Hardware-agnostic PyTorch compilation backend: PyO3 + DLPack zero-copy FFI bridge to a Rust execution engine with BLAKE3 structural graph caching"
 license = "Apache-2.0"
@@ -14,7 +14,7 @@ name = "_torchburn"
 crate-type = ["cdylib"]
 
 [dependencies]
-pyo3 = { version = "0.25", features = ["extension-module", "abi3-py39"] }
+pyo3 = { version = "0.25", features = ["extension-module", "abi3-py39", "multiple-pymethods"] }
 blake3 = "1.5"
 rayon = "1.10"
 rand = "0.8"
@@ -46,3 +46,9 @@ burn-wgpu = ["dep:burn", "burn/wgpu", "dep:wgpu"]
 # Use: maturin develop --features openblas  (or set TORCHBURN_MATMUL=openblas)
 # Skylake kernels give 3-4× over matrixmultiply sgemm for 1024³.
 openblas = ["dep:openblas-src"]
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+
