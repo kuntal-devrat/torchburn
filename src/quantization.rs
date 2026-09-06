@@ -1825,6 +1825,44 @@ pub(crate) unsafe fn swiglu_neuron_w4a32_group64_avx512(
     (_mm512_reduce_add_ps(g_acc), _mm512_reduce_add_ps(u_acc))
 }
 
+#[cfg(not(target_arch = "x86_64"))]
+pub(crate) unsafe fn swiglu_neuron_w4a8_group64_vnni_avx512(
+    _x_u8: *const u8,
+    _s_x: f32,
+    _gw_row: *const u8,
+    _gs_row: *const f32,
+    _uw_row: *const u8,
+    _us_row: *const f32,
+    _num_groups: usize,
+) -> (f32, f32) {
+    (0.0, 0.0)
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+pub(crate) unsafe fn swiglu_neuron_w4a32_group64_avx512(
+    x: *const f32,
+    gw_row: *const u8,
+    gs_row: *const f32,
+    uw_row: *const u8,
+    us_row: *const f32,
+    num_groups: usize,
+) -> (f32, f32) {
+    let mut g_acc = 0.0f32;
+    let mut u_acc = 0.0f32;
+    for g in 0..num_groups {
+        let x_grp = x.add(g * 64);
+        let gw_grp = gw_row.add(g * 32);
+        let uw_grp = uw_row.add(g * 32);
+        let g_scale = *gs_row.add(g);
+        let u_scale = *us_row.add(g);
+        let g_dot = dot_f32_u4_group_scalar(x_grp, gw_grp, 64);
+        let u_dot = dot_f32_u4_group_scalar(x_grp, uw_grp, 64);
+        g_acc += g_dot * g_scale;
+        u_acc += u_dot * u_scale;
+    }
+    (g_acc, u_acc)
+}
+
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f,avx512bw")]
 unsafe fn swiglu_neuron_w4a32_group32_avx512(
@@ -2608,6 +2646,7 @@ pub fn fused_swiglu_mlp_w4a32(
                     }
                     #[cfg(not(target_arch = "x86_64"))]
                     {
+                        let _ = (x_u8_p, s_x);
                         (0.0, 0.0)
                     }
                 } else if has_avx512 {
@@ -3654,6 +3693,7 @@ pub fn fused_transformer_layer_step_w4a32(
                 }
                 #[cfg(not(target_arch = "x86_64"))]
                 {
+                    let _ = (x_u8_p, s_x);
                     (0.0, 0.0)
                 }
             } else if has_avx512 {
@@ -3701,7 +3741,16 @@ pub fn fused_transformer_layer_step_w4a32(
                     (0.0, 0.0)
                 }
             } else {
-                (0.0, 0.0)
+                unsafe {
+                    swiglu_neuron_w4a32_group64_avx512(
+                        x_p,
+                        gw_row,
+                        gs_row,
+                        uw_row,
+                        us_row,
+                        num_groups_k,
+                    )
+                }
             };
 
             let g = g_sum + gb;

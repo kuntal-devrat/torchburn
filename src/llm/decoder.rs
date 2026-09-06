@@ -684,11 +684,7 @@ impl RustQwenDecoder {
                         }
                         #[cfg(not(target_arch = "x86_64"))]
                         {
-                            (0.0, 0.0)
-                        }
-                    } else {
-                        #[cfg(target_arch = "x86_64")]
-                        {
+                            let _ = (x_u8_p, s_x);
                             unsafe {
                                 swiglu_neuron_w4a32_group64_avx512(
                                     x_p,
@@ -700,9 +696,16 @@ impl RustQwenDecoder {
                                 )
                             }
                         }
-                        #[cfg(not(target_arch = "x86_64"))]
-                        {
-                            (0.0, 0.0)
+                    } else {
+                        unsafe {
+                            swiglu_neuron_w4a32_group64_avx512(
+                                x_p,
+                                gw_row,
+                                gs_row,
+                                uw_row,
+                                us_row,
+                                num_groups_k,
+                            )
                         }
                     };
 
