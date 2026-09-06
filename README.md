@@ -45,7 +45,7 @@ output = compiled_model(torch.randn(32, 512))
 
 ## 🧠 Universal LLM Engine (Zero CUDA, Zero llama.cpp)
 
-TorchBurn v0.5.1 introduces **`torchburn.LLM`**: a high-level, universal language model inference engine that runs any model directly from Hugging Face Hub or local checkpoints with **5–9 lines of code**.
+TorchBurn v0.5.4 introduces **`torchburn.LLM`**: a high-level, universal language model inference engine that runs any model directly from Hugging Face Hub or local checkpoints with **5–9 lines of code**.
 
 - **No CUDA, No llama.cpp, No GGUF conversion**: Executes directly on raw PyTorch weights (`.safetensors`).
 - **Hardware Auto-Dispatch**: Seamlessly dispatches across all hardware:
@@ -96,7 +96,7 @@ python -m torchburn.llm benchmark --model models/qwen_0_5b --device cpu --tokens
 
 ---
 
-## 🚀 Key Highlights (v0.5.1)
+## 🚀 Key Highlights (v0.5.4)
 
 
 - ⚡ **Native CPU by Default**: Out-of-the-box zero-copy execution on CPU with zero GPU setup or shader compilation delays. Reaches **98.2% parity with Intel MKL** on $1024^3$ GEMM (12.29 ms vs 12.08 ms).
@@ -129,7 +129,7 @@ TorchBurn features 3 distinct execution engines tailored for different deploymen
 
 ---
 
-## 📊 Performance Benchmarks (v0.5.1 Native CPU vs Intel MKL / PyTorch Eager)
+## 📊 Performance Benchmarks (v0.5.4 Native CPU vs Intel MKL / PyTorch Eager)
 
 *System: Intel Core i7-11800H @ 2.30 GHz (8 cores / 16 threads), Windows 11 x86_64, FP32*
 

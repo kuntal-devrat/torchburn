@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.4] - 2026-09-06
+
+### Added
+- **Enterprise Ops Domain Restructuring**: Reorganized the ops surface into enterprise domains with a new graph visualizer and autograd preservation.
+- **Universal LLM Engine Maturation**: Pure-Rust AVX-512 VNNI CPU decode path, WGPU compute-graph decoder, low-RAM streaming loader, and repetition penalty for generation.
+- **CLI Quantization Controls**: `--quant` / `--quantization` flags added to the LLM CLI for INT4/INT8 selection.
+
+### Fixed
+- **ARM64 Decoder Stubs**: Resolved stub regressions in the ARM64 LLM decoder path.
+- **Pytest Isolation**: Fixed `pythonpath` isolation in the pytest configuration.
+- **Headless GPU Panics**: Protected `init_setup` and `probe_gpu` against panics on headless CI runners under burn-wgpu.
+
 ## [0.5.1] - 2026-09-04
 
 ### Added
