@@ -11,10 +11,10 @@ homepage = "https://github.com/kuntal-devrat/torchburn"
 
 [lib]
 name = "_torchburn"
-crate-type = ["cdylib"]
+crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-pyo3 = { version = "0.25", features = ["extension-module", "abi3-py39", "multiple-pymethods"] }
+pyo3 = { version = "0.25", features = ["abi3-py39", "multiple-pymethods"] }
 blake3 = "1.5"
 rayon = "1.10"
 rand = "0.8"
@@ -35,7 +35,14 @@ wgpu = { version = "25.0", optional = true }
 openblas-src = { version = "0.10", optional = true, features = ["cblas", "static"] }
 
 [features]
-default = ["matrixmultiply", "burn-wgpu"]
+default = ["extension-module", "matrixmultiply", "burn-wgpu"]
+# Enable the pyo3 `extension-module` link mode (no libpython dependency).
+# Off by default when building benches/tests so criterion and parity test
+# binaries can link against the crate without the Python extension ABI.
+extension-module = ["pyo3/extension-module"]
+# Tests-only: force each CPU feature tier (see src/dispatch.rs) and assert
+# output parity + monotonic performance across tiers.
+dispatch-test = []
 burn = ["dep:burn"]
 # wgpu backend on top of the burn engine.  metal/vulkan are the graphics
 # APIs wgpu targets (AutoGraphicsApi picks Metal on macOS, Vulkan elsewhere;
@@ -51,4 +58,23 @@ openblas = ["dep:openblas-src"]
 opt-level = 3
 lto = "thin"
 codegen-units = 1
+
+[dev-dependencies]
+criterion = "0.5"
+
+[[bench]]
+name = "bench_gemm"
+harness = false
+
+[[bench]]
+name = "bench_int4_gemv"
+harness = false
+
+[[bench]]
+name = "bench_decoder_step"
+harness = false
+
+[[bench]]
+name = "bench_wgpu_submit"
+harness = false
 

@@ -68,7 +68,10 @@ class ModelLoader:
         # 3. If quant in ("int4", "int8"), use streaming low-memory loader with persistent disk caching
         quant_lower = quant.lower() if quant else None
         if quant_lower in ("int4", "int8"):
-            cache_names = [f"torchburn_{quant_lower}_g64.safetensors", f"torchburn_{quant_lower}_g64.pt"]
+            # Phase 1.1: prefer the v2 interleaved layout cache if it exists
+            # (smaller on disk, embedded f16 scales); fall back to v1.
+            v2_name = f"torchburn_{quant_lower}_g64_v2.safetensors"
+            cache_names = [v2_name, f"torchburn_{quant_lower}_g64.safetensors", f"torchburn_{quant_lower}_g64.pt"]
             cand_caches = []
             for cn in cache_names:
                 cand_caches.append(os.path.join(root_path, cn))
@@ -81,13 +84,24 @@ class ModelLoader:
                     break
 
             if chosen_cache:
-                print(f"[\033[92mTorchBurn\033[0m] Loading pre-quantized {quant_lower.upper()} weights from disk cache (sub-second fast startup)...")
+                is_v2 = os.path.basename(chosen_cache) == v2_name
+                if is_v2:
+                    print(f"[\033[92mTorchBurn\033[0m] Loading pre-quantized {quant_lower.upper()} weights from v2 disk cache (interleaved layout)...")
+                else:
+                    print(f"[\033[92mTorchBurn\033[0m] Loading pre-quantized {quant_lower.upper()} weights from disk cache (sub-second fast startup)...")
                 model = UniversalTransformer(config, init_weights=False, quant=quant_lower, fused_qkv=True).to(device=device)
                 if chosen_cache.endswith(".safetensors"):
                     import safetensors.torch
                     state_dict = safetensors.torch.load_file(chosen_cache, device=device)
                 else:
                     state_dict = torch.load(chosen_cache, map_location=device, weights_only=True)
+                if is_v2 and quant_lower == "int4":
+                    # v1 cache:  `qweight` (N, K/2) + `scales` (N, K/64) f32
+                    # v2 cache:  `qweight` (N, G*34) interleaved blocks
+                    # Migrate v2 -> v1 in memory so the existing Rust decoder
+                    # keeps working unchanged (kernel-level v2 lands in 1.2).
+                    state_dict = cls._migrate_v2_state_dict(state_dict)
+                    print(f"[\033[93mTorchBurn\033[0m] Migrated v2 layout to v1 tensors in memory (deprecation: v1 is the default format until Phase 1.2).")
                 model.load_state_dict(state_dict)
                 total_params = sum(p.numel() for p in model.parameters())
                 print(f"[\033[92mTorchBurn\033[0m] Successfully loaded model from cache: {os.path.basename(chosen_cache)} ({total_params / 1e6:.2f}M params).")
@@ -282,7 +296,70 @@ class ModelLoader:
 
         return model
 
+    @staticmethod
+    def _migrate_v2_state_dict(state_dict: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+        """Convert a v2-format state dict (interleaved 34-byte blocks, f16 scales)
+        to v1 tensors (`qweight` (N, K/2) uint8 + `scales` (N, K/64) f32) in
+        memory. Vectorized; a 0.5B model converts in well under a second.
+        """
+        migrated = {}
+        for key, tensor in state_dict.items():
+            if key.endswith(".qweight") and tensor.ndim == 2 and tensor.shape[1] % 34 == 0:
+                n, cols = tensor.shape
+                num_groups = cols // 34
+                blocks = tensor.view(n, num_groups, 34)
+                packed = blocks[:, :, :32].reshape(n, num_groups * 32)
+                scales_h = blocks[:, :, 32:].view(torch.int16).view(torch.float16).float()
+                scales = scales_h.reshape(n, num_groups)
+                migrated[key] = packed.contiguous()
+                migrated[key.replace(".qweight", ".scales")] = scales.contiguous()
+            else:
+                migrated[key] = tensor
+        return migrated
 
+    @classmethod
+    def migrate_cache_to_v2(cls, model_dir: str) -> str:
+        """One-time migration (roadmap 1.1): re-quantize an already-cached model
+        into the v2 interleaved layout, writing `torchburn_int4_g64_v2.safetensors`
+        next to the v1 cache. Loads take the v2 file first when present.
+        """
+        from torchburn.quantization import quantize_weight_int4_grouped_v2
+
+        model, config, root = cls.load(model_dir, quant="int4", device="cpu")
+        if config.tie_word_embeddings:
+            # lm_head shares embed_tokens weights: rebuild it the same way the
+            # streaming quantizer does so the state dict has its own qweight.
+            from torchburn.quantization import quantize_weight_int4_grouped
+            emb = model.embed_tokens.weight.data
+            qw, qs = quantize_weight_int4_grouped(emb, group_size=64)
+            model.lm_head.qweight.data.copy_(qw)
+            model.lm_head.scales.data.copy_(qs)
+
+        v2_path = os.path.join(root, "torchburn_int4_g64_v2.safetensors")
+        sd = {}
+        state = model.state_dict()
+        for key, tensor in state.items():
+            if key.endswith(".qweight") and key.replace(".qweight", ".scales") in state:
+                # v1 -> f32 (exact dequant) -> v2 blocks. Re-quantizing the
+                # dequantized v1 weights is what inference actually runs, so
+                # the v2 cache preserves byte-identical outputs.
+                scales = state[key.replace(".qweight", ".scales")]
+                n, k2 = tensor.shape
+                k = k2 * 2
+                lo = (tensor & 0x0F).to(torch.int8)
+                hi = ((tensor >> 4) & 0x0F).to(torch.int8)
+                q = torch.cat([lo.reshape(n, -1, 1), hi.reshape(n, -1, 1)], dim=2)
+                q = q.reshape(n, k).to(torch.int8) - 8
+                w_deq = q.float() * scales.repeat_interleave(64, dim=1)
+                sd[key] = quantize_weight_int4_grouped_v2(w_deq, group_size=64).contiguous()
+            elif key.endswith(".scales"):
+                continue  # scales are embedded in the v2 blocks
+            else:
+                sd[key] = tensor.contiguous()
+        import safetensors.torch
+        safetensors.torch.save_file(sd, v2_path)
+        print(f"[\033[92mTorchBurn\033[0m] v2 cache written: {v2_path}")
+        return v2_path
 
     @classmethod
     def _resolve_files(

@@ -5,7 +5,7 @@
 //! Unary math ops (abs, neg, sign, sqrt, exp, log, etc.) are elementwise.
 
 use crate::dlpack::{contiguous_strides, unsupported, BorrowedTensor, DType, OwnedTensor};
-use crate::ops::Scalar;
+use crate::kernels::Scalar;
 use pyo3::prelude::*;
 use std::f64;
 
@@ -95,7 +95,7 @@ pub fn comparison(op: &str, a: &BorrowedTensor, b: &BorrowedTensor) -> PyResult<
             b.dtype.name()
         )));
     }
-    let out_shape = crate::ops::broadcast_shape(&a.shape, &b.shape)?;
+    let out_shape = crate::kernels::broadcast_shape(&a.shape, &b.shape)?;
     let mut out = OwnedTensor::new(DType::F32, out_shape);
     let a_contig = a.strides == contiguous_strides(&a.shape);
     let b_contig = b.strides == contiguous_strides(&b.shape);
@@ -189,7 +189,7 @@ fn run_logical_binary(
 }
 
 pub fn logical_and(a: &BorrowedTensor, b: &BorrowedTensor) -> PyResult<OwnedTensor> {
-    let out_shape = crate::ops::broadcast_shape(&a.shape, &b.shape)?;
+    let out_shape = crate::kernels::broadcast_shape(&a.shape, &b.shape)?;
     let mut out = OwnedTensor::new(DType::F32, out_shape);
     let same_shape = a.shape == b.shape
         && a.strides == contiguous_strides(&a.shape)
@@ -213,7 +213,7 @@ pub fn logical_and(a: &BorrowedTensor, b: &BorrowedTensor) -> PyResult<OwnedTens
 }
 
 pub fn logical_or(a: &BorrowedTensor, b: &BorrowedTensor) -> PyResult<OwnedTensor> {
-    let out_shape = crate::ops::broadcast_shape(&a.shape, &b.shape)?;
+    let out_shape = crate::kernels::broadcast_shape(&a.shape, &b.shape)?;
     let mut out = OwnedTensor::new(DType::F32, out_shape);
     let same_shape = a.shape == b.shape
         && a.strides == contiguous_strides(&a.shape)

@@ -12,7 +12,8 @@ use rayon::prelude::*;
 
 use crate::dlpack::{self, unsupported, BorrowedTensor, DType, OwnedTensor};
 use crate::quantization::{
-    dot_f32_f32, fast_rms_norm, fast_vector_add, gemv_w4a32_grouped, quantize_activation_to_u8,
+    dot_f32_f32, fast_rms_norm, fast_vector_add, gemv_w4a32_grouped, gemv_w4a32_grouped_v2,
+    pack_rows_w4a32_group64_v1_to_v2, quantize_activation_to_u8,
     swiglu_neuron_w4a32_group64_avx512, swiglu_neuron_w4a8_group64_vnni_avx512,
 };
 
@@ -28,9 +29,12 @@ pub struct RustLayerData {
     pub input_norm_w: Vec<f32>,
     pub qkv_w: Vec<u8>,
     pub qkv_s: Vec<f32>,
+    /// v2 interleaved layout (Phase 1.2), empty when v2 packing is disabled.
+    pub qkv_w2: Vec<u8>,
     pub qkv_b: Option<Vec<f32>>,
     pub o_w: Vec<u8>,
     pub o_s: Vec<f32>,
+    pub o_w2: Vec<u8>,
     pub o_b: Option<Vec<f32>>,
     pub post_norm_w: Vec<f32>,
     pub gate_w: Vec<u8>,
@@ -41,6 +45,7 @@ pub struct RustLayerData {
     pub up_b: Option<Vec<f32>>,
     pub down_w: Vec<u8>,
     pub down_s: Vec<f32>,
+    pub down_w2: Vec<u8>,
     pub down_b: Option<Vec<f32>>,
 }
 
@@ -54,6 +59,9 @@ pub struct RustQwenDecoder {
     pub head_dim: usize,
     pub num_layers: usize,
     pub group_size: usize,
+    /// True when every projection was v2-packed at construction (group=64
+    /// and all K dims divisible by 64); routes GEMVs to the fused kernel.
+    pub use_v2: bool,
     pub rms_norm_eps: f32,
     pub max_seq_len: usize,
     pub embed_tokens: Vec<f32>,
@@ -61,6 +69,7 @@ pub struct RustQwenDecoder {
     pub final_norm_w: Vec<f32>,
     pub lm_head_w: Vec<u8>,
     pub lm_head_s: Vec<f32>,
+    pub lm_head_w2: Vec<u8>,
     pub k_caches: Vec<Vec<f32>>,
     pub v_caches: Vec<Vec<f32>>,
     pub cos_table: Vec<f32>,
@@ -186,9 +195,11 @@ impl RustQwenDecoder {
                 input_norm_w: in_norm,
                 qkv_w,
                 qkv_s,
+                qkv_w2: Vec::new(),
                 qkv_b,
                 o_w,
                 o_s,
+                o_w2: Vec::new(),
                 o_b: None,
                 post_norm_w: post_norm,
                 gate_w,
@@ -199,6 +210,7 @@ impl RustQwenDecoder {
                 up_b: None,
                 down_w,
                 down_s,
+                down_w2: Vec::new(),
                 down_b: None,
             });
         }
@@ -231,6 +243,35 @@ impl RustQwenDecoder {
 
         let total_qkv = (num_heads + 2 * num_kv_heads) * head_dim;
 
+        // Phase 1.2: repack the v1 weights into the v2 interleaved layout so
+        // every projection GEMV (QKV, O, down, lm_head) runs the fused blocked
+        // kernel off one sequential 34-byte block stream per group. One-time
+        // transform at load; v1 buffers are kept for the fallback path.
+        let use_v2 = group_size == 64
+            && hidden_size % 64 == 0
+            && total_qkv % 64 == 0
+            && num_heads * head_dim % 64 == 0
+            && intermediate_size % 64 == 0
+            && vocab_size % 64 == 0;
+        let lm_head_w2_vec = if use_v2 {
+            pack_rows_w4a32_group64_v1_to_v2(&lm_head_w_vec, &lm_head_s_vec, vocab_size)
+        } else {
+            Vec::new()
+        };
+        if use_v2 {
+            for layer in rust_layers.iter_mut() {
+                layer.qkv_w2 =
+                    pack_rows_w4a32_group64_v1_to_v2(&layer.qkv_w, &layer.qkv_s, total_qkv);
+                layer.o_w2 =
+                    pack_rows_w4a32_group64_v1_to_v2(&layer.o_w, &layer.o_s, num_heads * head_dim);
+                layer.down_w2 = pack_rows_w4a32_group64_v1_to_v2(
+                    &layer.down_w,
+                    &layer.down_s,
+                    intermediate_size,
+                );
+            }
+        }
+
         Ok(Self {
             vocab_size,
             hidden_size,
@@ -240,6 +281,7 @@ impl RustQwenDecoder {
             head_dim,
             num_layers,
             group_size,
+            use_v2,
             rms_norm_eps: rms_norm_eps as f32,
             max_seq_len,
             embed_tokens: embed_tokens_vec,
@@ -247,6 +289,7 @@ impl RustQwenDecoder {
             final_norm_w: final_norm_vec,
             lm_head_w: lm_head_w_vec,
             lm_head_s: lm_head_s_vec,
+            lm_head_w2: lm_head_w2_vec,
             k_caches,
             v_caches,
             cos_table,
@@ -334,23 +377,88 @@ impl RustQwenDecoder {
         recent_tokens: Option<Vec<usize>>,
         top_p: f32,
     ) -> PyResult<usize> {
+        let rec = recent_tokens.unwrap_or_default();
+        Ok(self.decode_and_sample_inner(
+            token_id,
+            offset,
+            temperature,
+            top_k,
+            repetition_penalty,
+            &rec,
+            top_p,
+        ))
+    }
+
+    /// Phase 2.3: run the entire decode loop in Rust. One FFI crossing per
+    /// generation instead of one per token — the Python engine passes the
+    /// first token and gets back every generated token id plus the final KV
+    /// position, so multi-turn state stays synchronizable.
+    #[pyo3(signature = (first_token, seq_len, max_new_tokens, temperature=0.7,
+                        top_k=40, repetition_penalty=1.0, top_p=1.0, eos_token_id=None))]
+    pub fn generate_loop(
+        &mut self,
+        first_token: usize,
+        seq_len: usize,
+        max_new_tokens: usize,
+        temperature: f32,
+        top_k: usize,
+        repetition_penalty: f32,
+        top_p: f32,
+        eos_token_id: Option<usize>,
+    ) -> PyResult<(Vec<usize>, usize)> {
+        let mut tokens: Vec<usize> = Vec::with_capacity(max_new_tokens);
+        let mut next_token = first_token;
+        let mut generated = 0usize;
+        while generated < max_new_tokens {
+            if Some(next_token) == eos_token_id {
+                break;
+            }
+            tokens.push(next_token);
+            generated += 1;
+            let offset = seq_len + generated - 1;
+            next_token = self.decode_and_sample_inner(
+                next_token,
+                offset,
+                temperature,
+                top_k,
+                repetition_penalty,
+                &tokens,
+                top_p,
+            );
+        }
+        Ok((tokens, seq_len + generated))
+    }
+}
+
+impl RustQwenDecoder {
+    /// Sampling + penalty logic shared by `decode_and_sample` (pyo3) and
+    /// `generate_loop` (no per-token Python round-trip). Free of the pyo3
+    /// impl block so it can take `&[usize]` without argument conversion.
+    fn decode_and_sample_inner(
+        &mut self,
+        token_id: usize,
+        offset: usize,
+        temperature: f32,
+        top_k: usize,
+        repetition_penalty: f32,
+        recent_tokens: &[usize],
+        top_p: f32,
+    ) -> usize {
         self.step_internal(token_id, offset);
         if repetition_penalty > 1.0 {
-            if let Some(tokens) = recent_tokens {
-                let mut seen = std::collections::HashSet::new();
-                for t in tokens {
-                    if t < self.logits.len() && seen.insert(t) {
-                        let l = self.logits[t];
-                        if l > 0.0 {
-                            self.logits[t] = l / repetition_penalty;
-                        } else {
-                            self.logits[t] = l * repetition_penalty;
-                        }
+            let mut seen = std::collections::HashSet::new();
+            for &t in recent_tokens {
+                if t < self.logits.len() && seen.insert(t) {
+                    let l = self.logits[t];
+                    if l > 0.0 {
+                        self.logits[t] = l / repetition_penalty;
+                    } else {
+                        self.logits[t] = l * repetition_penalty;
                     }
                 }
             }
         }
-        Ok(sample_logits(&self.logits, temperature, top_k, top_p))
+        sample_logits(&self.logits, temperature, top_k, top_p)
     }
 }
 
@@ -361,7 +469,7 @@ impl RustQwenDecoder {
 /// the smallest nucleus whose cumulative mass exceeds `top_p` is kept (the
 /// same cutoff torch uses: drop items whose *preceding* cumulative mass is
 /// already above the threshold) and the result is re-normalized.
-pub(crate) fn sample_logits(logits: &[f32], temperature: f32, top_k: usize, top_p: f32) -> usize {
+pub fn sample_logits(logits: &[f32], temperature: f32, top_k: usize, top_p: f32) -> usize {
     let vocab_size = logits.len();
     if temperature <= 0.0 || top_k == 1 {
         // Greedy argmax
@@ -443,6 +551,34 @@ pub(crate) fn sample_logits(logits: &[f32], temperature: f32, top_k: usize, top_
 }
 
 impl RustQwenDecoder {
+    /// Phase 1.2 dispatch: run a projection GEMV through the fused v2
+    /// interleaved kernel when the decoder was constructed with v2-packed
+    /// weights, else the v1 per-row path. Bias, when present, is added inside
+    /// both kernels. Associated fn (no `&self` receiver) so callers can borrow
+    /// weight slices and output buffers from `self` disjointly.
+    #[inline]
+    fn projection_gemv(
+        use_v2: bool,
+        group_size: usize,
+        x: *const f32,
+        w1: &[u8],
+        s1: &[f32],
+        w2: &[u8],
+        bias: Option<&[f32]>,
+        out: *mut f32,
+        n: usize,
+        k: usize,
+    ) {
+        let b_ptr = bias.map(|b| b.as_ptr());
+        unsafe {
+            if use_v2 {
+                gemv_w4a32_grouped_v2(x, w2.as_ptr(), b_ptr, out, n, k, 64);
+            } else {
+                gemv_w4a32_grouped(x, w1.as_ptr(), s1.as_ptr(), b_ptr, out, n, k, group_size);
+            }
+        }
+    }
+
     fn step_internal(&mut self, token_id: usize, offset: usize) {
         let hidden_size = self.hidden_size;
         let head_dim = self.head_dim;
@@ -483,18 +619,18 @@ impl RustQwenDecoder {
             }
 
             // B. QKV projection
-            unsafe {
-                gemv_w4a32_grouped(
-                    self.normed_buf.as_ptr(),
-                    layer.qkv_w.as_ptr(),
-                    layer.qkv_s.as_ptr(),
-                    layer.qkv_b.as_ref().map(|b| b.as_ptr()),
-                    self.qkv_buf.as_mut_ptr(),
-                    total_qkv,
-                    hidden_size,
-                    group_size,
-                );
-            }
+            Self::projection_gemv(
+                self.use_v2,
+                self.group_size,
+                self.normed_buf.as_ptr(),
+                &layer.qkv_w,
+                &layer.qkv_s,
+                &layer.qkv_w2,
+                layer.qkv_b.as_deref(),
+                self.qkv_buf.as_mut_ptr(),
+                total_qkv,
+                hidden_size,
+            );
 
             let (q, kv_rest) = self.qkv_buf.split_at_mut(q_dim);
             let (k, v) = kv_rest.split_at_mut(kv_dim);
@@ -584,18 +720,18 @@ impl RustQwenDecoder {
             }
 
             // F. Output projection
-            unsafe {
-                gemv_w4a32_grouped(
-                    self.attn_out.as_ptr(),
-                    layer.o_w.as_ptr(),
-                    layer.o_s.as_ptr(),
-                    layer.o_b.as_ref().map(|b| b.as_ptr()),
-                    self.o_out.as_mut_ptr(),
-                    hidden_size,
-                    q_dim,
-                    group_size,
-                );
-            }
+            Self::projection_gemv(
+                self.use_v2,
+                self.group_size,
+                self.attn_out.as_ptr(),
+                &layer.o_w,
+                &layer.o_s,
+                &layer.o_w2,
+                layer.o_b.as_deref(),
+                self.o_out.as_mut_ptr(),
+                hidden_size,
+                q_dim,
+            );
 
             // G. Residual add: x += o_out
             unsafe {
@@ -721,18 +857,18 @@ impl RustQwenDecoder {
                 });
 
             // Down GEMV
-            unsafe {
-                gemv_w4a32_grouped(
-                    self.h_buf.as_ptr(),
-                    layer.down_w.as_ptr(),
-                    layer.down_s.as_ptr(),
-                    layer.down_b.as_ref().map(|b| b.as_ptr()),
-                    self.down_out.as_mut_ptr(),
-                    hidden_size,
-                    intermediate_size,
-                    group_size,
-                );
-            }
+            Self::projection_gemv(
+                self.use_v2,
+                self.group_size,
+                self.h_buf.as_ptr(),
+                &layer.down_w,
+                &layer.down_s,
+                &layer.down_w2,
+                layer.down_b.as_deref(),
+                self.down_out.as_mut_ptr(),
+                hidden_size,
+                intermediate_size,
+            );
 
             // J. Residual add: x += down_out
             unsafe {
@@ -752,17 +888,17 @@ impl RustQwenDecoder {
         }
 
         // 4. LM Head GEMV
-        unsafe {
-            gemv_w4a32_grouped(
-                self.normed_buf.as_ptr(),
-                self.lm_head_w.as_ptr(),
-                self.lm_head_s.as_ptr(),
-                None,
-                self.logits.as_mut_ptr(),
-                self.vocab_size,
-                hidden_size,
-                group_size,
-            );
-        }
+        Self::projection_gemv(
+            self.use_v2,
+            self.group_size,
+            self.normed_buf.as_ptr(),
+            &self.lm_head_w,
+            &self.lm_head_s,
+            &self.lm_head_w2,
+            None,
+            self.logits.as_mut_ptr(),
+            self.vocab_size,
+            hidden_size,
+        );
     }
 }

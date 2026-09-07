@@ -5,7 +5,7 @@
 //! - [`decode`] — the [`WgpuQwenDecoder`] pyclass and single-pass runtime.
 //! - [`profiler`] — per-step timing and stage-by-stage debug readbacks.
 
-pub(crate) mod backend;
+pub mod backend;
 pub(crate) mod bind_groups;
 pub(crate) mod decode;
 pub(crate) mod pipelines;

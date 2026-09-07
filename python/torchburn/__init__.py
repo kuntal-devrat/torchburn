@@ -102,6 +102,8 @@ from .quantization import (
     quantize_weight_int8,
     quantize_weight_int4,
     quantize_weight_int4_grouped,
+    quantize_weight_int4_grouped_v2,
+    w4a32_grouped_linear_v2,
 )
 
 try:
@@ -180,6 +182,8 @@ __all__ = [
     "quantize_weight_int8",
     "quantize_weight_int4",
     "quantize_weight_int4_grouped",
+    "quantize_weight_int4_grouped_v2",
+    "w4a32_grouped_linear_v2",
     "LLM",
     "GenerationConfig",
     "EngineConfig",

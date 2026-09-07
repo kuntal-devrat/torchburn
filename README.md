@@ -152,11 +152,10 @@ import torchburn
 
 # Check active execution engine
 print(torchburn.active_engine())  # 'native_cpu' (default), 'burn_ndarray', or 'burn_wgpu'
-
-# Switch engines dynamically
-torchburn.set_engine("burn_wgpu")   # switch to GPU via WGPU
-torchburn.set_engine("native_cpu")  # switch back to zero-copy CPU
 ```
+
+> **Note:** engine selection is process-wide and read at import time — set
+> `TORCHBURN_ENGINE` before your script starts (see table below).
 
 ### Environment Variable Controls
 
@@ -229,6 +228,14 @@ TORCHBURN_ENGINE=burn-wgpu python your_model.py
 </details>
 
 See [`docs/ops_coverage.md`](docs/ops_coverage.md) for full signatures and test coverage metrics.
+
+---
+
+## 🚀 Performance Roadmap
+
+The full phased plan for kernel/backend optimization (CPU int4 GEMV, iGPU latency,
+CUDA backend, GGUF import, speculative decoding) with measured baselines and
+benchmark gates lives in [`docs/OPTIMIZATION_ROADMAP.md`](docs/OPTIMIZATION_ROADMAP.md).
 
 ---
 

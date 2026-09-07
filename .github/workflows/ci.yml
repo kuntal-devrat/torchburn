@@ -207,6 +207,33 @@ jobs:
           name: wheels-${{ matrix.os }}
           path: dist/*.whl
 
+  # ── Native wheel variant (Phase 0.2) ───────────────────────────────
+  # The portable wheels above delete `.cargo/config.toml` for a baseline ISA.
+  # This job builds WITH the native CPU flags (keeps `.cargo/config.toml`)
+  # so the self-hosted bench runner / nightly perf job gets the fastest
+  # possible wheel. Uploaded as a `wheels-native` artifact; publishing a
+  # separately-named `torchburn-native` distribution is Phase 6.2 release work.
+  build-native:
+    runs-on: [self-hosted, bench]
+    if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # NOTE: intentionally NOT deleting .cargo/config.toml -> native ISA build
+      - name: Build native wheel
+        run: maturin build -r -o dist-native
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-native
+          path: dist-native/*.whl
+
   # ── Build sdist ────────────────────────────────────────────────────
   build-sdist:
     runs-on: ubuntu-latest

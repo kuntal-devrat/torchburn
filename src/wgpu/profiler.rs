@@ -46,7 +46,7 @@ impl WgpuQwenDecoder {
         encoder2.copy_buffer_to_buffer(
             &self.logits_buf,
             0,
-            &self.staging_buf,
+            &self.staging_bufs[0],
             0,
             (vocab_size * 4) as u64,
         );
@@ -56,7 +56,7 @@ impl WgpuQwenDecoder {
 
         // Phase 3: full-logits readback
         let t2 = std::time::Instant::now();
-        let buffer_slice = self.staging_buf.slice(..(vocab_size * 4) as u64);
+        let buffer_slice = self.staging_bufs[0].slice(..(vocab_size * 4) as u64);
         let (tx, rx) = std::sync::mpsc::channel();
         buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
             let _ = tx.send(result);
@@ -66,7 +66,7 @@ impl WgpuQwenDecoder {
         {
             let _view = buffer_slice.get_mapped_range();
         }
-        self.staging_buf.unmap();
+        self.staging_bufs[0].unmap();
         let t_readback = t2.elapsed().as_secs_f64() * 1000.0;
 
         Ok((t_layers, t_lm_head, t_readback))

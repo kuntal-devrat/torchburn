@@ -972,7 +972,7 @@ pub fn run_chain(
             ChainOp::Binary(_) => {
                 let sa = shape_of(e.a, &shapes)?;
                 let sb = shape_of(e.b.expect("binary op has second operand"), &shapes)?;
-                crate::ops::broadcast_shape(&sa, &sb)?
+                crate::kernels::broadcast_shape(&sa, &sb)?
             }
         };
         shapes.push(s);

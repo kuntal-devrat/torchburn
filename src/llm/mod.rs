@@ -7,6 +7,6 @@
 
 mod decoder;
 
-#[cfg(feature = "burn-wgpu")]
-pub(crate) use decoder::sample_logits;
+/// Sampling entry point, exposed publicly for benches/parity tests.
+pub use decoder::sample_logits;
 pub(crate) use decoder::RustQwenDecoder;

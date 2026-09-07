@@ -612,8 +612,8 @@ pub fn where_op(
     y: &BorrowedTensor,
 ) -> PyResult<OwnedTensor> {
     // condition is f32 (1.0 = true, 0.0 = false) OR bool (0/1 bytes)
-    let out_shape = crate::ops::broadcast_shape(
-        &crate::ops::broadcast_shape(&condition.shape, &x.shape)?,
+    let out_shape = crate::kernels::broadcast_shape(
+        &crate::kernels::broadcast_shape(&condition.shape, &x.shape)?,
         &y.shape,
     )?;
     let mut out = OwnedTensor::new(x.dtype, out_shape.clone());

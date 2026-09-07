@@ -368,7 +368,7 @@ impl OwnedTensor {
     pub fn new(dtype: DType, shape: Vec<i64>) -> Self {
         let bytes = elem_count(&shape) * dtype.elem_size();
         let words = bytes.div_ceil(8);
-        let data = crate::pool::take_buffer(dtype, words);
+        let data = crate::memory_pool::take_buffer(dtype, words);
         OwnedTensor { data, shape, dtype }
     }
 

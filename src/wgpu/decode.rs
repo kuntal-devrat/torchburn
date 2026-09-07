@@ -66,7 +66,10 @@ pub struct WgpuQwenDecoder {
     pub(crate) mlp_act: wgpu::Buffer,
     pub(crate) down_out: wgpu::Buffer,
     pub(crate) logits_buf: wgpu::Buffer,
-    pub(crate) staging_buf: wgpu::Buffer,
+    /// Ring of staging buffers (Phase 2.2): each token reads back through a
+    /// different slot so a map/unmap cycle never stalls the next submission.
+    pub(crate) staging_bufs: Vec<wgpu::Buffer>,
+    pub(crate) staging_ring_idx: usize,
 
     // Uniform buffers
     pub(crate) rope_params_buf: wgpu::Buffer,
@@ -316,12 +319,21 @@ impl WgpuQwenDecoder {
         let mlp_act = create_storage_buffer(&device, intermediate_size * 4, false);
         let down_out = create_storage_buffer(&device, hidden_size * 4, false);
         let logits_buf = create_storage_buffer(&device, vocab_size * 4, false);
-        let staging_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("wgpu_staging_buf"),
-            size: ((vocab_size * 4).max(16)) as u64,
-            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
+        // Phase 2.2: N>=3 pinned staging buffers in a ring. A buffer must be
+        // unmapped before it can be written again; with one buffer that forces
+        // the CPU to finish reading before the next token's submit. With three,
+        // the next submit always targets a fresh slot.
+        const STAGING_RING: usize = 3;
+        let staging_bufs: Vec<wgpu::Buffer> = (0..STAGING_RING)
+            .map(|i| {
+                device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some(&format!("wgpu_staging_buf_{i}")),
+                    size: ((vocab_size * 4).max(16)) as u64,
+                    usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                })
+            })
+            .collect();
 
         // 2. Uniform buffers
         let rmsnorm_params_data: [u32; 4] =
@@ -495,7 +507,8 @@ impl WgpuQwenDecoder {
             mlp_act,
             down_out,
             logits_buf,
-            staging_buf,
+            staging_bufs,
+            staging_ring_idx: 0,
             rope_params_buf,
             attn_params_buf,
             layer_bgs: baked.layer_bgs,
@@ -508,10 +521,13 @@ impl WgpuQwenDecoder {
 
     /// Encodes and submits all layers of the model in one GPU command stream
     /// (1 compute pass, 1 queue submission, 1 readback sync per token).
-    fn record_and_submit_step(&mut self, token_id: usize, offset: usize) -> PyResult<()> {
+    /// Returns the ring slot the logits were copied into.
+    fn record_and_submit_step(&mut self, token_id: usize, offset: usize) -> PyResult<usize> {
         self.write_token_inputs(token_id, offset);
 
         let vocab_size = self.vocab_size;
+        let slot = self.staging_ring_idx % self.staging_bufs.len();
+        self.staging_ring_idx += 1;
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -519,11 +535,11 @@ impl WgpuQwenDecoder {
             });
         self.record_model_dispatches(&mut encoder, true);
 
-        // Copy logits to the staging buffer for CPU readback
+        // Copy logits to the ring slot for CPU readback
         encoder.copy_buffer_to_buffer(
             &self.logits_buf,
             0,
-            &self.staging_buf,
+            &self.staging_bufs[slot],
             0,
             (vocab_size * 4) as u64,
         );
@@ -531,34 +547,70 @@ impl WgpuQwenDecoder {
         // Submit once to Vulkan / WGPU
         self.queue.submit(Some(encoder.finish()));
 
-        Ok(())
+        Ok(slot)
     }
 
-    /// Executes all 24 layers of the transformer model in a single GPU command stream.
-    /// Exactly 1 hardware sync / poll per token.
-    pub fn step(&mut self, token_id: usize, offset: usize) -> PyResult<Vec<f32>> {
-        self.record_and_submit_step(token_id, offset)?;
-
+    /// Phase 2.2: non-blocking readback. Instead of `poll(PollType::Wait)` +
+    /// blocking `rx.recv()` (which parks the OS thread until the whole GPU
+    /// pipeline drains), this issues the map request immediately and then runs
+    /// a poll loop that *yields* to other threads (Rayon, Python) while the
+    /// GPU finishes. Short waits spin; long waits (full-model decode on an
+    /// iGPU) fall back to a 100µs sleep so we never busy-burn a core.
+    fn readback_logits(&self, slot: usize) -> PyResult<Vec<f32>> {
         let vocab_size = self.vocab_size;
-        let buffer_slice = self.staging_buf.slice(..(vocab_size * 4) as u64);
+        let buffer_slice = self.staging_bufs[slot].slice(..(vocab_size * 4) as u64);
         let (tx, rx) = std::sync::mpsc::channel();
         buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
             let _ = tx.send(result);
         });
 
-        let _ = self.device.poll(wgpu::PollType::Wait);
-        rx.recv()
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let mut spins: u32 = 0;
+        let mapped = loop {
+            // Drive wgpu maintenance + fire completed callbacks without blocking.
+            let _ = self.device.poll(wgpu::PollType::Poll);
+            match rx.try_recv() {
+                Ok(result) => break result,
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    if std::time::Instant::now() > deadline {
+                        return Err(pyo3::exceptions::PyTimeoutError::new_err(
+                            "wgpu readback timed out after 10s",
+                        ));
+                    }
+                    spins += 1;
+                    if spins > 2000 {
+                        std::thread::sleep(std::time::Duration::from_micros(100));
+                    } else {
+                        std::thread::yield_now();
+                    }
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                        "wgpu map_async callback channel disconnected",
+                    ));
+                }
+            }
+        };
+        mapped.map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
 
+        let mut logits = vec![0.0f32; vocab_size];
         {
             let view = buffer_slice.get_mapped_range();
             let f32_data: &[f32] =
                 unsafe { std::slice::from_raw_parts(view.as_ptr() as *const f32, vocab_size) };
-            self.logits_cpu.copy_from_slice(f32_data);
+            logits.copy_from_slice(f32_data);
         }
-        self.staging_buf.unmap();
+        self.staging_bufs[slot].unmap();
+        Ok(logits)
+    }
 
+    /// Executes all 24 layers of the transformer model in a single GPU command stream.
+    /// Exactly 1 hardware sync / poll per token.
+    pub fn step(&mut self, token_id: usize, offset: usize) -> PyResult<Vec<f32>> {
+        let slot = self.record_and_submit_step(token_id, offset)?;
+        let mut logits_cpu = std::mem::take(&mut self.logits_cpu);
+        readback_into(self, slot, &mut logits_cpu)?;
+        self.logits_cpu = logits_cpu;
         Ok(self.logits_cpu.clone())
     }
 
@@ -630,29 +682,15 @@ impl WgpuQwenDecoder {
         recent_tokens: Option<Vec<usize>>,
         top_p: f32,
     ) -> PyResult<usize> {
-        self.record_and_submit_step(token_id, offset)?;
-
-        let vocab_size = self.vocab_size;
-        let buffer_slice = self.staging_buf.slice(..(vocab_size * 4) as u64);
-        let (tx, rx) = std::sync::mpsc::channel();
-        buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
-            let _ = tx.send(result);
-        });
-
-        let _ = self.device.poll(wgpu::PollType::Wait);
-        rx.recv()
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+        let slot = self.record_and_submit_step(token_id, offset)?;
+        let logits = self.readback_logits(slot)?;
 
         let token = {
-            let view = buffer_slice.get_mapped_range();
-            let f32_data: &[f32] =
-                unsafe { std::slice::from_raw_parts(view.as_ptr() as *const f32, vocab_size) };
             if let (true, Some(tokens)) = (repetition_penalty > 1.0, recent_tokens) {
-                let mut logits_copy = f32_data.to_vec();
+                let mut logits_copy = logits;
                 let mut seen = std::collections::HashSet::new();
                 for t in tokens {
-                    if t < vocab_size && seen.insert(t) {
+                    if t < self.vocab_size && seen.insert(t) {
                         let l = logits_copy[t];
                         if l > 0.0 {
                             logits_copy[t] = l / repetition_penalty;
@@ -663,11 +701,106 @@ impl WgpuQwenDecoder {
                 }
                 crate::llm::sample_logits(&logits_copy, temperature, top_k, top_p)
             } else {
-                crate::llm::sample_logits(f32_data, temperature, top_k, top_p)
+                crate::llm::sample_logits(&logits, temperature, top_k, top_p)
             }
         };
-        self.staging_buf.unmap();
 
         Ok(token)
     }
+
+    /// Phase 2.3: run the entire decode loop in Rust for the GPU decoder —
+    /// one FFI crossing per generation. Submits, readbacks and sampling all
+    /// stay on the Rust side; Python receives the token ids at the end.
+    #[pyo3(signature = (first_token, seq_len, max_new_tokens, temperature=0.7,
+                        top_k=40, repetition_penalty=1.0, top_p=1.0, eos_token_id=None))]
+    pub fn generate_loop(
+        &mut self,
+        first_token: usize,
+        seq_len: usize,
+        max_new_tokens: usize,
+        temperature: f32,
+        top_k: usize,
+        repetition_penalty: f32,
+        top_p: f32,
+        eos_token_id: Option<usize>,
+    ) -> PyResult<(Vec<usize>, usize)> {
+        let mut tokens: Vec<usize> = Vec::with_capacity(max_new_tokens);
+        let mut logits_scratch: Vec<f32> = vec![0.0; self.vocab_size];
+        let mut next_token = first_token;
+        let mut generated = 0usize;
+        while generated < max_new_tokens {
+            if Some(next_token) == eos_token_id {
+                break;
+            }
+            tokens.push(next_token);
+            generated += 1;
+            let offset = seq_len + generated - 1;
+            let slot = self.record_and_submit_step(next_token, offset)?;
+            readback_into(self, slot, &mut logits_scratch)?;
+            if repetition_penalty > 1.0 {
+                let mut seen = std::collections::HashSet::new();
+                for &t in &tokens {
+                    if t < self.vocab_size && seen.insert(t) {
+                        let l = logits_scratch[t];
+                        if l > 0.0 {
+                            logits_scratch[t] = l / repetition_penalty;
+                        } else {
+                            logits_scratch[t] = l * repetition_penalty;
+                        }
+                    }
+                }
+            }
+            next_token = crate::llm::sample_logits(&logits_scratch, temperature, top_k, top_p);
+        }
+        Ok((tokens, seq_len + generated))
+    }
+}
+
+/// Phase 2.3: read logits from a ring slot directly into `dst`, avoiding the
+/// intermediate `Vec<f32>` allocation + copy per token. Free function (outside
+/// `#[pymethods]`) so the `&mut [f32]` parameter needs no pyo3 conversion.
+fn readback_into(decoder: &WgpuQwenDecoder, slot: usize, dst: &mut [f32]) -> PyResult<()> {
+    let vocab_size = decoder.vocab_size;
+    let buffer_slice = decoder.staging_bufs[slot].slice(..(vocab_size * 4) as u64);
+    let (tx, rx) = std::sync::mpsc::channel();
+    buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
+        let _ = tx.send(result);
+    });
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let mut spins: u32 = 0;
+    let mapped = loop {
+        let _ = decoder.device.poll(wgpu::PollType::Poll);
+        match rx.try_recv() {
+            Ok(result) => break result,
+            Err(std::sync::mpsc::TryRecvError::Empty) => {
+                if std::time::Instant::now() > deadline {
+                    return Err(pyo3::exceptions::PyTimeoutError::new_err(
+                        "wgpu readback timed out after 10s",
+                    ));
+                }
+                spins += 1;
+                if spins > 2000 {
+                    std::thread::sleep(std::time::Duration::from_micros(100));
+                } else {
+                    std::thread::yield_now();
+                }
+            }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                    "wgpu map_async callback channel disconnected",
+                ));
+            }
+        }
+    };
+    mapped.map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+
+    {
+        let view = buffer_slice.get_mapped_range();
+        let f32_data: &[f32] =
+            unsafe { std::slice::from_raw_parts(view.as_ptr() as *const f32, vocab_size) };
+        dst.copy_from_slice(f32_data);
+    }
+    decoder.staging_bufs[slot].unmap();
+    Ok(())
 }

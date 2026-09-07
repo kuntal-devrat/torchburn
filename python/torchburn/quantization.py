@@ -97,6 +97,74 @@ def quantize_weight_int4_grouped(
     return packed, scales_out
 
 
+def quantize_weight_int4_grouped_v2(
+    weight: torch.Tensor,
+    group_size: int = 64,
+    chunk_size: int = 1024,
+) -> torch.Tensor:
+    """Quantize to the Phase 1.1 v2 interleaved layout (`torchburn_int4_g64_v2`).
+
+    Identical quantization math to `quantize_weight_int4_grouped` (per-64-group
+    scale = max_abs/7, values in [-8, 7], low-nibble-first packing), but each
+    64-element group is stored as one 34-byte block:
+
+        [0..32)  packed int4 nibbles  (byte j = element 2j low, 2j+1 high)
+        [32..34)  group scale as IEEE-754 f16, little-endian
+
+    Returns a (N, num_groups * 34) uint8 tensor. The scale rides inside the
+    weight stream so the GEMV reads one sequential 34-byte block per group.
+    """
+    N, K = weight.shape
+    assert K % group_size == 0, f"K={K} must be divisible by group_size={group_size}"
+    num_groups = K // group_size
+
+    packed, scales = quantize_weight_int4_grouped(weight, group_size=group_size, chunk_size=chunk_size)
+    # packed: (N, K/2) uint8 = (N, num_groups*32) — already group-contiguous
+    packed_g = packed.view(N, num_groups, 32)
+    scale_bytes = (
+        scales.half().view(torch.int16).view(torch.uint8).view(N, num_groups, 2)  # (N, G, 2) LE
+    )
+    blocked = torch.cat([packed_g, scale_bytes], dim=2).reshape(N, num_groups * 34).contiguous()
+    return blocked
+
+
+def dequantize_int4_grouped_v2(blocked: torch.Tensor, group_size: int = 64) -> torch.Tensor:
+    """Inverse of `quantize_weight_int4_grouped_v2` — returns the f32 weight matrix (N, K)."""
+    N, cols = blocked.shape
+    num_groups = cols // 34
+    blocks = blocked.view(N, num_groups, 34)
+    packed = blocks[:, :, :32]  # (N, G, 32)
+    lo = (packed & 0x0F).to(torch.int8)
+    hi = ((packed >> 4) & 0x0F).to(torch.int8)
+    q = torch.cat([lo.reshape(N, num_groups, -1, 1), hi.reshape(N, num_groups, -1, 1)], dim=3)
+    q = q.reshape(N, num_groups, 64).to(torch.int8) - 8
+    # NB: the 34-byte blocks make the scale slice non-contiguous — a dtype
+    # view would silently reinterpret wrong bytes, so materialize first.
+    scales = blocks[:, :, 32:].contiguous().view(torch.int16).view(torch.float16).float()
+    scales = scales.reshape(N, num_groups)
+    return (q.float() * scales.unsqueeze(-1)).reshape(N, num_groups * 64)
+
+
+def w4a32_grouped_linear_v2(
+    x: torch.Tensor,
+    blocked: torch.Tensor,
+    bias: Optional[torch.Tensor] = None,
+    group_size: int = 64,
+) -> torch.Tensor:
+    """Native v2 W4A32 linear: x (..., K) @ dequant(blocked)^T + bias, using the
+    interleaved 34-byte-block layout (embedded f16 scales)."""
+    x_2d = x.reshape(-1, x.shape[-1]).contiguous().float()
+    blocked_c = blocked.contiguous()
+    bias_f32 = bias.contiguous().float() if bias is not None else None
+
+    x_cap = torch.to_dlpack(x_2d)
+    w_cap = torch.to_dlpack(blocked_c)
+    b_cap = torch.to_dlpack(bias_f32) if bias_f32 is not None else None
+
+    out_cap = _native.w4a32_grouped_linear_v2(x_cap, w_cap, b_cap, group_size)
+    out = torch.from_dlpack(out_cap)
+    return out.reshape(*x.shape[:-1], -1)
+
 
 def w8a32_linear(
     x: torch.Tensor,
