@@ -266,6 +266,56 @@ class UniversalEngine:
 
         decode_times: List[float] = []
 
+        # 4a. Phase 2.3 fast path: run the whole decode loop in Rust — one FFI
+        # crossing per generation instead of one per token. Produces identical
+        # token ids to the per-token path (same sampler, same penalty window).
+        native_decoder = self._rust_decoder or self._wgpu_decoder
+        if native_decoder is not None:
+            t0 = time.perf_counter()
+            eos_id_opt = eos_id if eos_id is not None else None
+            try:
+                token_ids, _final_pos = native_decoder.generate_loop(
+                    next_token,
+                    seq_len,
+                    cfg.max_new_tokens,
+                    cfg.temperature,
+                    cfg.top_k,
+                    cfg.repetition_penalty,
+                    cfg.top_p,
+                    eos_id_opt,
+                )
+            except AttributeError:
+                token_ids = None  # older native build without generate_loop
+            if token_ids is not None:
+                rust_elapsed = time.perf_counter() - t0
+                tokens_generated = len(token_ids)
+                decode_tok_sec = tokens_generated / rust_elapsed if rust_elapsed > 0 else 0.0
+                avg_ms = rust_elapsed / tokens_generated * 1000 if tokens_generated else 0.0
+                # Emit one "token" packet per id so streaming consumers (and
+                # generate(), which concatenates token texts) see the same
+                # event shape as the per-token path.
+                for i, tid in enumerate(token_ids, start=1):
+                    all_token_ids.append(tid)
+                    piece = self.tokenizer.decode([tid], skip_special_tokens=False)
+                    yield {
+                        "type": "token",
+                        "token_id": tid,
+                        "text": piece,
+                        "step_time_ms": avg_ms,
+                        "tokens_generated": i,
+                    }
+                yield {
+                    "type": "summary",
+                    "tokens_generated": tokens_generated,
+                    "total_decode_time_ms": rust_elapsed * 1000,
+                    "avg_ms_per_token": avg_ms,
+                    "decode_tok_sec": decode_tok_sec,
+                    "is_compiled": self._is_compiled,
+                    "kv_caches": kv_caches,
+                    "all_token_ids": all_token_ids,
+                }
+                return
+
         while tokens_generated < cfg.max_new_tokens:
             if next_token == eos_id:
                 break

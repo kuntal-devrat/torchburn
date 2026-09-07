@@ -200,7 +200,8 @@ pytest tests/ --cov=torchburn --cov-report=html
 ### Test Categories
 
 - `test_*.py` - Unit tests for specific features
-- `test_phase*.py` - Integration tests for development phases
+- `test_core_ops.py`, `test_conv_pool_upsample.py`, `test_special_ops.py`, `test_advanced_ops.py` - Op-coverage suites
+- `test_models.py`, `test_concurrency.py`, `test_gpu_ops.py` - Models, concurrency, GPU tests
 - `test_burn_engine.py` - Burn engine specific tests
 - `test_training.py` - End-to-end training tests
 

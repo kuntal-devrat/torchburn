@@ -9,11 +9,72 @@ use crate::dlpack::{contiguous_strides, unsupported, BorrowedTensor, DType, Owne
 use pyo3::prelude::*;
 use wide::f32x8;
 
-#[cfg(not(feature = "openblas"))]
+#[cfg(feature = "matrixmultiply")]
 use matrixmultiply::{dgemm, sgemm};
 
-#[cfg(feature = "openblas")]
-use matrixmultiply::{dgemm as dgemm_mm, sgemm as sgemm_mm};
+/// Portable scalar fallback when neither `matrixmultiply` nor `openblas` is
+/// enabled (e.g. `--no-default-features` builds, benches without the Python
+/// extension ABI). Same signature/semantics as `matrixmultiply::{sgemm,dgemm}`.
+#[cfg(not(any(feature = "matrixmultiply", feature = "openblas")))]
+unsafe fn sgemm(
+    m: usize,
+    k: usize,
+    n: usize,
+    alpha: f32,
+    a: *const f32,
+    rsa: isize,
+    csa: isize,
+    b: *const f32,
+    rsb: isize,
+    csb: isize,
+    beta: f32,
+    c: *mut f32,
+    rsc: isize,
+    csc: isize,
+) {
+    for i in 0..m {
+        for j in 0..n {
+            let mut sum = 0.0f32;
+            for p in 0..k {
+                sum += *a.offset(i as isize * rsa + p as isize * csa)
+                    * *b.offset(p as isize * rsb + j as isize * csb);
+            }
+            let dst = c.offset(i as isize * rsc + j as isize * csc);
+            *dst = alpha * sum + beta * *dst;
+        }
+    }
+}
+
+/// f64 twin of the portable [`sgemm`] fallback.
+#[cfg(not(any(feature = "matrixmultiply", feature = "openblas")))]
+unsafe fn dgemm(
+    m: usize,
+    k: usize,
+    n: usize,
+    alpha: f64,
+    a: *const f64,
+    rsa: isize,
+    csa: isize,
+    b: *const f64,
+    rsb: isize,
+    csb: isize,
+    beta: f64,
+    c: *mut f64,
+    rsc: isize,
+    csc: isize,
+) {
+    for i in 0..m {
+        for j in 0..n {
+            let mut sum = 0.0f64;
+            for p in 0..k {
+                sum += *a.offset(i as isize * rsa + p as isize * csa)
+                    * *b.offset(p as isize * rsb + j as isize * csb);
+            }
+            let dst = c.offset(i as isize * rsc + j as isize * csc);
+            *dst = alpha * sum + beta * *dst;
+        }
+    }
+}
 
 fn use_openblas() -> bool {
     #[cfg(not(feature = "openblas"))]
@@ -331,7 +392,7 @@ fn gemm_f32_trans_b_into(
 }
 
 #[cfg(not(feature = "openblas"))]
-fn gemm_f32_trans_b_into_accum(
+pub fn gemm_f32_trans_b_into_accum(
     a: *const f32,
     m: usize,
     k: usize,
@@ -410,7 +471,7 @@ fn gemm_f64_trans_b_into(
 }
 
 #[cfg(not(feature = "openblas"))]
-fn gemm_f64_trans_b_into_accum(
+pub fn gemm_f64_trans_b_into_accum(
     a: *const f64,
     m: usize,
     k: usize,
