@@ -20,20 +20,23 @@ use std::sync::OnceLock;
 /// Coarse execution tier, ordered from slowest to fastest.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum CpuTier {
-    /// Baseline ISA (SSE2 on x86-64, NEON on ARM) or unknown.
+    /// Baseline ISA (SSE2 on x86-64, baseline on ARM) or unknown.
     Scalar = 0,
+    /// ARM NEON with FP16 support.
+    Neon = 1,
     /// AVX2 + FMA.
-    Avx2 = 1,
+    Avx2 = 2,
     /// AVX-512F + AVX-512BW (no VNNI).
-    Avx512 = 2,
+    Avx512 = 3,
     /// AVX-512F + AVX-512BW + AVX-512 VNNI (vpdpbusd).
-    Avx512Vnni = 3,
+    Avx512Vnni = 4,
 }
 
 impl CpuTier {
     pub const fn name(self) -> &'static str {
         match self {
             CpuTier::Scalar => "scalar",
+            CpuTier::Neon => "neon",
             CpuTier::Avx2 => "avx2",
             CpuTier::Avx512 => "avx512",
             CpuTier::Avx512Vnni => "avx512_vnni",
@@ -41,8 +44,8 @@ impl CpuTier {
     }
 }
 
-/// Feature flags resolved once. Extra fields (neon, neon_fp16) exist so ARM
-/// builds have a real detection path instead of silently reporting scalar.
+/// Feature flags resolved once. Extra fields for ARM so builds have real
+/// detection paths instead of silently reporting scalar.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct CpuFeatures {
     pub avx2: bool,
@@ -52,6 +55,12 @@ pub struct CpuFeatures {
     pub avx512vnni: bool,
     pub neon: bool,
     pub neon_fp16: bool,
+    /// ARM I8MM: int8 matrix multiply extensions (M1 Pro+, Cortex-A510+).
+    pub neon_i8mm: bool,
+    /// ARM SVE / SVE2: scalable vector extensions.
+    pub neon_sve: bool,
+    /// ARM SVE2: integer dot product and widening operations.
+    pub neon_sve2: bool,
 }
 
 impl CpuFeatures {
@@ -62,6 +71,8 @@ impl CpuFeatures {
             CpuTier::Avx512
         } else if self.avx2 && self.fma {
             CpuTier::Avx2
+        } else if self.neon {
+            CpuTier::Neon
         } else {
             CpuTier::Scalar
         }
@@ -72,44 +83,32 @@ impl CpuFeatures {
     }
 }
 
-/// Per-tier instances used by the `dispatch-test` override (and by any code
-/// that needs a concrete feature set for a specific tier).
-pub(crate) const TIER_FEATURES: [CpuFeatures; 4] = [
+/// Per-tier instances used by the `dispatch-test` override.
+pub(crate) const TIER_FEATURES: [CpuFeatures; 5] = [
     CpuFeatures {
-        avx2: false,
-        fma: false,
-        avx512f: false,
-        avx512bw: false,
-        avx512vnni: false,
-        neon: false,
-        neon_fp16: false,
+        avx2: false, fma: false, avx512f: false, avx512bw: false,
+        avx512vnni: false, neon: false, neon_fp16: false,
+        neon_i8mm: false, neon_sve: false, neon_sve2: false,
     },
     CpuFeatures {
-        avx2: true,
-        fma: true,
-        avx512f: false,
-        avx512bw: false,
-        avx512vnni: false,
-        neon: false,
-        neon_fp16: false,
+        avx2: false, fma: false, avx512f: false, avx512bw: false,
+        avx512vnni: false, neon: true, neon_fp16: true,
+        neon_i8mm: false, neon_sve: false, neon_sve2: false,
     },
     CpuFeatures {
-        avx2: true,
-        fma: true,
-        avx512f: true,
-        avx512bw: true,
-        avx512vnni: false,
-        neon: false,
-        neon_fp16: false,
+        avx2: true, fma: true, avx512f: false, avx512bw: false,
+        avx512vnni: false, neon: false, neon_fp16: false,
+        neon_i8mm: false, neon_sve: false, neon_sve2: false,
     },
     CpuFeatures {
-        avx2: true,
-        fma: true,
-        avx512f: true,
-        avx512bw: true,
-        avx512vnni: true,
-        neon: false,
-        neon_fp16: false,
+        avx2: true, fma: true, avx512f: true, avx512bw: true,
+        avx512vnni: false, neon: false, neon_fp16: false,
+        neon_i8mm: false, neon_sve: false, neon_sve2: false,
+    },
+    CpuFeatures {
+        avx2: true, fma: true, avx512f: true, avx512bw: true,
+        avx512vnni: true, neon: false, neon_fp16: false,
+        neon_i8mm: false, neon_sve: false, neon_sve2: false,
     },
 ];
 
@@ -124,6 +123,9 @@ fn detect() -> CpuFeatures {
             avx512vnni: std::arch::is_x86_feature_detected!("avx512vnni"),
             neon: false,
             neon_fp16: false,
+            neon_i8mm: false,
+            neon_sve: false,
+            neon_sve2: false,
         }
     }
     #[cfg(target_arch = "aarch64")]
@@ -136,6 +138,9 @@ fn detect() -> CpuFeatures {
             avx512vnni: false,
             neon: std::arch::is_aarch64_feature_detected!("neon"),
             neon_fp16: std::arch::is_aarch64_feature_detected!("fp16"),
+            neon_i8mm: std::arch::is_aarch64_feature_detected!("i8mm"),
+            neon_sve: std::arch::is_aarch64_feature_detected!("sve"),
+            neon_sve2: std::arch::is_aarch64_feature_detected!("sve2"),
         }
     }
     #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
@@ -146,19 +151,16 @@ fn detect() -> CpuFeatures {
 
 static FEATURES: OnceLock<CpuFeatures> = OnceLock::new();
 
-/// Test-only override: 0 = auto-detect, 1..=4 = CpuTier + 1.
+/// Test-only override: 0 = auto-detect, 1..=5 = CpuTier + 1.
 #[cfg(feature = "dispatch-test")]
 static OVERRIDE: AtomicU8 = AtomicU8::new(0);
 
 /// Cached CPU feature set, resolved once per process.
-///
-/// With `dispatch-test` a forced tier takes precedence over detection so
-/// tests can exercise every code path on a single machine.
 pub fn cpu_features() -> &'static CpuFeatures {
     #[cfg(feature = "dispatch-test")]
     {
         let o = OVERRIDE.load(Ordering::Relaxed);
-        if o >= 1 && o <= 4 {
+        if o >= 1 && o <= 5 {
             return &TIER_FEATURES[(o - 1) as usize];
         }
     }
@@ -183,18 +185,21 @@ mod tests {
 
     #[test]
     fn tiers_are_ordered() {
-        assert!(CpuTier::Scalar < CpuTier::Avx2);
+        assert!(CpuTier::Scalar < CpuTier::Neon);
+        assert!(CpuTier::Neon < CpuTier::Avx2);
         assert!(CpuTier::Avx2 < CpuTier::Avx512);
         assert!(CpuTier::Avx512 < CpuTier::Avx512Vnni);
         assert_eq!(CpuTier::Avx512Vnni.name(), "avx512_vnni");
+        assert_eq!(CpuTier::Neon.name(), "neon");
     }
 
     #[test]
     fn tier_table_has_correct_flags() {
         assert_eq!(TIER_FEATURES[0].tier(), CpuTier::Scalar);
-        assert_eq!(TIER_FEATURES[1].tier(), CpuTier::Avx2);
-        assert_eq!(TIER_FEATURES[2].tier(), CpuTier::Avx512);
-        assert_eq!(TIER_FEATURES[3].tier(), CpuTier::Avx512Vnni);
+        assert_eq!(TIER_FEATURES[1].tier(), CpuTier::Neon);
+        assert_eq!(TIER_FEATURES[2].tier(), CpuTier::Avx2);
+        assert_eq!(TIER_FEATURES[3].tier(), CpuTier::Avx512);
+        assert_eq!(TIER_FEATURES[4].tier(), CpuTier::Avx512Vnni);
     }
 
     #[test]
@@ -204,7 +209,6 @@ mod tests {
         assert!(std::ptr::eq(a, b), "cpu_features must be resolved once");
         #[cfg(target_arch = "x86_64")]
         {
-            // sanity: on x86-64 the reported tier must match the flags
             let f = cpu_features();
             let t = f.tier();
             match t {
@@ -212,6 +216,7 @@ mod tests {
                 CpuTier::Avx2 => assert!(f.avx2 && f.fma),
                 CpuTier::Avx512 => assert!(f.avx512f && f.avx512bw),
                 CpuTier::Avx512Vnni => assert!(f.avx512vnni),
+                _ => {}
             }
         }
     }
@@ -221,6 +226,7 @@ mod tests {
     fn forced_tiers_override_detection() {
         for tier in [
             CpuTier::Scalar,
+            CpuTier::Neon,
             CpuTier::Avx2,
             CpuTier::Avx512,
             CpuTier::Avx512Vnni,
@@ -230,7 +236,6 @@ mod tests {
             assert_eq!(cpu_features().tier_name(), tier.name());
         }
         clear_override();
-        // After clearing, detection returns a *real* feature set again.
         let _ = cpu_features().tier();
     }
 }

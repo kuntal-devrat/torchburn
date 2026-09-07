@@ -400,11 +400,196 @@ pub unsafe fn dot_f32_i8(x: *const f32, w: *const i8, len: usize) -> f32 {
             return dot_f32_i8_avx2(x, w, len);
         }
     }
+    #[cfg(target_arch = "aarch64")]
+    {
+        if crate::dispatch::cpu_features().neon {
+            return dot_f32_i8_neon(x, w, len);
+        }
+    }
     let mut total = 0.0f32;
     for i in 0..len {
         total += *x.add(i) * (*w.add(i) as f32);
     }
     total
+}
+
+// ---------------------------------------------------------------------------
+// ARM NEON SIMD Kernels
+// ---------------------------------------------------------------------------
+
+/// ARM NEON dot product: f32 activation × int8 weight → f32.
+/// Processes 16 elements per iteration using `vmull_s8` + `vmlal_s16`.
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn dot_f32_i8_neon(x: *const f32, w: *const i8, len: usize) -> f32 {
+    use std::arch::aarch64::*;
+    let mut sum_f32x4 = vdupq_n_f32(0.0);
+    let mut offset = 0;
+    let chunks16 = len / 16;
+
+    for _ in 0..chunks16 {
+        // Load 16 i8 weights
+        let w_i8 = vld1q_s8(w.add(offset));
+        // Load 16 f32 activations (4x vld1q_f32)
+        let x0 = vld1q_f32(x.add(offset));
+        let x1 = vld1q_f32(x.add(offset + 4));
+        let x2 = vld1q_f32(x.add(offset + 8));
+        let x3 = vld1q_f32(x.add(offset + 12));
+
+        // Unpack i8 → i16 pairs
+        let w_lo_i16 = vmovl_s8(vget_low_s8(w_i8));
+        let w_hi_i16 = vmovl_s8(vget_high_s8(w_i8));
+
+        // Widen i16 → i32, then FMA with f32 (via conversion)
+        // Process low 8 elements
+        let w_i32_0 = vmovl_s16(vget_low_s16(w_lo_i16));
+        let w_i32_1 = vmovl_s16(vget_high_s16(w_lo_i16));
+        let w_i32_2 = vmovl_s16(vget_low_s16(w_hi_i16));
+        let w_i32_3 = vmovl_s16(vget_high_s16(w_hi_i16));
+
+        // Multiply-accumulate: f32 × i32 → f32 via vcvtq_f32_s32
+        sum_f32x4 = vmlaq_f32(sum_f32x4, x0, vcvtq_f32_s32(w_i32_0));
+        sum_f32x4 = vmlaq_f32(sum_f32x4, x1, vcvtq_f32_s32(w_i32_1));
+        sum_f32x4 = vmlaq_f32(sum_f32x4, x2, vcvtq_f32_s32(w_i32_2));
+        sum_f32x4 = vmlaq_f32(sum_f32x4, x3, vcvtq_f32_s32(w_i32_3));
+
+        offset += 16;
+    }
+
+    // Horizontal sum
+    let mut total = vaddvq_f32(sum_f32x4);
+
+    while offset < len {
+        total += *x.add(offset) * (*w.add(offset) as f32);
+        offset += 1;
+    }
+    total
+}
+
+/// ARM NEON dot product: f32 activation × packed int4 weight → f32.
+/// Processes 16 elements (8 bytes) per iteration.
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn dot_f32_u4_neon(x: *const f32, w_packed: *const u8, len: usize) -> f32 {
+    use std::arch::aarch64::*;
+    let mask_low = vdupq_n_u8(0x0F);
+    let sub8 = vdupq_n_s8(8);
+    let zero_f32 = vdupq_n_f32(0.0);
+    let mut sum_f32x4 = zero_f32;
+    let mut offset = 0;
+    let chunks16 = len / 16;
+
+    for _ in 0..chunks16 {
+        let byte_offset = offset / 2;
+        // Load 8 packed bytes (16 int4 values)
+        let raw_u8 = vld1_u8(w_packed.add(byte_offset));
+        let raw_i8 = vreinterpret_s8_u8(raw_u8);
+
+        // Extract low and high nibbles
+        let lo = vand_u8(vreinterpret_u8_s8(raw_i8), mask_low);
+        let hi = vshrq_n_u8(vreinterpret_u8_s8(raw_i8), 4);
+
+        // Unpack to i8: interleaving lo,hi gives the correct order
+        let inter_lo = vreinterpret_s8_u8(vzip1_u8(lo, hi));
+        let inter_hi = vreinterpret_s8_u8(vzip2_u8(lo, hi));
+
+        // Subtract 8 to get signed int4
+        let s_lo = vsub_s8(vget_low_s8(vcombine_s8(inter_lo, inter_lo)), sub8);
+        let s_hi = vsub_s8(vget_low_s8(vcombine_s8(inter_hi, inter_hi)), sub8);
+
+        // Widen i8 → i16 → i32 → f32
+        let w_i32_0 = vmovl_s16(vmovl_s8(s_lo));
+        let w_i32_1 = vmovl_s16(vget_high_s16(vmovl_s8(s_lo)));
+        let w_i32_2 = vmovl_s16(vmovl_s8(s_hi));
+        let w_i32_3 = vmovl_s16(vget_high_s16(vmovl_s8(s_hi)));
+
+        let x0 = vld1q_f32(x.add(offset));
+        let x1 = vld1q_f32(x.add(offset + 4));
+        let x2 = vld1q_f32(x.add(offset + 8));
+        let x3 = vld1q_f32(x.add(offset + 12));
+
+        sum_f32x4 = vmlaq_f32(sum_f32x4, x0, vcvtq_f32_s32(w_i32_0));
+        sum_f32x4 = vmlaq_f32(sum_f32x4, x1, vcvtq_f32_s32(w_i32_1));
+        sum_f32x4 = vmlaq_f32(sum_f32x4, x2, vcvtq_f32_s32(w_i32_2));
+        sum_f32x4 = vmlaq_f32(sum_f32x4, x3, vcvtq_f32_s32(w_i32_3));
+
+        offset += 16;
+    }
+
+    let mut total = vaddvq_f32(sum_f32x4);
+
+    while offset < len {
+        let byte = *w_packed.add(offset / 2);
+        let q = if (offset % 2) == 0 {
+            ((byte & 0x0F) as i8) - 8
+        } else {
+            (((byte >> 4) & 0x0F) as i8) - 8
+        };
+        total += *x.add(offset) * (q as f32);
+        offset += 1;
+    }
+    total
+}
+
+/// ARM NEON: 64-element grouped INT4 dot product with group-wise scale.
+/// Equivalent to `dot_f32_u4_group64_avx512` / `dot_f32_u4_group64_avx2`.
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn dot_f32_u4_group64_neon(x: *const f32, w_packed: *const u8) -> f32 {
+    use std::arch::aarch64::*;
+    let mask_low = vdupq_n_u8(0x0F);
+    let sub8 = vdupq_n_s8(8);
+    let mut sum = vdupq_n_f32(0.0);
+
+    // Process 64 elements = 32 bytes = 2 chunks of 16
+    for chunk in 0..2 {
+        let w_off = chunk * 16;
+        let x_off = chunk * 16;
+
+        let raw_u8 = vld1_u8(w_packed.add(w_off));
+        let raw_i8 = vreinterpret_s8_u8(raw_u8);
+        let lo = vand_u8(vreinterpret_u8_s8(raw_i8), mask_low);
+        let hi = vshrq_n_u8(vreinterpret_u8_s8(raw_i8), 4);
+        let inter_lo = vreinterpret_s8_u8(vzip1_u8(lo, hi));
+        let inter_hi = vreinterpret_s8_u8(vzip2_u8(lo, hi));
+        let s_lo = vsub_s8(vget_low_s8(vcombine_s8(inter_lo, inter_lo)), sub8);
+        let s_hi = vsub_s8(vget_low_s8(vcombine_s8(inter_hi, inter_hi)), sub8);
+
+        let w_i32_0 = vmovl_s16(vmovl_s8(s_lo));
+        let w_i32_1 = vmovl_s16(vget_high_s16(vmovl_s8(s_lo)));
+        let w_i32_2 = vmovl_s16(vmovl_s8(s_hi));
+        let w_i32_3 = vmovl_s16(vget_high_s16(vmovl_s8(s_hi)));
+
+        let x0 = vld1q_f32(x.add(x_off));
+        let x1 = vld1q_f32(x.add(x_off + 4));
+        let x2 = vld1q_f32(x.add(x_off + 8));
+        let x3 = vld1q_f32(x.add(x_off + 12));
+
+        sum = vmlaq_f32(sum, x0, vcvtq_f32_s32(w_i32_0));
+        sum = vmlaq_f32(sum, x1, vcvtq_f32_s32(w_i32_1));
+        sum = vmlaq_f32(sum, x2, vcvtq_f32_s32(w_i32_2));
+        sum = vmlaq_f32(sum, x3, vcvtq_f32_s32(w_i32_3));
+    }
+
+    vaddvq_f32(sum)
+}
+
+/// ARM NEON: full row GEMV with group-wise scales (group_size=64).
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn gemv_row_w4a32_group64_neon(
+    x: *const f32,
+    w_row: *const u8,
+    s_row: *const f32,
+    num_groups: usize,
+) -> f32 {
+    let bytes_per_group = 64 / 2; // 32 bytes per group
+    let mut row_sum = 0.0f32;
+    for g in 0..num_groups {
+        let dot = dot_f32_u4_group64_neon(x.add(g * 64), w_row.add(g * bytes_per_group));
+        row_sum += dot * *s_row.add(g);
+    }
+    row_sum
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -477,6 +662,12 @@ unsafe fn dot_f32_u4(x: *const f32, w_packed: *const u8, len: usize) -> f32 {
     {
         if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
             return dot_f32_u4_avx2(x, w_packed, len);
+        }
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        if crate::dispatch::cpu_features().neon {
+            return dot_f32_u4_neon(x, w_packed, len);
         }
     }
     let mut total = 0.0f32;
@@ -1339,6 +1530,7 @@ unsafe fn dot_f32_u4_group64_fast(
     w_packed: *const u8,
     has_avx512: bool,
     has_avx2: bool,
+    _has_neon: bool,
 ) -> f32 {
     #[cfg(target_arch = "x86_64")]
     {
@@ -1347,6 +1539,12 @@ unsafe fn dot_f32_u4_group64_fast(
         }
         if has_avx2 {
             return dot_f32_u4_group64_avx2(x, w_packed);
+        }
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        if has_neon {
+            return dot_f32_u4_group64_neon(x, w_packed);
         }
     }
     dot_f32_u4_group_scalar(x, w_packed, 64)
@@ -1358,6 +1556,7 @@ unsafe fn dot_f32_u4_group32_fast(
     w_packed: *const u8,
     has_avx512: bool,
     has_avx2: bool,
+    _has_neon: bool,
 ) -> f32 {
     #[cfg(target_arch = "x86_64")]
     {
@@ -1366,6 +1565,13 @@ unsafe fn dot_f32_u4_group32_fast(
         }
         if has_avx2 {
             return dot_f32_u4_group32_avx2(x, w_packed);
+        }
+    }
+    // NEON path uses 64-element kernel for 32-element groups (processes 32 + tail)
+    #[cfg(target_arch = "aarch64")]
+    {
+        if has_neon {
+            return dot_f32_u4_group64_neon(x, w_packed);
         }
     }
     dot_f32_u4_group_scalar(x, w_packed, 32)
@@ -1450,6 +1656,8 @@ pub unsafe fn gemv_w4a32_grouped(
     #[cfg(not(target_arch = "x86_64"))]
     let has_avx2 = false;
 
+    let has_neon = feats.neon;
+
     let (x_u8_opt, s_x) = if has_vnni && group_size == 64 {
         let (u, s) = unsafe { quantize_activation_to_u8(x, k) };
         (Some(u), s)
@@ -1530,6 +1738,17 @@ pub unsafe fn gemv_w4a32_grouped(
                     }
                 }
                 #[cfg(not(target_arch = "x86_64"))]
+                {
+                    0.0f32
+                }
+            } else if has_neon && group_size == 64 {
+                #[cfg(target_arch = "aarch64")]
+                {
+                    unsafe {
+                        gemv_row_w4a32_group64_neon(x_p, w_row, s_row, num_groups)
+                    }
+                }
+                #[cfg(not(target_arch = "aarch64"))]
                 {
                     0.0f32
                 }

@@ -6,6 +6,7 @@
 pub mod autograd_ffi;
 pub mod debug_ffi;
 pub mod engine_ffi;
+pub mod gguf_ffi;
 pub mod gpu_ffi;
 pub mod quantization_ffi;
 

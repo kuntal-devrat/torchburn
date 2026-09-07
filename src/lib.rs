@@ -99,6 +99,17 @@ mod burn_engine;
 #[cfg(feature = "burn-wgpu")]
 pub mod wgpu;
 
+/// CUDA backend for NVIDIA GPUs (feature-gated behind `cuda`).
+#[cfg(feature = "cuda")]
+pub mod cuda;
+
+/// Metal native backend for Apple Silicon (feature-gated behind `metal-native`).
+#[cfg(all(target_os = "macos", feature = "metal-native"))]
+pub mod metal;
+
+/// GGUF file parser for llama.cpp quantized models.
+pub mod gguf;
+
 // ---------------------------------------------------------------------------
 // PyO3 module registration
 // ---------------------------------------------------------------------------
@@ -196,6 +207,14 @@ fn _torchburn(m: &Bound<'_, PyModule>) -> PyResult<()> {
         ffi::quantization_ffi::wgpu_w4a32_grouped_linear,
         m
     )?)?;
+
+    // GGUF FFI
+    m.add_function(wrap_pyfunction!(ffi::gguf_ffi::gguf_info, m)?)?;
+    m.add_function(wrap_pyfunction!(ffi::gguf_ffi::gguf_tensors, m)?)?;
+    m.add_function(wrap_pyfunction!(ffi::gguf_ffi::gguf_metadata, m)?)?;
+
+    // CUDA/Metal backend info (available via gpu_ffi already, but add convenience)
+    m.add_function(wrap_pyfunction!(ffi::gpu_ffi::gpu_backend, m)?)?;
 
     Ok(())
 }

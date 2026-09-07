@@ -1,6 +1,6 @@
 [package]
 name = "torchburn"
-version = "0.5.5"
+version = "0.6.0"
 edition = "2021"
 description = "Hardware-agnostic PyTorch compilation backend: PyO3 + DLPack zero-copy FFI bridge to a Rust execution engine with BLAKE3 structural graph caching"
 license = "Apache-2.0"
@@ -20,11 +20,10 @@ rayon = "1.10"
 rand = "0.8"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-# Portable SIMD (SSE2/AVX2 on x86-64, NEON on ARM, wasm) for the attention
-# kernels — zero-copy lane math for the QK^T dots and softmax exp.
 wide = "0.7"
 libm = "0.2"
 smallvec = "1"
+half = "2"
 
 # Optional Burn execution engine (Phase 2/3). Compile with:
 #   maturin develop --features burn          # ndarray CPU backend
@@ -35,25 +34,24 @@ matrixmultiply = { version = "0.3.11", optional = true }
 wgpu = { version = "25.0", optional = true }
 openblas-src = { version = "0.10", optional = true, features = ["cblas", "static"] }
 
+# CUDA backend (NVIDIA GPUs via cudarc + cuBLAS/cuBLASLt).
+cudarc = { version = "0.13", optional = true, features = ["std", "f16", "cuda-version-from-build-system"] }
+
+# Metal native backend (Apple Silicon unified memory, bypasses WGPU).
+[target.'cfg(target_os = "macos")'.dependencies]
+metal = { version = "0.29", optional = true }
+
 [features]
 default = ["extension-module", "matrixmultiply", "burn-wgpu"]
-# Enable the pyo3 `extension-module` link mode (no libpython dependency).
-# Off by default when building benches/tests so criterion and parity test
-# binaries can link against the crate without the Python extension ABI.
 extension-module = ["pyo3/extension-module"]
-# Tests-only: force each CPU feature tier (see src/dispatch.rs) and assert
-# output parity + monotonic performance across tiers.
 dispatch-test = []
 burn = ["dep:burn"]
-# wgpu backend on top of the burn engine.  metal/vulkan are the graphics
-# APIs wgpu targets (AutoGraphicsApi picks Metal on macOS, Vulkan elsewhere;
-# DX12 is available through the same wgpu stack on Windows).
 burn-wgpu = ["dep:burn", "burn/wgpu", "dep:wgpu"]
-# Link OpenBLAS for MKL-level matmul performance.
-# Downloads and builds from source via the openblas-src crate.
-# Use: maturin develop --features openblas  (or set TORCHBURN_MATMUL=openblas)
-# Skylake kernels give 3-4× over matrixmultiply sgemm for 1024³.
 openblas = ["dep:openblas-src"]
+# CUDA backend for NVIDIA GPUs. Requires CUDA toolkit installed.
+cuda = ["dep:cudarc"]
+# Metal native backend for Apple Silicon (bypasses WGPU for unified memory).
+metal-native = ["dep:metal"]
 
 [profile.release]
 opt-level = 3
