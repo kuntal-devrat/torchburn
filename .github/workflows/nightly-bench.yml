@@ -1,0 +1,136 @@
+name: nightly-bench
+
+# Phase 0.2: nightly benchmarks on real hardware. Posts results to the
+# `perf-history` branch and opens an issue if any tracked tok/s regressed
+# >10% vs the previous baseline.
+#
+# Requires a self-hosted runner labeled `bench` with the model available at
+# TORCHBURN_TEST_MODEL (or pass `model` via workflow_dispatch). On the first
+# run the workflow records a baseline and exits 0 (no prior result to compare).
+
+on:
+  schedule:
+    - cron: "17 4 * * *" # 04:17 UTC nightly
+  workflow_dispatch:
+    inputs:
+      model:
+        description: "Path to an int4-quantized model (default: $TORCHBURN_TEST_MODEL)"
+        required: false
+        default: ""
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  bench:
+    runs-on: [self-hosted, bench]
+    permissions:
+      contents: write
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # need perf-history branch + history
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Build native wheel (keep .cargo/config.toml)
+        run: maturin build -r -o dist-native
+
+      - name: Install wheel + deps
+        run: |
+          pip install dist-native/*.whl --force-reinstall
+          pip install torch --quiet
+
+      - name: Run Python benchmark suite
+        id: bench
+        env:
+          TORCHBURN_TEST_MODEL: ${{ inputs.model }}
+        run: |
+          MODEL="${TORCHBURN_TEST_MODEL:-models/qwen_0_5b}"
+          if [ ! -d "$MODEL" ]; then
+            echo "model_missing=1" >> "$GITHUB_OUTPUT"
+            echo "::warning::model dir not found: $MODEL — skipping bench"
+            exit 0
+          fi
+          python benchmarks/bench_llm.py \
+            --model "$MODEL" \
+            --device auto \
+            --tokens 64 \
+            --warmup 10 \
+            --runs 3 \
+            --out-dir benchmarks/results
+
+      - name: Fetch previous baseline from perf-history
+        id: baseline
+        if: steps.bench.outputs.model_missing != '1'
+        run: |
+          git fetch origin perf-history || true
+          NEWEST=$(ls -t benchmarks/results/*.json | head -1)
+          echo "newest=$NEWEST" >> "$GITHUB_OUTPUT"
+          if git cat-file -e origin/perf-history:benchmarks/results 2>/dev/null; then
+            BASELINE=$(git ls-tree -r --name-only origin/perf-history -- benchmarks/results | grep '\.json$' | tail -1)
+            if [ -n "$BASELINE" ]; then
+              git show "origin/perf-history:$BASELINE" > /tmp/baseline.json
+              echo "baseline=/tmp/baseline.json" >> "$GITHUB_OUTPUT"
+              echo "baseline_remote=$BASELINE" >> "$GITHUB_OUTPUT"
+            fi
+          fi
+
+      - name: Compare against baseline
+        id: compare
+        if: steps.bench.outputs.model_missing != '1' && steps.baseline.outputs.baseline != ''
+        run: |
+          python - "${{ steps.baseline.outputs.baseline }}" "${{ steps.baseline.outputs.newest }}" > /tmp/compare.txt <<'EOF'
+          import json, sys
+          base = json.load(open(sys.argv[1]))
+          new = json.load(open(sys.argv[2]))
+          keys = [("cpu", "cpu_tok_per_s"), ("igpu", "igpu_tok_per_s")]
+          regressed = False
+          for backend, metric in keys:
+              b = base.get(backend, {}).get(metric)
+              c = new.get(backend, {}).get(metric)
+              if b and c:
+                  delta = (c - b) / b
+                  print(f"{metric}: {b:.2f} -> {c:.2f} ({delta:+.1%})")
+                  if delta < -0.10:
+                      regressed = True
+          if regressed:
+              print("REGRESSION_DETECTED")
+              sys.exit(3)
+          print("OK")
+          EOF
+          EXIT=$?
+          cat /tmp/compare.txt
+          echo "compare_exit=$EXIT" >> "$GITHUB_OUTPUT"
+
+      - name: Push results to perf-history
+        if: steps.bench.outputs.model_missing != '1'
+        run: |
+          git config user.name "torchburn-bench-bot"
+          git config user.email "bench@torchburn.local"
+          git checkout -B perf-history origin/perf-history 2>/dev/null || git checkout --orphan perf-history
+          # keep the branch to just results (orphan checkout stages the whole tree)
+          git rm -rf --cached . -q || true
+          git add benchmarks/results/*.json
+          git -c user.name="torchburn-bench-bot" -c user.email="bench@torchburn.local" \
+            commit -m "bench: $(date -u +%Y-%m-%dT%H:%M:%SZ)" --allow-empty || true
+          git push origin perf-history
+
+      - name: Open regression issue
+        if: steps.compare.outputs.compare_exit == '3'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const body = fs.readFileSync('/tmp/compare.txt', 'utf8');
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `⚠️ Nightly benchmark regression (>10%) — ${new Date().toISOString()}`,
+              body: `Nightly benchmark detected a >10% regression:\n\n\`\`\`\n${body}\n\`\`\`\n\nResults on the \`perf-history\` branch.`,
+            });
