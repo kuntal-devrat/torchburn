@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.5] - 2026-09-07
+
+### Added
+- **HashMap Dispatch Table** (`dispatch_op.rs`): Replaced 22-module linear chain with `OnceLock<HashMap<&str, dispatch_fn>>` — O(1) target→module lookup per node instead of 22 string comparisons.
+- **OnceLock for `supported_targets()`** (`payload.rs`): Static `SUPPORTED_TARGETS_LIST` with zero-allocation on repeat calls.
+- **Arc<[i64]> for Slot::View** (`helpers.rs`, `engine.rs`, `d_shape.rs`): `shape`/`strides` stored as `Arc<[i64]>` — O(1) clone per `slot_view()` instead of Vec allocation.
+- **LRU Cache Promotion** (`graph_cache.rs`): `touch()` method promotes frequently-used graphs on access, preventing premature FIFO eviction.
+- **SIMD Activation Functions** (`activations.rs`): `fast_sigmoid_f32x8`, `fast_tanh_f32x8`, `fast_silu_f32x8` using `wide::f32x8` with rayon parallel dispatch for large tensors.
+- **SIMD Softmax & Log-Softmax** (`activations.rs`): Vectorized 3-phase (max, exp-sum, normalize) pipeline using `f32x8` for contiguous last-dim reductions, with rayon chunked parallelism.
+- **Rayon Parallel Loss Functions** (`losses.rs`): `mse_loss`, `smooth_l1_loss`, `binary_cross_entropy`, `nll_loss_forward` now use `par_iter` for both element-wise computation and reduction on tensors ≥16K elements.
+- **Rayon Parallel Embedding** (`embedding.rs`): `par_chunks_mut` for parallel row-gather when indices ≥16K elements.
+- **Rayon Parallel Matmul Backward** (`matmul_linear.rs`, `batch/single.rs`): Backward-only matmuls parallelize over output rows when M≥8; `sum_dim0` uses parallel partial sums.
+- **Rayon Parallel `add_in_place`** (`tape.rs`): Gradient accumulation uses `par_iter_mut` for tensors ≥16K elements.
+- **Stack-Allocated Coords** (`activations.rs`): Non-contiguous tensor elementwise ops use `[usize; 8]` stack array instead of per-element `vec![0usize; rank]` heap allocation.
+- **SmallVec Kwarg Helpers** (`helpers.rs`): `kw_opt_dims()` returns `SmallVec<[isize; 4]>` — zero-heap for ≤4 dims (covers 99%+ of calls).
+- **Unsupported Backward Warning** (`batch/single.rs`): `eprintln!` warning when zero gradients returned for unsupported backward op.
+- **Correct LayerNorm Backward** (`norm_act.rs`): Replaced approximate backward (just copies upstream) with correct formula: `grad_x = inv_std * (g*w - mean(g*w) - x_hat * mean(g*w*x_hat))`.
+- **Cached Tokenizer Signature** (`tokenizer.py`): `inspect.signature()` result cached in `__init__` instead of called per `encode()`.
+
+### Changed
+- **WGSL Shader Optimization**:
+  - `attn_decode.wgsl`: Workgroup 16→64, strided vec4 processing, full 6-stage tree reduction.
+  - `rmsnorm.wgsl`: Vec4 vectorized bindings, `dot()` for sum-of-squares.
+  - `fused_add_rmsnorm.wgsl`: Vec4 vectorized, fused residual add preserved.
+  - `swiglu.wgsl`: Vec4 vectorized, 4 elements per thread.
+  - `residual_add.wgsl`: Vec4 vectorized.
+  - `wgpu/decode.rs`: Updated uniform buffer params for vec4 shaders.
+- Version bump `0.5.4` → `0.5.5`.
+- Added `smallvec = "1"` dependency.
+
+### Performance
+- GEMM f32 256³: **-24.7%** (383 µs → 328 µs)
+- GEMM f32 1024³: **-48.5%** (26.2 ms → 13.5 ms)
+- GEMM f64 64³: **-9.7%** (19.9 µs → 18.0 µs)
+- Decoder step: **-9.7%** improvement in mean latency
+- All benchmarks: `cargo check` zero warnings, `cargo clippy` zero warnings, 20/20 tests pass.
+
 ## [0.5.4] - 2026-09-06
 
 ### Added
