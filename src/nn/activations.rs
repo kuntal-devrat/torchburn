@@ -53,7 +53,8 @@ fn apply_elementwise_f32<F: Fn(f32) -> f32 + Sync + Send>(
         }
     } else {
         let rank = a.shape.len();
-        let mut coords = vec![0usize; rank];
+        const MAX_RANK: usize = 8;
+        let mut coords = [0usize; MAX_RANK];
         for i in 0..n {
             let mut rem = i;
             for d in (0..rank).rev() {
@@ -61,7 +62,7 @@ fn apply_elementwise_f32<F: Fn(f32) -> f32 + Sync + Send>(
                 rem /= a.shape[d].max(1) as usize;
             }
             let mut ai = 0usize;
-            for d in 0..rank {
+            for d in 0..rank.min(MAX_RANK) {
                 if a.shape[d] > 1 {
                     ai += coords[d] * a.strides[d] as usize;
                 }
@@ -101,7 +102,8 @@ fn apply_elementwise_f64<F: Fn(f64) -> f64 + Sync + Send>(
         }
     } else {
         let rank = a.shape.len();
-        let mut coords = vec![0usize; rank];
+        const MAX_RANK: usize = 8;
+        let mut coords = [0usize; MAX_RANK];
         for i in 0..n {
             let mut rem = i;
             for d in (0..rank).rev() {
@@ -109,7 +111,7 @@ fn apply_elementwise_f64<F: Fn(f64) -> f64 + Sync + Send>(
                 rem /= a.shape[d].max(1) as usize;
             }
             let mut ai = 0usize;
-            for d in 0..rank {
+            for d in 0..rank.min(MAX_RANK) {
                 if a.shape[d] > 1 {
                     ai += coords[d] * a.strides[d] as usize;
                 }
@@ -273,6 +275,48 @@ fn apply_elementwise_param_f64(
 // ---------------------------------------------------------------------------
 
 pub fn sigmoid(a: &BorrowedTensor) -> PyResult<OwnedTensor> {
+    // SIMD fast path for contiguous f32
+    if a.dtype == DType::F32 && a.strides == contiguous_strides(&a.shape) {
+        let a_data = unsafe { typed_slice::<f32>(a) };
+        let mut out = OwnedTensor::new(a.dtype, a.shape.clone());
+        let out_data = unsafe { typed_mut_slice::<f32>(&mut out) };
+        let n = out_data.len();
+        if n >= PAR_CHUNK {
+            use rayon::prelude::*;
+            out_data
+                .par_chunks_mut(PAR_CHUNK)
+                .enumerate()
+                .for_each(|(ci, chunk)| {
+                    let base = ci * PAR_CHUNK;
+                    let a_slice = &a_data[base..base + chunk.len()];
+                    let n_simd = chunk.len() / 8;
+                    for j in 0..n_simd {
+                        let offset = j * 8;
+                        let v = f32x8::from(
+                            *<&[f32; 8]>::try_from(&a_slice[offset..offset + 8]).unwrap(),
+                        );
+                        let res = fast_sigmoid_f32x8(v);
+                        chunk[offset..offset + 8].copy_from_slice(&res.to_array());
+                    }
+                    for j in (n_simd * 8)..chunk.len() {
+                        chunk[j] = 1.0 / (1.0 + (-a_slice[j]).exp());
+                    }
+                });
+        } else {
+            let n_simd = n / 8;
+            for j in 0..n_simd {
+                let offset = j * 8;
+                let v =
+                    f32x8::from(*<&[f32; 8]>::try_from(&a_data[offset..offset + 8]).unwrap());
+                let res = fast_sigmoid_f32x8(v);
+                out_data[offset..offset + 8].copy_from_slice(&res.to_array());
+            }
+            for j in (n_simd * 8)..n {
+                out_data[j] = 1.0 / (1.0 + (-a_data[j]).exp());
+            }
+        }
+        return Ok(out);
+    }
     apply_elementwise(
         a,
         |x| 1.0 / (1.0 + (-x).exp()),
@@ -281,6 +325,48 @@ pub fn sigmoid(a: &BorrowedTensor) -> PyResult<OwnedTensor> {
 }
 
 pub fn tanh_act(a: &BorrowedTensor) -> PyResult<OwnedTensor> {
+    // SIMD fast path for contiguous f32
+    if a.dtype == DType::F32 && a.strides == contiguous_strides(&a.shape) {
+        let a_data = unsafe { typed_slice::<f32>(a) };
+        let mut out = OwnedTensor::new(a.dtype, a.shape.clone());
+        let out_data = unsafe { typed_mut_slice::<f32>(&mut out) };
+        let n = out_data.len();
+        if n >= PAR_CHUNK {
+            use rayon::prelude::*;
+            out_data
+                .par_chunks_mut(PAR_CHUNK)
+                .enumerate()
+                .for_each(|(ci, chunk)| {
+                    let base = ci * PAR_CHUNK;
+                    let a_slice = &a_data[base..base + chunk.len()];
+                    let n_simd = chunk.len() / 8;
+                    for j in 0..n_simd {
+                        let offset = j * 8;
+                        let v = f32x8::from(
+                            *<&[f32; 8]>::try_from(&a_slice[offset..offset + 8]).unwrap(),
+                        );
+                        let res = fast_tanh_f32x8(v);
+                        chunk[offset..offset + 8].copy_from_slice(&res.to_array());
+                    }
+                    for j in (n_simd * 8)..chunk.len() {
+                        chunk[j] = a_slice[j].tanh();
+                    }
+                });
+        } else {
+            let n_simd = n / 8;
+            for j in 0..n_simd {
+                let offset = j * 8;
+                let v =
+                    f32x8::from(*<&[f32; 8]>::try_from(&a_data[offset..offset + 8]).unwrap());
+                let res = fast_tanh_f32x8(v);
+                out_data[offset..offset + 8].copy_from_slice(&res.to_array());
+            }
+            for j in (n_simd * 8)..n {
+                out_data[j] = a_data[j].tanh();
+            }
+        }
+        return Ok(out);
+    }
     apply_elementwise(a, |x| x.tanh(), |x| x.tanh())
 }
 
@@ -344,6 +430,30 @@ pub fn exact_gelu_f32x8(x: f32x8) -> f32x8 {
     let half = f32x8::splat(0.5);
     let one = f32x8::splat(1.0);
     half * x * (one + fast_erf_f32x8(x * inv_sqrt2))
+}
+
+/// SIMD sigmoid: 1 / (1 + exp(-x))
+#[inline(always)]
+pub fn fast_sigmoid_f32x8(x: f32x8) -> f32x8 {
+    let one = f32x8::splat(1.0);
+    one / (one + fast_exp_f32x8(-x))
+}
+
+/// SIMD tanh via exp: (e^2x - 1) / (e^2x + 1)
+#[inline(always)]
+pub fn fast_tanh_f32x8(x: f32x8) -> f32x8 {
+    let two_x = x + x;
+    let exp2x = fast_exp_f32x8(two_x);
+    let one = f32x8::splat(1.0);
+    let neg_one = f32x8::splat(-1.0);
+    (exp2x + neg_one) / (exp2x + one)
+}
+
+/// SIMD SiLU / Swish: x * sigmoid(x) = x / (1 + exp(-x))
+#[inline(always)]
+pub fn fast_silu_f32x8(x: f32x8) -> f32x8 {
+    let one = f32x8::splat(1.0);
+    x / (one + fast_exp_f32x8(-x))
 }
 
 #[inline(always)]
@@ -410,7 +520,49 @@ pub fn gelu(a: &BorrowedTensor, approximate: &str) -> PyResult<OwnedTensor> {
 }
 
 pub fn silu(a: &BorrowedTensor) -> PyResult<OwnedTensor> {
-    // SiLU / Swish: x * sigmoid(x)
+    // SiLU / Swish: x * sigmoid(x) = x / (1 + exp(-x))
+    // SIMD fast path for contiguous f32
+    if a.dtype == DType::F32 && a.strides == contiguous_strides(&a.shape) {
+        let a_data = unsafe { typed_slice::<f32>(a) };
+        let mut out = OwnedTensor::new(a.dtype, a.shape.clone());
+        let out_data = unsafe { typed_mut_slice::<f32>(&mut out) };
+        let n = out_data.len();
+        if n >= PAR_CHUNK {
+            use rayon::prelude::*;
+            out_data
+                .par_chunks_mut(PAR_CHUNK)
+                .enumerate()
+                .for_each(|(ci, chunk)| {
+                    let base = ci * PAR_CHUNK;
+                    let a_slice = &a_data[base..base + chunk.len()];
+                    let n_simd = chunk.len() / 8;
+                    for j in 0..n_simd {
+                        let offset = j * 8;
+                        let v = f32x8::from(
+                            *<&[f32; 8]>::try_from(&a_slice[offset..offset + 8]).unwrap(),
+                        );
+                        let res = fast_silu_f32x8(v);
+                        chunk[offset..offset + 8].copy_from_slice(&res.to_array());
+                    }
+                    for j in (n_simd * 8)..chunk.len() {
+                        chunk[j] = a_slice[j] / (1.0 + (-a_slice[j]).exp());
+                    }
+                });
+        } else {
+            let n_simd = n / 8;
+            for j in 0..n_simd {
+                let offset = j * 8;
+                let v =
+                    f32x8::from(*<&[f32; 8]>::try_from(&a_data[offset..offset + 8]).unwrap());
+                let res = fast_silu_f32x8(v);
+                out_data[offset..offset + 8].copy_from_slice(&res.to_array());
+            }
+            for j in (n_simd * 8)..n {
+                out_data[j] = a_data[j] / (1.0 + (-a_data[j]).exp());
+            }
+        }
+        return Ok(out);
+    }
     apply_elementwise(a, |x| x / (1.0 + (-x).exp()), |x| x / (1.0 + (-x).exp()))
 }
 
@@ -528,33 +680,97 @@ fn softmax_f32(a: &BorrowedTensor, dim: isize, out: &mut OwnedTensor) {
     }
 
     use rayon::prelude::*;
-    out_data
-        .par_chunks_mut(chunk_size)
-        .enumerate()
-        .for_each(|(outer, out_chunk)| {
-            let a_chunk = &a_data[outer * chunk_size..(outer + 1) * chunk_size];
-            for inner in 0..inner_size {
+    if inner_size == 1 && dim_size >= 8 {
+        // SIMD fast path: contiguous reduction along last dim (common transformer case)
+        out_data
+            .par_chunks_mut(chunk_size)
+            .enumerate()
+            .for_each(|(outer, out_chunk)| {
+                let a_chunk = &a_data[outer * chunk_size..(outer + 1) * chunk_size];
+                // Phase 1: find max using SIMD
                 let mut max_val = f32::NEG_INFINITY;
-                for i in 0..dim_size {
-                    let idx = i * inner_size + inner;
-                    if a_chunk[idx] > max_val {
-                        max_val = a_chunk[idx];
+                let mut i = 0;
+                while i + 8 <= dim_size {
+                    let v = f32x8::from(&a_chunk[i..i + 8]);
+                    let lane_maxs: [f32; 8] = v.into();
+                    for &x in &lane_maxs {
+                        if x > max_val {
+                            max_val = x;
+                        }
+                    }
+                    i += 8;
+                }
+                while i < dim_size {
+                    if a_chunk[i] > max_val {
+                        max_val = a_chunk[i];
+                    }
+                    i += 1;
+                }
+                // Phase 2: exp(x - max) + sum using SIMD
+                let mut sum = 0.0f32;
+                i = 0;
+                while i + 8 <= dim_size {
+                    let v = f32x8::from(&a_chunk[i..i + 8]);
+                    let shifted = v - f32x8::splat(max_val);
+                    let exp_vals = fast_exp_f32x8(shifted);
+                    let exp_arr: [f32; 8] = exp_vals.into();
+                    for (j, &x) in exp_arr.iter().enumerate() {
+                        out_chunk[i + j] = x;
+                    }
+                    sum += exp_arr.iter().sum::<f32>();
+                    i += 8;
+                }
+                while i < dim_size {
+                    let val = (a_chunk[i] - max_val).exp();
+                    out_chunk[i] = val;
+                    sum += val;
+                    i += 1;
+                }
+                // Phase 3: normalize using SIMD
+                let inv_sum = 1.0 / sum;
+                i = 0;
+                while i + 8 <= dim_size {
+                    let v = f32x8::from(&out_chunk[i..i + 8]);
+                    let normalized = v * f32x8::splat(inv_sum);
+                    let arr: [f32; 8] = normalized.into();
+                    out_chunk[i..i + 8].copy_from_slice(&arr);
+                    i += 8;
+                }
+                while i < dim_size {
+                    out_chunk[i] *= inv_sum;
+                    i += 1;
+                }
+            });
+    } else {
+        // Scalar path for non-contiguous inner stride
+        out_data
+            .par_chunks_mut(chunk_size)
+            .enumerate()
+            .for_each(|(outer, out_chunk)| {
+                let a_chunk = &a_data[outer * chunk_size..(outer + 1) * chunk_size];
+                for inner in 0..inner_size {
+                    let mut max_val = f32::NEG_INFINITY;
+                    for i in 0..dim_size {
+                        let idx = i * inner_size + inner;
+                        if a_chunk[idx] > max_val {
+                            max_val = a_chunk[idx];
+                        }
+                    }
+                    let mut sum = 0.0f32;
+                    for i in 0..dim_size {
+                        let idx = i * inner_size + inner;
+                        let val = (a_chunk[idx] - max_val).exp();
+                        out_chunk[idx] = val;
+                        sum += val;
+                    }
+                    let inv_sum = 1.0 / sum;
+                    for i in 0..dim_size {
+                        let idx = i * inner_size + inner;
+                        out_chunk[idx] *= inv_sum;
                     }
                 }
-                let mut sum = 0.0f32;
-                for i in 0..dim_size {
-                    let idx = i * inner_size + inner;
-                    let val = (a_chunk[idx] - max_val).exp();
-                    out_chunk[idx] = val;
-                    sum += val;
-                }
-                let inv_sum = 1.0 / sum;
-                for i in 0..dim_size {
-                    let idx = i * inner_size + inner;
-                    out_chunk[idx] *= inv_sum;
-                }
-            }
-        });
+            });
+    }
 }
 
 fn softmax_f64(a: &BorrowedTensor, dim: isize, out: &mut OwnedTensor) {
@@ -661,28 +877,96 @@ pub fn log_softmax(a: &BorrowedTensor, dim: isize) -> PyResult<OwnedTensor> {
             for i in (d + 1)..rank {
                 inner_stride *= shape[i];
             }
-            let outer_size = outer_stride as usize;
+            let _outer_size = outer_stride as usize;
             let inner_size = inner_stride as usize;
-            for outer in 0..outer_size {
-                for inner in 0..inner_size {
-                    let mut max_val = f32::NEG_INFINITY;
-                    for i in 0..dim_size {
-                        let idx = outer * (dim_size * inner_size) + i * inner_size + inner;
-                        if a_data[idx] > max_val {
-                            max_val = a_data[idx];
+            let chunk_size = dim_size * inner_size;
+            if chunk_size == 0 || out_data.is_empty() {
+                return Ok(out);
+            }
+            use rayon::prelude::*;
+            if inner_size == 1 && dim_size >= 8 {
+                // SIMD fast path
+                out_data
+                    .par_chunks_mut(chunk_size)
+                    .enumerate()
+                    .for_each(|(outer, out_chunk)| {
+                        let a_chunk = &a_data[outer * chunk_size..(outer + 1) * chunk_size];
+                        // Max via SIMD
+                        let mut max_val = f32::NEG_INFINITY;
+                        let mut i = 0;
+                        while i + 8 <= dim_size {
+                            let v = f32x8::from(&a_chunk[i..i + 8]);
+                            let lane_maxs: [f32; 8] = v.into();
+                            for &x in &lane_maxs {
+                                if x > max_val {
+                                    max_val = x;
+                                }
+                            }
+                            i += 8;
                         }
-                    }
-                    let mut sum = 0.0f32;
-                    for i in 0..dim_size {
-                        let idx = outer * (dim_size * inner_size) + i * inner_size + inner;
-                        sum += (a_data[idx] - max_val).exp();
-                    }
-                    let log_sum = max_val + sum.ln();
-                    for i in 0..dim_size {
-                        let idx = outer * (dim_size * inner_size) + i * inner_size + inner;
-                        out_data[idx] = a_data[idx] - log_sum;
-                    }
-                }
+                        while i < dim_size {
+                            if a_chunk[i] > max_val {
+                                max_val = a_chunk[i];
+                            }
+                            i += 1;
+                        }
+                        // exp sum via SIMD
+                        let mut sum = 0.0f32;
+                        i = 0;
+                        while i + 8 <= dim_size {
+                            let v = f32x8::from(&a_chunk[i..i + 8]);
+                            let shifted = v - f32x8::splat(max_val);
+                            let exp_vals = fast_exp_f32x8(shifted);
+                            let exp_arr: [f32; 8] = exp_vals.into();
+                            sum += exp_arr.iter().sum::<f32>();
+                            i += 8;
+                        }
+                        while i < dim_size {
+                            sum += (a_chunk[i] - max_val).exp();
+                            i += 1;
+                        }
+                        let log_sum = max_val + sum.ln();
+                        // Subtract log_sum via SIMD
+                        i = 0;
+                        while i + 8 <= dim_size {
+                            let v = f32x8::from(&a_chunk[i..i + 8]);
+                            let result = v - f32x8::splat(log_sum);
+                            let arr: [f32; 8] = result.into();
+                            out_chunk[i..i + 8].copy_from_slice(&arr);
+                            i += 8;
+                        }
+                        while i < dim_size {
+                            out_chunk[i] = a_chunk[i] - log_sum;
+                            i += 1;
+                        }
+                    });
+            } else {
+                // Scalar path
+                out_data
+                    .par_chunks_mut(chunk_size)
+                    .enumerate()
+                    .for_each(|(outer, out_chunk)| {
+                        let a_chunk = &a_data[outer * chunk_size..(outer + 1) * chunk_size];
+                        for inner in 0..inner_size {
+                            let mut max_val = f32::NEG_INFINITY;
+                            for i in 0..dim_size {
+                                let idx = i * inner_size + inner;
+                                if a_chunk[idx] > max_val {
+                                    max_val = a_chunk[idx];
+                                }
+                            }
+                            let mut sum = 0.0f32;
+                            for i in 0..dim_size {
+                                let idx = i * inner_size + inner;
+                                sum += (a_chunk[idx] - max_val).exp();
+                            }
+                            let log_sum = max_val + sum.ln();
+                            for i in 0..dim_size {
+                                let idx = i * inner_size + inner;
+                                out_chunk[idx] = a_chunk[idx] - log_sum;
+                            }
+                        }
+                    });
             }
         }
         DType::F64 => {

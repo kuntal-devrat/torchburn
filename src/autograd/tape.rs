@@ -150,24 +150,6 @@ unsafe fn owned_from_borrowed(b: &BorrowedTensor) -> OwnedTensor {
 /// Leaf tensors (parameters) accumulate into this map; intermediate
 /// gradients are consumed and freed after each op.
 pub fn backward(grad_output: &OwnedTensor, leaf_grads: &mut HashMap<usize, OwnedTensor>) {
-    let entries: Vec<(Box<dyn BackwardOp>, TapeEntryMeta)> = TAPE.with(|t| {
-        let tape = t.borrow();
-        TAPE_META.with(|m| {
-            let meta = m.borrow();
-            let result: Vec<(Box<dyn BackwardOp>, TapeEntryMeta)> = Vec::new();
-            // We can't move out of the RefCell while it's borrowed, so we
-            // take both at once.
-            for (op, me) in tape.iter().zip(meta.iter()) {
-                // We can't actually move from the RefCell; instead we'll
-                // iterate in reverse below using indices.
-                let _ = (op, me);
-            }
-            result
-        })
-    });
-    // Suppress unused warning - we use a different approach below.
-    let _ = entries;
-
     // Map to accumulate intermediate gradients by tensor ID across branches
     let mut node_grads: HashMap<usize, OwnedTensor> = HashMap::new();
     let mut current_upstream: Option<OwnedTensor> = Some(grad_output.clone());
@@ -255,16 +237,36 @@ fn add_in_place(a: &mut OwnedTensor, b: &OwnedTensor) {
             let a_data =
                 unsafe { std::slice::from_raw_parts_mut(a.data.as_mut_ptr() as *mut f32, n) };
             let b_data = unsafe { std::slice::from_raw_parts(b.data.as_ptr() as *const f32, n) };
-            for (x, y) in a_data.iter_mut().zip(b_data.iter()) {
-                *x += y;
+            if n >= 16 * 1024 {
+                use rayon::prelude::*;
+                a_data
+                    .par_iter_mut()
+                    .zip(b_data.par_iter())
+                    .for_each(|(x, y)| {
+                        *x += y;
+                    });
+            } else {
+                for (x, y) in a_data.iter_mut().zip(b_data.iter()) {
+                    *x += y;
+                }
             }
         }
         DType::F64 => {
             let a_data =
                 unsafe { std::slice::from_raw_parts_mut(a.data.as_mut_ptr() as *mut f64, n) };
             let b_data = unsafe { std::slice::from_raw_parts(b.data.as_ptr() as *const f64, n) };
-            for (x, y) in a_data.iter_mut().zip(b_data.iter()) {
-                *x += y;
+            if n >= 16 * 1024 {
+                use rayon::prelude::*;
+                a_data
+                    .par_iter_mut()
+                    .zip(b_data.par_iter())
+                    .for_each(|(x, y)| {
+                        *x += y;
+                    });
+            } else {
+                for (x, y) in a_data.iter_mut().zip(b_data.iter()) {
+                    *x += y;
+                }
             }
         }
         _ => {}

@@ -7,8 +7,10 @@
 //! Requires indices in range `[0, num_embeddings)`; out-of-range indices
 //! raise `TB_UNSUPPORTED` (delegates to eager, mirroring torch's error).
 
-use crate::dlpack::{unsupported, BorrowedTensor, DType, OwnedTensor};
+use crate::dlpack::{elem_count, unsupported, BorrowedTensor, DType, OwnedTensor};
 use pyo3::prelude::*;
+use rayon::prelude::*;
+
 
 /// Read a tensor's elements as a typed slice.
 unsafe fn typed_slice<T>(t: &BorrowedTensor) -> &[T] {
@@ -41,6 +43,9 @@ pub fn embedding(weight: &BorrowedTensor, indices: &BorrowedTensor) -> PyResult<
     out_shape.push(d as i64);
     let mut out = OwnedTensor::new(weight.dtype, out_shape);
 
+    let num_indices = elem_count(&indices.shape);
+    let use_par = num_indices >= 16 * 1024;
+
     // Flattened index tensor: gather rows densely.
     match weight.dtype {
         DType::F32 => {
@@ -49,26 +54,77 @@ pub fn embedding(weight: &BorrowedTensor, indices: &BorrowedTensor) -> PyResult<
             match indices.dtype {
                 DType::I64 => {
                     let idx = unsafe { typed_slice::<i64>(indices) };
-                    for (i, &ix) in idx.iter().enumerate() {
-                        let row = ix as usize;
-                        if row >= num_embeddings {
-                            return Err(unsupported(&format!(
-                                "embedding index {ix} out of range [0, {num_embeddings})"
-                            )));
+                    if use_par {
+                        for &ix in idx.iter() {
+                            let row = ix as usize;
+                            if row >= num_embeddings {
+                                return Err(unsupported(&format!(
+                                    "embedding index {ix} out of range [0, {num_embeddings})"
+                                )));
+                            }
                         }
-                        out_data[i * d..(i + 1) * d].copy_from_slice(&w[row * d..(row + 1) * d]);
+                        // Process output in chunks — each chunk writes to disjoint [i*d .. (i+1)*d]
+                        let chunk_size = 4096; // elements per chunk
+                        out_data
+                            .par_chunks_mut(chunk_size)
+                            .enumerate()
+                            .for_each(|(chunk_idx, chunk)| {
+                                let offset = chunk_idx * chunk_size;
+                                for (j, out_elem) in chunk.iter_mut().enumerate() {
+                                    let flat_idx = offset + j;
+                                    let row_idx = flat_idx / d;
+                                    let col_idx = flat_idx % d;
+                                    *out_elem = w[idx[row_idx] as usize * d + col_idx];
+                                }
+                            });
+                    } else {
+                        for (i, &ix) in idx.iter().enumerate() {
+                            let row = ix as usize;
+                            if row >= num_embeddings {
+                                return Err(unsupported(&format!(
+                                    "embedding index {ix} out of range [0, {num_embeddings})"
+                                )));
+                            }
+                            out_data[i * d..(i + 1) * d]
+                                .copy_from_slice(&w[row * d..(row + 1) * d]);
+                        }
                     }
                 }
                 DType::I32 => {
                     let idx = unsafe { typed_slice::<i32>(indices) };
-                    for (i, &ix) in idx.iter().enumerate() {
-                        let row = ix as usize;
-                        if row >= num_embeddings {
-                            return Err(unsupported(&format!(
-                                "embedding index {ix} out of range [0, {num_embeddings})"
-                            )));
+                    if use_par {
+                        for &ix in idx.iter() {
+                            let row = ix as usize;
+                            if row >= num_embeddings {
+                                return Err(unsupported(&format!(
+                                    "embedding index {ix} out of range [0, {num_embeddings})"
+                                )));
+                            }
                         }
-                        out_data[i * d..(i + 1) * d].copy_from_slice(&w[row * d..(row + 1) * d]);
+                        let chunk_size = 4096;
+                        out_data
+                            .par_chunks_mut(chunk_size)
+                            .enumerate()
+                            .for_each(|(chunk_idx, chunk)| {
+                                let offset = chunk_idx * chunk_size;
+                                for (j, out_elem) in chunk.iter_mut().enumerate() {
+                                    let flat_idx = offset + j;
+                                    let row_idx = flat_idx / d;
+                                    let col_idx = flat_idx % d;
+                                    *out_elem = w[idx[row_idx] as usize * d + col_idx];
+                                }
+                            });
+                    } else {
+                        for (i, &ix) in idx.iter().enumerate() {
+                            let row = ix as usize;
+                            if row >= num_embeddings {
+                                return Err(unsupported(&format!(
+                                    "embedding index {ix} out of range [0, {num_embeddings})"
+                                )));
+                            }
+                            out_data[i * d..(i + 1) * d]
+                                .copy_from_slice(&w[row * d..(row + 1) * d]);
+                        }
                     }
                 }
                 _ => unreachable!("index dtype checked above"),
@@ -80,26 +136,76 @@ pub fn embedding(weight: &BorrowedTensor, indices: &BorrowedTensor) -> PyResult<
             match indices.dtype {
                 DType::I64 => {
                     let idx = unsafe { typed_slice::<i64>(indices) };
-                    for (i, &ix) in idx.iter().enumerate() {
-                        let row = ix as usize;
-                        if row >= num_embeddings {
-                            return Err(unsupported(&format!(
-                                "embedding index {ix} out of range [0, {num_embeddings})"
-                            )));
+                    if use_par {
+                        for &ix in idx.iter() {
+                            let row = ix as usize;
+                            if row >= num_embeddings {
+                                return Err(unsupported(&format!(
+                                    "embedding index {ix} out of range [0, {num_embeddings})"
+                                )));
+                            }
                         }
-                        out_data[i * d..(i + 1) * d].copy_from_slice(&w[row * d..(row + 1) * d]);
+                        let chunk_size = 4096;
+                        out_data
+                            .par_chunks_mut(chunk_size)
+                            .enumerate()
+                            .for_each(|(chunk_idx, chunk)| {
+                                let offset = chunk_idx * chunk_size;
+                                for (j, out_elem) in chunk.iter_mut().enumerate() {
+                                    let flat_idx = offset + j;
+                                    let row_idx = flat_idx / d;
+                                    let col_idx = flat_idx % d;
+                                    *out_elem = w[idx[row_idx] as usize * d + col_idx];
+                                }
+                            });
+                    } else {
+                        for (i, &ix) in idx.iter().enumerate() {
+                            let row = ix as usize;
+                            if row >= num_embeddings {
+                                return Err(unsupported(&format!(
+                                    "embedding index {ix} out of range [0, {num_embeddings})"
+                                )));
+                            }
+                            out_data[i * d..(i + 1) * d]
+                                .copy_from_slice(&w[row * d..(row + 1) * d]);
+                        }
                     }
                 }
                 DType::I32 => {
                     let idx = unsafe { typed_slice::<i32>(indices) };
-                    for (i, &ix) in idx.iter().enumerate() {
-                        let row = ix as usize;
-                        if row >= num_embeddings {
-                            return Err(unsupported(&format!(
-                                "embedding index {ix} out of range [0, {num_embeddings})"
-                            )));
+                    if use_par {
+                        for &ix in idx.iter() {
+                            let row = ix as usize;
+                            if row >= num_embeddings {
+                                return Err(unsupported(&format!(
+                                    "embedding index {ix} out of range [0, {num_embeddings})"
+                                )));
+                            }
                         }
-                        out_data[i * d..(i + 1) * d].copy_from_slice(&w[row * d..(row + 1) * d]);
+                        let chunk_size = 4096;
+                        out_data
+                            .par_chunks_mut(chunk_size)
+                            .enumerate()
+                            .for_each(|(chunk_idx, chunk)| {
+                                let offset = chunk_idx * chunk_size;
+                                for (j, out_elem) in chunk.iter_mut().enumerate() {
+                                    let flat_idx = offset + j;
+                                    let row_idx = flat_idx / d;
+                                    let col_idx = flat_idx % d;
+                                    *out_elem = w[idx[row_idx] as usize * d + col_idx];
+                                }
+                            });
+                    } else {
+                        for (i, &ix) in idx.iter().enumerate() {
+                            let row = ix as usize;
+                            if row >= num_embeddings {
+                                return Err(unsupported(&format!(
+                                    "embedding index {ix} out of range [0, {num_embeddings})"
+                                )));
+                            }
+                            out_data[i * d..(i + 1) * d]
+                                .copy_from_slice(&w[row * d..(row + 1) * d]);
+                        }
                     }
                 }
                 _ => unreachable!("index dtype checked above"),

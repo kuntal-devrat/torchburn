@@ -2,6 +2,7 @@
 //! Inherits autograd root via super-super; pure move.
 
 use super::super::*;
+use rayon::prelude::*;
 
 /// Convenience: execute backward for a single op given saved inputs.
 /// This is used by the compiled callable's backward method.
@@ -214,24 +215,32 @@ pub fn backward_single(
                                     k * n,
                                 )
                             };
-                            for i in 0.._m {
-                                for j in 0..k {
-                                    let mut s = 0.0f32;
-                                    for kk in 0..n {
-                                        s += g[i * n + kk] * bd[j * n + kk];
+                            // grad_a = g @ b^T  (parallelize over rows of g)
+                            ga.par_chunks_mut(k)
+                                .enumerate()
+                                .for_each(|(i, ga_row)| {
+                                    let g_row = &g[i * n..(i + 1) * n];
+                                    for j in 0..k {
+                                        let b_row = &bd[j * n..(j + 1) * n];
+                                        let mut s = 0.0f32;
+                                        for kk in 0..n {
+                                            s += g_row[kk] * b_row[kk];
+                                        }
+                                        ga_row[j] = s;
                                     }
-                                    ga[i * k + j] = s;
-                                }
-                            }
-                            for i in 0..k {
-                                for j in 0..n {
-                                    let mut s = 0.0f32;
-                                    for kk in 0.._m {
-                                        s += ad[kk * k + i] * g[kk * n + j];
+                                });
+                            // grad_b = a^T @ g  (parallelize over rows of a^T = cols of a)
+                            gb.par_chunks_mut(n)
+                                .enumerate()
+                                .for_each(|(i, gb_row)| {
+                                    for j in 0..n {
+                                        let mut s = 0.0f32;
+                                        for kk in 0.._m {
+                                            s += ad[kk * k + i] * g[kk * n + j];
+                                        }
+                                        gb_row[j] = s;
                                     }
-                                    gb[i * n + j] = s;
-                                }
-                            }
+                                });
                         }
                         DType::F64 => {
                             let g = unsafe {
@@ -258,24 +267,30 @@ pub fn backward_single(
                                     k * n,
                                 )
                             };
-                            for i in 0.._m {
-                                for j in 0..k {
-                                    let mut s = 0.0f64;
-                                    for kk in 0..n {
-                                        s += g[i * n + kk] * bd[j * n + kk];
+                            ga.par_chunks_mut(k)
+                                .enumerate()
+                                .for_each(|(i, ga_row)| {
+                                    let g_row = &g[i * n..(i + 1) * n];
+                                    for j in 0..k {
+                                        let b_row = &bd[j * n..(j + 1) * n];
+                                        let mut s = 0.0f64;
+                                        for kk in 0..n {
+                                            s += g_row[kk] * b_row[kk];
+                                        }
+                                        ga_row[j] = s;
                                     }
-                                    ga[i * k + j] = s;
-                                }
-                            }
-                            for i in 0..k {
-                                for j in 0..n {
-                                    let mut s = 0.0f64;
-                                    for kk in 0.._m {
-                                        s += ad[kk * k + i] * g[kk * n + j];
+                                });
+                            gb.par_chunks_mut(n)
+                                .enumerate()
+                                .for_each(|(i, gb_row)| {
+                                    for j in 0..n {
+                                        let mut s = 0.0f64;
+                                        for kk in 0.._m {
+                                            s += ad[kk * k + i] * g[kk * n + j];
+                                        }
+                                        gb_row[j] = s;
                                     }
-                                    gb[i * n + j] = s;
-                                }
-                            }
+                                });
                         }
                         _ => {}
                     }
@@ -1477,6 +1492,10 @@ pub fn backward_single(
         }
         _ => {
             // Unsupported backward: return zero gradients
+            eprintln!(
+                "[torchburn WARNING] unsupported backward op '{}', returning zero gradients",
+                target
+            );
             let mut grads = Vec::new();
             for input in saved_inputs {
                 grads.push(OwnedTensor::new(input.dtype, input.shape.clone()));

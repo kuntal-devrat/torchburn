@@ -140,8 +140,8 @@ fn collect_outputs(
             } => {
                 let borrowed = BorrowedTensor {
                     data: *data,
-                    shape: shape.clone(),
-                    strides: strides.clone(),
+                    shape: shape.to_vec(),
+                    strides: strides.to_vec(),
                     dtype: *dtype,
                 };
                 out.push(shape_ops::to_contiguous(&borrowed)?);

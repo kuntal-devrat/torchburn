@@ -425,6 +425,130 @@ pub fn fused_swiglu_mlp_w4a32(
     Ok(out)
 }
 
+/// Portable grouped-int4 SwiGLU gate/up dot-pair dispatch for one neuron.
+///
+/// Picks the widest kernel the *current* CPU actually supports (checked at
+/// runtime, like every other kernel in this crate):
+///   AVX-512 VNNI (W4A8) > AVX-512 (W4A32) > AVX2 (W4A32) > portable scalar,
+/// and honours the group size: the group64/group32 SIMD kernels assume every
+/// group is full (`k % group_size == 0`), otherwise the per-group scalar dot
+/// loop (which clamps the tail group to the remaining length) is used.
+///
+/// `x_u8`/`s_x` are `Some` when the caller pre-quantised the activation to
+/// u8 for the VNNI path (only valid for `group_size == 64`).
+///
+/// # Safety
+/// `x`/`gw_row`/`uw_row` must be readable for `k` elements/`(k+1)/2` packed
+/// bytes, `gs_row`/`us_row` for `num_groups`, and `x_u8` for `k` bytes when
+/// present.
+#[allow(clippy::too_many_arguments)]
+pub(crate) unsafe fn swiglu_neuron_w4a32_dot_dispatch(
+    x: *const f32,
+    x_u8: Option<*const u8>,
+    s_x: f32,
+    gw_row: *const u8,
+    gs_row: *const f32,
+    uw_row: *const u8,
+    us_row: *const f32,
+    num_groups: usize,
+    k: usize,
+    group_size: usize,
+) -> (f32, f32) {
+    #[cfg(target_arch = "x86_64")]
+    let has_vnni = is_x86_feature_detected!("avx512vnni")
+        && is_x86_feature_detected!("avx512f")
+        && is_x86_feature_detected!("avx512bw");
+    #[cfg(not(target_arch = "x86_64"))]
+    let has_vnni = false;
+    #[cfg(target_arch = "x86_64")]
+    let has_avx512 = is_x86_feature_detected!("avx512f") && is_x86_feature_detected!("avx512bw");
+    #[cfg(not(target_arch = "x86_64"))]
+    let has_avx512 = false;
+    #[cfg(target_arch = "x86_64")]
+    let has_avx2 = is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma");
+    #[cfg(not(target_arch = "x86_64"))]
+    let has_avx2 = false;
+
+    let full_groups = k % group_size == 0 && k / group_size == num_groups;
+
+    // Scalar fallback for arbitrary group sizes (tail groups clamped).
+    let scalar = |x_p: *const f32| -> (f32, f32) {
+        let mut gs = 0.0f32;
+        let mut us = 0.0f32;
+        for g in 0..num_groups {
+            let cur_len = (k - g * group_size).min(group_size);
+            gs += dot_f32_u4_group_scalar(
+                x_p.add(g * group_size),
+                gw_row.add(g * (group_size / 2)),
+                cur_len,
+            ) * *gs_row.add(g);
+            us += dot_f32_u4_group_scalar(
+                x_p.add(g * group_size),
+                uw_row.add(g * (group_size / 2)),
+                cur_len,
+            ) * *us_row.add(g);
+        }
+        (gs, us)
+    };
+
+    if let Some(x_u8_p) = x_u8 {
+        // W4A8 VNNI: only defined for full 64-wide groups.
+        if has_vnni && group_size == 64 && full_groups {
+            #[cfg(target_arch = "x86_64")]
+            {
+                return swiglu_neuron_w4a8_group64_vnni_avx512(
+                    x_u8_p, s_x, gw_row, gs_row, uw_row, us_row, num_groups,
+                );
+            }
+            #[cfg(not(target_arch = "x86_64"))]
+            {
+                let _ = (x_u8_p, s_x);
+            }
+        }
+    }
+    if full_groups && group_size == 64 && has_avx512 {
+        #[cfg(target_arch = "x86_64")]
+        {
+            return swiglu_neuron_w4a32_group64_avx512(x, gw_row, gs_row, uw_row, us_row, num_groups);
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            let _ = has_avx512;
+        }
+    }
+    if full_groups && group_size == 32 && has_avx512 {
+        #[cfg(target_arch = "x86_64")]
+        {
+            return swiglu_neuron_w4a32_group32_avx512(x, gw_row, gs_row, uw_row, us_row, num_groups);
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            let _ = has_avx512;
+        }
+    }
+    if full_groups && group_size == 64 && has_avx2 {
+        #[cfg(target_arch = "x86_64")]
+        {
+            return swiglu_neuron_w4a32_group64_avx2(x, gw_row, gs_row, uw_row, us_row, num_groups);
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            let _ = has_avx2;
+        }
+    }
+    if full_groups && group_size == 32 && has_avx2 {
+        #[cfg(target_arch = "x86_64")]
+        {
+            return swiglu_neuron_w4a32_group32_avx2(x, gw_row, gs_row, uw_row, us_row, num_groups);
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            let _ = has_avx2;
+        }
+    }
+    scalar(x)
+}
+
 /// Quantize a 2D float weight matrix (N, K) to per-channel INT8 with scales (N,).
 pub fn quantize_linear_weights_int8(w: &BorrowedTensor) -> PyResult<(OwnedTensor, OwnedTensor)> {
     if w.shape.len() != 2 {

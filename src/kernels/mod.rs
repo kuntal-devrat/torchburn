@@ -29,7 +29,6 @@ use crate::dlpack::{
 };
 use pyo3::prelude::*;
 use std::ops::{Add, Div, Mul, Sub};
-use wide::{f32x8, f64x4};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum BinaryOp {
@@ -155,195 +154,158 @@ where
 }
 
 // ── SIMD super-path: 8-wide f32, 4-wide f64 with AVX2/NEON ──
+//
+// Implemented as straight-line zipped slice loops: with `-C target-cpu=native`
+// (and at baseline SSE2 for portable wheels) LLVM auto-vectorises these into
+// unaligned vector loads/stores, which beats hand-rolling `wide` vector
+// construction + `to_array` round-trips. Results are bit-identical to the
+// scalar path (every output element is a function of only the inputs at that
+// index), so parity tests are unaffected.
+
+/// Binary elementwise engine over two contiguous equal-length inputs.
+/// Splits across rayon chunks above `PAR_THRESHOLD`; the per-element closure
+/// is monomorphised per op so the inner loop is branch-free.
 #[inline(always)]
-fn simd_binary_f32_contig(op: BinaryOp, a: &[f32], b: &[f32], out: &mut [f32]) {
+fn binary_zip_f32(
+    a: &[f32],
+    b: &[f32],
+    out: &mut [f32],
+    f: impl Fn(f32, f32) -> f32 + Sync,
+) {
     let n = out.len();
+    let run = |a: &[f32], b: &[f32], o: &mut [f32]| {
+        for ((&av, &bv), ov) in a.iter().zip(b.iter()).zip(o.iter_mut()) {
+            *ov = f(av, bv);
+        }
+    };
     if n >= PAR_THRESHOLD {
         use rayon::prelude::*;
         out.par_chunks_mut(PAR_CHUNK)
             .enumerate()
             .for_each(|(ci, chunk)| {
-                let base = ci * PAR_CHUNK;
-                let mut j = 0;
-                while j + 8 <= chunk.len() {
-                    let idx = base + j;
-                    let av = f32x8::new([
-                        a[idx],
-                        a[idx + 1],
-                        a[idx + 2],
-                        a[idx + 3],
-                        a[idx + 4],
-                        a[idx + 5],
-                        a[idx + 6],
-                        a[idx + 7],
-                    ]);
-                    let bv = f32x8::new([
-                        b[idx],
-                        b[idx + 1],
-                        b[idx + 2],
-                        b[idx + 3],
-                        b[idx + 4],
-                        b[idx + 5],
-                        b[idx + 6],
-                        b[idx + 7],
-                    ]);
-                    let rv = match op {
-                        BinaryOp::Add => av + bv,
-                        BinaryOp::Sub => av - bv,
-                        BinaryOp::Mul => av * bv,
-                        BinaryOp::Div => av / bv,
-                    };
-                    chunk[j..j + 8].copy_from_slice(&rv.to_array());
-                    j += 8;
-                }
-                while j < chunk.len() {
-                    let idx = base + j;
-                    chunk[j] = apply(op, a[idx], b[idx]);
-                    j += 1;
-                }
+                let s = ci * PAR_CHUNK;
+                run(&a[s..s + chunk.len()], &b[s..s + chunk.len()], chunk);
             });
     } else {
-        let mut i = 0;
-        while i + 8 <= n {
-            let av = f32x8::new([
-                a[i],
-                a[i + 1],
-                a[i + 2],
-                a[i + 3],
-                a[i + 4],
-                a[i + 5],
-                a[i + 6],
-                a[i + 7],
-            ]);
-            let bv = f32x8::new([
-                b[i],
-                b[i + 1],
-                b[i + 2],
-                b[i + 3],
-                b[i + 4],
-                b[i + 5],
-                b[i + 6],
-                b[i + 7],
-            ]);
-            let rv = match op {
-                BinaryOp::Add => av + bv,
-                BinaryOp::Sub => av - bv,
-                BinaryOp::Mul => av * bv,
-                BinaryOp::Div => av / bv,
-            };
-            out[i..i + 8].copy_from_slice(&rv.to_array());
-            i += 8;
+        run(a, b, out);
+    }
+}
+
+#[inline(always)]
+fn binary_zip_f64(
+    a: &[f64],
+    b: &[f64],
+    out: &mut [f64],
+    f: impl Fn(f64, f64) -> f64 + Sync,
+) {
+    let n = out.len();
+    let run = |a: &[f64], b: &[f64], o: &mut [f64]| {
+        for ((&av, &bv), ov) in a.iter().zip(b.iter()).zip(o.iter_mut()) {
+            *ov = f(av, bv);
         }
-        while i < n {
-            out[i] = apply(op, a[i], b[i]);
-            i += 1;
+    };
+    if n >= PAR_THRESHOLD {
+        use rayon::prelude::*;
+        out.par_chunks_mut(PAR_CHUNK)
+            .enumerate()
+            .for_each(|(ci, chunk)| {
+                let s = ci * PAR_CHUNK;
+                run(&a[s..s + chunk.len()], &b[s..s + chunk.len()], chunk);
+            });
+    } else {
+        run(a, b, out);
+    }
+}
+
+/// Scalar-splat engine: `out[i] = f(a[i])` over a contiguous tensor, where the
+/// closure captures the scalar operand (`f(x) = apply(op, x, s)` or
+/// `f(x) = apply(op, s, x)`).
+#[inline(always)]
+fn binary_splat_f32(a: &[f32], out: &mut [f32], f: impl Fn(f32) -> f32 + Sync) {
+    let n = out.len();
+    let run = |a: &[f32], o: &mut [f32]| {
+        for (&av, ov) in a.iter().zip(o.iter_mut()) {
+            *ov = f(av);
         }
+    };
+    if n >= PAR_THRESHOLD {
+        use rayon::prelude::*;
+        out.par_chunks_mut(PAR_CHUNK)
+            .enumerate()
+            .for_each(|(ci, chunk)| {
+                let s = ci * PAR_CHUNK;
+                run(&a[s..s + chunk.len()], chunk);
+            });
+    } else {
+        run(a, out);
+    }
+}
+
+#[inline(always)]
+fn binary_splat_f64(a: &[f64], out: &mut [f64], f: impl Fn(f64) -> f64 + Sync) {
+    let n = out.len();
+    let run = |a: &[f64], o: &mut [f64]| {
+        for (&av, ov) in a.iter().zip(o.iter_mut()) {
+            *ov = f(av);
+        }
+    };
+    if n >= PAR_THRESHOLD {
+        use rayon::prelude::*;
+        out.par_chunks_mut(PAR_CHUNK)
+            .enumerate()
+            .for_each(|(ci, chunk)| {
+                let s = ci * PAR_CHUNK;
+                run(&a[s..s + chunk.len()], chunk);
+            });
+    } else {
+        run(a, out);
+    }
+}
+
+#[inline(always)]
+fn simd_binary_f32_contig(op: BinaryOp, a: &[f32], b: &[f32], out: &mut [f32]) {
+    match op {
+        BinaryOp::Add => binary_zip_f32(a, b, out, |x, y| x + y),
+        BinaryOp::Sub => binary_zip_f32(a, b, out, |x, y| x - y),
+        BinaryOp::Mul => binary_zip_f32(a, b, out, |x, y| x * y),
+        BinaryOp::Div => binary_zip_f32(a, b, out, |x, y| x / y),
     }
 }
 #[inline(always)]
 fn simd_binary_f64_contig(op: BinaryOp, a: &[f64], b: &[f64], out: &mut [f64]) {
-    let n = out.len();
-    if n >= PAR_THRESHOLD {
-        use rayon::prelude::*;
-        out.par_chunks_mut(PAR_CHUNK)
-            .enumerate()
-            .for_each(|(ci, chunk)| {
-                let base = ci * PAR_CHUNK;
-                let mut j = 0;
-                while j + 4 <= chunk.len() {
-                    let idx = base + j;
-                    let av = f64x4::new([a[idx], a[idx + 1], a[idx + 2], a[idx + 3]]);
-                    let bv = f64x4::new([b[idx], b[idx + 1], b[idx + 2], b[idx + 3]]);
-                    let rv = match op {
-                        BinaryOp::Add => av + bv,
-                        BinaryOp::Sub => av - bv,
-                        BinaryOp::Mul => av * bv,
-                        BinaryOp::Div => av / bv,
-                    };
-                    chunk[j..j + 4].copy_from_slice(&rv.to_array());
-                    j += 4;
-                }
-                while j < chunk.len() {
-                    let idx = base + j;
-                    chunk[j] = apply(op, a[idx], b[idx]);
-                    j += 1;
-                }
-            });
-    } else {
-        let mut i = 0;
-        while i + 4 <= n {
-            let av = f64x4::new([a[i], a[i + 1], a[i + 2], a[i + 3]]);
-            let bv = f64x4::new([b[i], b[i + 1], b[i + 2], b[i + 3]]);
-            let rv = match op {
-                BinaryOp::Add => av + bv,
-                BinaryOp::Sub => av - bv,
-                BinaryOp::Mul => av * bv,
-                BinaryOp::Div => av / bv,
-            };
-            out[i..i + 4].copy_from_slice(&rv.to_array());
-            i += 4;
-        }
-        while i < n {
-            out[i] = apply(op, a[i], b[i]);
-            i += 1;
-        }
+    match op {
+        BinaryOp::Add => binary_zip_f64(a, b, out, |x, y| x + y),
+        BinaryOp::Sub => binary_zip_f64(a, b, out, |x, y| x - y),
+        BinaryOp::Mul => binary_zip_f64(a, b, out, |x, y| x * y),
+        BinaryOp::Div => binary_zip_f64(a, b, out, |x, y| x / y),
     }
 }
+
+/// ReLU `max(0, x)` zip engine (f32).
 #[inline(always)]
-fn simd_relu_f32_contig(a: &[f32], out: &mut [f32]) {
+fn relu_zip_f32(a: &[f32], out: &mut [f32]) {
     let n = out.len();
-    let zero = f32x8::splat(0.0);
+    let run = |a: &[f32], o: &mut [f32]| {
+        for (&av, ov) in a.iter().zip(o.iter_mut()) {
+            *ov = if av > 0.0 { av } else { 0.0 };
+        }
+    };
     if n >= PAR_THRESHOLD {
         use rayon::prelude::*;
         out.par_chunks_mut(PAR_CHUNK)
             .enumerate()
             .for_each(|(ci, chunk)| {
-                let base = ci * PAR_CHUNK;
-                let mut j = 0;
-                while j + 8 <= chunk.len() {
-                    let idx = base + j;
-                    let av = f32x8::new([
-                        a[idx],
-                        a[idx + 1],
-                        a[idx + 2],
-                        a[idx + 3],
-                        a[idx + 4],
-                        a[idx + 5],
-                        a[idx + 6],
-                        a[idx + 7],
-                    ]);
-                    let rv = av.max(zero);
-                    chunk[j..j + 8].copy_from_slice(&rv.to_array());
-                    j += 8;
-                }
-                while j < chunk.len() {
-                    let idx = base + j;
-                    chunk[j] = if a[idx] > 0.0 { a[idx] } else { 0.0 };
-                    j += 1;
-                }
+                let s = ci * PAR_CHUNK;
+                run(&a[s..s + chunk.len()], chunk);
             });
     } else {
-        let mut i = 0;
-        while i + 8 <= n {
-            let av = f32x8::new([
-                a[i],
-                a[i + 1],
-                a[i + 2],
-                a[i + 3],
-                a[i + 4],
-                a[i + 5],
-                a[i + 6],
-                a[i + 7],
-            ]);
-            let rv = av.max(zero);
-            out[i..i + 8].copy_from_slice(&rv.to_array());
-            i += 8;
-        }
-        while i < n {
-            out[i] = if a[i] > 0.0 { a[i] } else { 0.0 };
-            i += 1;
-        }
+        run(a, out);
     }
+}
+
+#[inline(always)]
+fn simd_relu_f32_contig(a: &[f32], out: &mut [f32]) {
+    relu_zip_f32(a, out);
 }
 
 fn run_binary<T: Scalar>(
@@ -541,33 +503,7 @@ pub fn binary(op: BinaryOp, a: &BorrowedTensor, b: &BorrowedTensor) -> PyResult<
                         out.elem_count(),
                     )
                 };
-                let splat = f32x8::splat(scalar);
-                let n = out_data.len();
-                let mut i = 0;
-                while i + 8 <= n {
-                    let bv = f32x8::new([
-                        b_data[i],
-                        b_data[i + 1],
-                        b_data[i + 2],
-                        b_data[i + 3],
-                        b_data[i + 4],
-                        b_data[i + 5],
-                        b_data[i + 6],
-                        b_data[i + 7],
-                    ]);
-                    let rv = match op {
-                        BinaryOp::Add => splat + bv,
-                        BinaryOp::Sub => splat - bv,
-                        BinaryOp::Mul => splat * bv,
-                        BinaryOp::Div => splat / bv,
-                    };
-                    out_data[i..i + 8].copy_from_slice(&rv.to_array());
-                    i += 8;
-                }
-                while i < n {
-                    out_data[i] = apply(op, scalar, b_data[i]);
-                    i += 1;
-                }
+                binary_splat_f32(b_data, out_data, |x| apply(op, scalar, x));
                 return Ok(out);
             }
             DType::F64 => {
@@ -579,24 +515,7 @@ pub fn binary(op: BinaryOp, a: &BorrowedTensor, b: &BorrowedTensor) -> PyResult<
                         out.elem_count(),
                     )
                 };
-                let splat = f64x4::splat(scalar);
-                let n = out_data.len();
-                let mut i = 0;
-                while i + 4 <= n {
-                    let bv = f64x4::new([b_data[i], b_data[i + 1], b_data[i + 2], b_data[i + 3]]);
-                    let rv = match op {
-                        BinaryOp::Add => splat + bv,
-                        BinaryOp::Sub => splat - bv,
-                        BinaryOp::Mul => splat * bv,
-                        BinaryOp::Div => splat / bv,
-                    };
-                    out_data[i..i + 4].copy_from_slice(&rv.to_array());
-                    i += 4;
-                }
-                while i < n {
-                    out_data[i] = apply(op, scalar, b_data[i]);
-                    i += 1;
-                }
+                binary_splat_f64(b_data, out_data, |x| apply(op, scalar, x));
                 return Ok(out);
             }
             _ => {}
@@ -613,33 +532,7 @@ pub fn binary(op: BinaryOp, a: &BorrowedTensor, b: &BorrowedTensor) -> PyResult<
                         out.elem_count(),
                     )
                 };
-                let splat = f32x8::splat(scalar);
-                let n = out_data.len();
-                let mut i = 0;
-                while i + 8 <= n {
-                    let av = f32x8::new([
-                        a_data[i],
-                        a_data[i + 1],
-                        a_data[i + 2],
-                        a_data[i + 3],
-                        a_data[i + 4],
-                        a_data[i + 5],
-                        a_data[i + 6],
-                        a_data[i + 7],
-                    ]);
-                    let rv = match op {
-                        BinaryOp::Add => av + splat,
-                        BinaryOp::Sub => av - splat,
-                        BinaryOp::Mul => av * splat,
-                        BinaryOp::Div => av / splat,
-                    };
-                    out_data[i..i + 8].copy_from_slice(&rv.to_array());
-                    i += 8;
-                }
-                while i < n {
-                    out_data[i] = apply(op, a_data[i], scalar);
-                    i += 1;
-                }
+                binary_splat_f32(a_data, out_data, |x| apply(op, x, scalar));
                 return Ok(out);
             }
             DType::F64 => {
@@ -651,24 +544,7 @@ pub fn binary(op: BinaryOp, a: &BorrowedTensor, b: &BorrowedTensor) -> PyResult<
                         out.elem_count(),
                     )
                 };
-                let splat = f64x4::splat(scalar);
-                let n = out_data.len();
-                let mut i = 0;
-                while i + 4 <= n {
-                    let av = f64x4::new([a_data[i], a_data[i + 1], a_data[i + 2], a_data[i + 3]]);
-                    let rv = match op {
-                        BinaryOp::Add => av + splat,
-                        BinaryOp::Sub => av - splat,
-                        BinaryOp::Mul => av * splat,
-                        BinaryOp::Div => av / splat,
-                    };
-                    out_data[i..i + 4].copy_from_slice(&rv.to_array());
-                    i += 4;
-                }
-                while i < n {
-                    out_data[i] = apply(op, a_data[i], scalar);
-                    i += 1;
-                }
+                binary_splat_f64(a_data, out_data, |x| apply(op, x, scalar));
                 return Ok(out);
             }
             _ => {}

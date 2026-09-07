@@ -1,6 +1,7 @@
 //! Dispatch arms: Shape, select, gather, chunk, squeeze/unsqueeze. Inherits engine root via super; pure move.
 
 use super::*;
+use std::sync::Arc;
 
 pub(crate) fn try_dispatch(
     node: &Node,
@@ -76,8 +77,8 @@ pub(crate) fn try_dispatch(
                 let new_strides = contiguous_strides(&resolved);
                 slots.push(Slot::View {
                     data: a.data,
-                    shape: resolved,
-                    strides: new_strides,
+                    shape: Arc::from(resolved),
+                    strides: Arc::from(new_strides),
                     dtype: a.dtype,
                 });
             } else {
@@ -93,8 +94,8 @@ pub(crate) fn try_dispatch(
             let (new_shape, new_strides) = shape_ops::permute_view(&a, &dims)?;
             slots.push(Slot::View {
                 data: a.data,
-                shape: new_shape,
-                strides: new_strides,
+                shape: Arc::from(new_shape),
+                strides: Arc::from(new_strides),
                 dtype: a.dtype,
             });
         }
@@ -105,8 +106,8 @@ pub(crate) fn try_dispatch(
             let (new_shape, new_strides) = shape_ops::transpose_view(&a, d0, d1)?;
             slots.push(Slot::View {
                 data: a.data,
-                shape: new_shape,
-                strides: new_strides,
+                shape: Arc::from(new_shape),
+                strides: Arc::from(new_strides),
                 dtype: a.dtype,
             });
         }
@@ -162,16 +163,16 @@ pub(crate) fn try_dispatch(
             if a.shape.len() <= 1 {
                 slots.push(Slot::View {
                     data: a.data,
-                    shape: a.shape.clone(),
-                    strides: a.strides.clone(),
+                    shape: Arc::from(a.shape.as_slice()),
+                    strides: Arc::from(a.strides.as_slice()),
                     dtype: a.dtype,
                 });
             } else {
                 let (new_shape, new_strides) = shape_ops::transpose_view(&a, 0, 1)?;
                 slots.push(Slot::View {
                     data: a.data,
-                    shape: new_shape,
-                    strides: new_strides,
+                    shape: Arc::from(new_shape),
+                    strides: Arc::from(new_strides),
                     dtype: a.dtype,
                 });
             }
@@ -263,8 +264,8 @@ pub(crate) fn try_dispatch(
             if a.strides == contiguous_strides(&a.shape) {
                 slots.push(Slot::View {
                     data: a.data,
-                    shape: a.shape.clone(),
-                    strides: a.strides.clone(),
+                    shape: Arc::from(a.shape.as_slice()),
+                    strides: Arc::from(a.strides.as_slice()),
                     dtype: a.dtype,
                 });
             } else {
@@ -277,8 +278,8 @@ pub(crate) fn try_dispatch(
             let (new_shape, new_strides) = shape_ops::squeeze_view(&a, dim)?;
             slots.push(Slot::View {
                 data: a.data,
-                shape: new_shape,
-                strides: new_strides,
+                shape: Arc::from(new_shape),
+                strides: Arc::from(new_strides),
                 dtype: a.dtype,
             });
         }
@@ -288,8 +289,8 @@ pub(crate) fn try_dispatch(
             let (new_shape, new_strides) = shape_ops::unsqueeze_view(&a, dim)?;
             slots.push(Slot::View {
                 data: a.data,
-                shape: new_shape,
-                strides: new_strides,
+                shape: Arc::from(new_shape),
+                strides: Arc::from(new_strides),
                 dtype: a.dtype,
             });
         }
@@ -304,8 +305,8 @@ pub(crate) fn try_dispatch(
             let a = slot_view(slots, capsules, arg_index(node, 0)?)?;
             slots.push(Slot::View {
                 data: a.data,
-                shape: a.shape.clone(),
-                strides: a.strides.clone(),
+                shape: Arc::from(a.shape.as_slice()),
+                strides: Arc::from(a.strides.as_slice()),
                 dtype: a.dtype,
             });
         }

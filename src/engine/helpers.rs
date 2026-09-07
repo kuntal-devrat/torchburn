@@ -6,6 +6,7 @@
 use crate::dlpack::{unsupported, BorrowedTensor, CapsuleRef};
 use crate::engine::payload::{Node, Slot};
 use pyo3::prelude::*;
+use smallvec::SmallVec;
 /// View a slot as a borrowed tensor (zero-copy for inputs).
 pub(crate) fn slot_view<'p>(
     slots: &[Slot],
@@ -22,8 +23,8 @@ pub(crate) fn slot_view<'p>(
             dtype,
         }) => Ok(BorrowedTensor {
             data: *data,
-            shape: shape.clone(),
-            strides: strides.clone(),
+            shape: shape.to_vec(),
+            strides: strides.to_vec(),
             dtype: *dtype,
         }),
         Some(Slot::Tuple(_)) => Err(unsupported(&format!(
@@ -137,18 +138,20 @@ pub(crate) fn kw_opt_dim(node: &Node) -> PyResult<Option<isize>> {
 /// Read an optional reduction dim LIST from kwargs: scalar int, [int], or
 /// [int, ...].  Returns an empty vec when absent.  Multi-dim lists are handled
 /// natively by sum_dims/mean_dims (iterative single-dim reduction).
-pub(crate) fn kw_opt_dims(node: &Node) -> Vec<isize> {
+pub(crate) fn kw_opt_dims(node: &Node) -> SmallVec<[isize; 4]> {
     match node.kwargs.get("dim") {
-        None => vec![],
+        None => SmallVec::new(),
         Some(v) => {
             if let Some(x) = v.as_i64() {
-                vec![x as isize]
+                let mut sv = SmallVec::new();
+                sv.push(x as isize);
+                sv
             } else if let Some(arr) = v.as_array() {
                 arr.iter()
                     .filter_map(|v| v.as_i64().map(|x| x as isize))
                     .collect()
             } else {
-                vec![]
+                SmallVec::new()
             }
         }
     }

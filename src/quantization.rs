@@ -41,7 +41,9 @@ pub use self::packed_v2::{
 
 pub mod fused_ops;
 
-pub(crate) use self::fused_ops::fast_vector_add;
+pub(crate) use self::fused_ops::{
+    fast_vector_add, swiglu_neuron_w4a32_dot_dispatch,
+};
 pub use self::fused_ops::{
     dot_f32_f32, fast_rms_norm, fused_attention_step_w4a32, fused_attention_step_w8a32,
     fused_swiglu_mlp_w4a32, fused_swiglu_mlp_w8a32, quantize_linear_weights_int4,

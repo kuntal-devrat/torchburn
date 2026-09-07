@@ -95,13 +95,29 @@ fn matmul_2d_same(a: &OwnedTensor, b: &OwnedTensor) -> OwnedTensor {
             let bd = unsafe { std::slice::from_raw_parts(b.data.as_ptr() as *const f32, k * n) };
             let od =
                 unsafe { std::slice::from_raw_parts_mut(out.data.as_mut_ptr() as *mut f32, m * n) };
-            for i in 0..m {
-                for j in 0..n {
-                    let mut s = 0.0f32;
-                    for kk in 0..k {
-                        s += ad[i * k + kk] * bd[kk * n + j];
+            if m >= 8 {
+                use rayon::prelude::*;
+                od.par_chunks_mut(n)
+                    .enumerate()
+                    .for_each(|(i, od_row)| {
+                        let a_row = &ad[i * k..(i + 1) * k];
+                        for j in 0..n {
+                            let mut s = 0.0f32;
+                            for kk in 0..k {
+                                s += a_row[kk] * bd[kk * n + j];
+                            }
+                            od_row[j] = s;
+                        }
+                    });
+            } else {
+                for i in 0..m {
+                    for j in 0..n {
+                        let mut s = 0.0f32;
+                        for kk in 0..k {
+                            s += ad[i * k + kk] * bd[kk * n + j];
+                        }
+                        od[i * n + j] = s;
                     }
-                    od[i * n + j] = s;
                 }
             }
         }
@@ -110,13 +126,29 @@ fn matmul_2d_same(a: &OwnedTensor, b: &OwnedTensor) -> OwnedTensor {
             let bd = unsafe { std::slice::from_raw_parts(b.data.as_ptr() as *const f64, k * n) };
             let od =
                 unsafe { std::slice::from_raw_parts_mut(out.data.as_mut_ptr() as *mut f64, m * n) };
-            for i in 0..m {
-                for j in 0..n {
-                    let mut s = 0.0f64;
-                    for kk in 0..k {
-                        s += ad[i * k + kk] * bd[kk * n + j];
+            if m >= 8 {
+                use rayon::prelude::*;
+                od.par_chunks_mut(n)
+                    .enumerate()
+                    .for_each(|(i, od_row)| {
+                        let a_row = &ad[i * k..(i + 1) * k];
+                        for j in 0..n {
+                            let mut s = 0.0f64;
+                            for kk in 0..k {
+                                s += a_row[kk] * bd[kk * n + j];
+                            }
+                            od_row[j] = s;
+                        }
+                    });
+            } else {
+                for i in 0..m {
+                    for j in 0..n {
+                        let mut s = 0.0f64;
+                        for kk in 0..k {
+                            s += ad[i * k + kk] * bd[kk * n + j];
+                        }
+                        od[i * n + j] = s;
                     }
-                    od[i * n + j] = s;
                 }
             }
         }
@@ -213,9 +245,33 @@ fn sum_dim0(t: &OwnedTensor) -> OwnedTensor {
             let dst =
                 unsafe { std::slice::from_raw_parts_mut(out.data.as_mut_ptr() as *mut f32, inner) };
             dst.fill(0.0);
-            for i in 0..outer {
-                for j in 0..inner {
-                    dst[j] += src[i * inner + j];
+            if outer >= 16 {
+                use rayon::prelude::*;
+                // Compute partial sums in parallel, then accumulate sequentially
+                let chunk_size = (outer / rayon::current_num_threads()).max(1);
+                let partials: Vec<Vec<f32>> = src
+                    .par_chunks(inner * chunk_size)
+                    .map(|chunk| {
+                        let rows = chunk.len() / inner;
+                        let mut partial = vec![0.0f32; inner];
+                        for i in 0..rows {
+                            for j in 0..inner {
+                                partial[j] += chunk[i * inner + j];
+                            }
+                        }
+                        partial
+                    })
+                    .collect();
+                for partial in &partials {
+                    for j in 0..inner {
+                        dst[j] += partial[j];
+                    }
+                }
+            } else {
+                for i in 0..outer {
+                    for j in 0..inner {
+                        dst[j] += src[i * inner + j];
+                    }
                 }
             }
         }
@@ -225,9 +281,32 @@ fn sum_dim0(t: &OwnedTensor) -> OwnedTensor {
             let dst =
                 unsafe { std::slice::from_raw_parts_mut(out.data.as_mut_ptr() as *mut f64, inner) };
             dst.fill(0.0);
-            for i in 0..outer {
-                for j in 0..inner {
-                    dst[j] += src[i * inner + j];
+            if outer >= 16 {
+                use rayon::prelude::*;
+                let chunk_size = (outer / rayon::current_num_threads()).max(1);
+                let partials: Vec<Vec<f64>> = src
+                    .par_chunks(inner * chunk_size)
+                    .map(|chunk| {
+                        let rows = chunk.len() / inner;
+                        let mut partial = vec![0.0f64; inner];
+                        for i in 0..rows {
+                            for j in 0..inner {
+                                partial[j] += chunk[i * inner + j];
+                            }
+                        }
+                        partial
+                    })
+                    .collect();
+                for partial in &partials {
+                    for j in 0..inner {
+                        dst[j] += partial[j];
+                    }
+                }
+            } else {
+                for i in 0..outer {
+                    for j in 0..inner {
+                        dst[j] += src[i * inner + j];
+                    }
                 }
             }
         }

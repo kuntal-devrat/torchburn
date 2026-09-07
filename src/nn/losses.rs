@@ -7,6 +7,7 @@
 
 use crate::dlpack::{elem_count, unsupported, BorrowedTensor, DType, OwnedTensor};
 use pyo3::prelude::*;
+use rayon::prelude::*;
 
 /// Read a tensor's elements as a typed slice.
 unsafe fn typed_slice<T>(t: &BorrowedTensor) -> &[T] {
@@ -56,7 +57,8 @@ impl LossScalar for f64 {
 }
 
 /// Apply a reduction (0=none, 1=mean, 2=sum) to an elementwise loss buffer.
-fn reduce_loss<T: LossScalar>(
+/// Uses rayon parallel reduction for mean/sum on large buffers.
+fn reduce_loss<T: LossScalar + Send + Sync>(
     data: &[T],
     n: usize,
     reduction: i64,
@@ -71,10 +73,14 @@ fn reduce_loss<T: LossScalar>(
         1 | 2 => {
             // mean (1) / sum (2): scalar output (0-dim tensor, like torch)
             elem_out.shape = vec![];
-            let mut total = T::from_f64(0.0);
-            for &v in data {
-                total = total + v;
-            }
+            let total: T = if data.len() >= 16 * 1024 {
+                // Parallel reduction for large buffers
+                data.par_chunks(16 * 1024)
+                    .map(|chunk| chunk.iter().copied().reduce(|a, b| a + b).unwrap_or(T::from_f64(0.0)))
+                    .reduce(|| T::from_f64(0.0), |a, b| a + b)
+            } else {
+                data.iter().copied().reduce(|a, b| a + b).unwrap_or(T::from_f64(0.0))
+            };
             let value: f64 = if reduction == 1 {
                 total.to_f64() / n.max(1) as f64
             } else {
@@ -118,42 +124,81 @@ pub fn nll_loss_forward(
     match input.dtype {
         DType::F32 => {
             let x = unsafe { typed_slice::<f32>(input) };
+            let use_par = n >= 16 * 1024;
             let losses: Vec<f32> = match target.dtype {
                 DType::I64 => {
                     let t = unsafe { typed_slice::<i64>(target) };
-                    (0..n)
-                        .map(|i| {
-                            let cls = t[i] as isize;
-                            if cls == ignore_index as isize {
-                                Ok(0.0)
-                            } else {
-                                if cls < 0 || cls as usize >= c {
-                                    return Err(unsupported(&format!(
-                                        "nll_loss target {cls} out of range [0, {c})"
-                                    )));
+                    if use_par {
+                        (0..n)
+                            .into_par_iter()
+                            .map(|i| {
+                                let cls = t[i] as isize;
+                                if cls == ignore_index as isize {
+                                    Ok(0.0)
+                                } else {
+                                    if cls < 0 || cls as usize >= c {
+                                        return Err(unsupported(&format!(
+                                            "nll_loss target {cls} out of range [0, {c})"
+                                        )));
+                                    }
+                                    Ok(-x[i * c + cls as usize])
                                 }
-                                Ok(-x[i * c + cls as usize])
-                            }
-                        })
-                        .collect::<PyResult<Vec<_>>>()?
+                            })
+                            .collect::<PyResult<Vec<_>>>()?
+                    } else {
+                        (0..n)
+                            .map(|i| {
+                                let cls = t[i] as isize;
+                                if cls == ignore_index as isize {
+                                    Ok(0.0)
+                                } else {
+                                    if cls < 0 || cls as usize >= c {
+                                        return Err(unsupported(&format!(
+                                            "nll_loss target {cls} out of range [0, {c})"
+                                        )));
+                                    }
+                                    Ok(-x[i * c + cls as usize])
+                                }
+                            })
+                            .collect::<PyResult<Vec<_>>>()?
+                    }
                 }
                 DType::I32 => {
                     let t = unsafe { typed_slice::<i32>(target) };
-                    (0..n)
-                        .map(|i| {
-                            let cls = t[i] as isize;
-                            if cls == ignore_index as isize {
-                                Ok(0.0)
-                            } else {
-                                if cls < 0 || cls as usize >= c {
-                                    return Err(unsupported(&format!(
-                                        "nll_loss target {cls} out of range [0, {c})"
-                                    )));
+                    if use_par {
+                        (0..n)
+                            .into_par_iter()
+                            .map(|i| {
+                                let cls = t[i] as isize;
+                                if cls == ignore_index as isize {
+                                    Ok(0.0)
+                                } else {
+                                    if cls < 0 || cls as usize >= c {
+                                        return Err(unsupported(&format!(
+                                            "nll_loss target {cls} out of range [0, {c})"
+                                        )));
+                                    }
+                                    Ok(-x[i * c + cls as usize])
                                 }
-                                Ok(-x[i * c + cls as usize])
-                            }
-                        })
-                        .collect::<PyResult<Vec<_>>>()?
+                            })
+                            .collect::<PyResult<Vec<_>>>()?
+                    } else {
+                        (0..n)
+                            .map(|i| {
+                                let cls = t[i] as isize;
+                                if cls == ignore_index as isize {
+                                    Ok(0.0)
+                                } else {
+                                    if cls < 0 || cls as usize >= c {
+                                        return Err(unsupported(&format!(
+                                            "nll_loss target {cls} out of range [0, {c})"
+                                        )));
+                                    }
+                                    Ok(-x[i * c + cls as usize])
+                                }
+                            })
+                            .collect::<PyResult<Vec<_>>>()?
+                    }
                 }
                 _ => unreachable!(),
             };
@@ -173,7 +218,11 @@ pub fn nll_loss_forward(
             } else {
                 1.0
             };
-            let total: f32 = losses.iter().sum();
+            let total: f32 = if use_par {
+                losses.par_iter().sum()
+            } else {
+                losses.iter().sum()
+            };
             let out = match reduction {
                 0 => {
                     // none: elementwise output [N]
@@ -189,42 +238,81 @@ pub fn nll_loss_forward(
         }
         DType::F64 => {
             let x = unsafe { typed_slice::<f64>(input) };
+            let use_par = n >= 16 * 1024;
             let losses: Vec<f64> = match target.dtype {
                 DType::I64 => {
                     let t = unsafe { typed_slice::<i64>(target) };
-                    (0..n)
-                        .map(|i| {
-                            let cls = t[i] as isize;
-                            if cls == ignore_index as isize {
-                                Ok(0.0)
-                            } else {
-                                if cls < 0 || cls as usize >= c {
-                                    return Err(unsupported(&format!(
-                                        "nll_loss target {cls} out of range [0, {c})"
-                                    )));
+                    if use_par {
+                        (0..n)
+                            .into_par_iter()
+                            .map(|i| {
+                                let cls = t[i] as isize;
+                                if cls == ignore_index as isize {
+                                    Ok(0.0)
+                                } else {
+                                    if cls < 0 || cls as usize >= c {
+                                        return Err(unsupported(&format!(
+                                            "nll_loss target {cls} out of range [0, {c})"
+                                        )));
+                                    }
+                                    Ok(-x[i * c + cls as usize])
                                 }
-                                Ok(-x[i * c + cls as usize])
-                            }
-                        })
-                        .collect::<PyResult<Vec<_>>>()?
+                            })
+                            .collect::<PyResult<Vec<_>>>()?
+                    } else {
+                        (0..n)
+                            .map(|i| {
+                                let cls = t[i] as isize;
+                                if cls == ignore_index as isize {
+                                    Ok(0.0)
+                                } else {
+                                    if cls < 0 || cls as usize >= c {
+                                        return Err(unsupported(&format!(
+                                            "nll_loss target {cls} out of range [0, {c})"
+                                        )));
+                                    }
+                                    Ok(-x[i * c + cls as usize])
+                                }
+                            })
+                            .collect::<PyResult<Vec<_>>>()?
+                    }
                 }
                 DType::I32 => {
                     let t = unsafe { typed_slice::<i32>(target) };
-                    (0..n)
-                        .map(|i| {
-                            let cls = t[i] as isize;
-                            if cls == ignore_index as isize {
-                                Ok(0.0)
-                            } else {
-                                if cls < 0 || cls as usize >= c {
-                                    return Err(unsupported(&format!(
-                                        "nll_loss target {cls} out of range [0, {c})"
-                                    )));
+                    if use_par {
+                        (0..n)
+                            .into_par_iter()
+                            .map(|i| {
+                                let cls = t[i] as isize;
+                                if cls == ignore_index as isize {
+                                    Ok(0.0)
+                                } else {
+                                    if cls < 0 || cls as usize >= c {
+                                        return Err(unsupported(&format!(
+                                            "nll_loss target {cls} out of range [0, {c})"
+                                        )));
+                                    }
+                                    Ok(-x[i * c + cls as usize])
                                 }
-                                Ok(-x[i * c + cls as usize])
-                            }
-                        })
-                        .collect::<PyResult<Vec<_>>>()?
+                            })
+                            .collect::<PyResult<Vec<_>>>()?
+                    } else {
+                        (0..n)
+                            .map(|i| {
+                                let cls = t[i] as isize;
+                                if cls == ignore_index as isize {
+                                    Ok(0.0)
+                                } else {
+                                    if cls < 0 || cls as usize >= c {
+                                        return Err(unsupported(&format!(
+                                            "nll_loss target {cls} out of range [0, {c})"
+                                        )));
+                                    }
+                                    Ok(-x[i * c + cls as usize])
+                                }
+                            })
+                            .collect::<PyResult<Vec<_>>>()?
+                    }
                 }
                 _ => unreachable!(),
             };
@@ -243,7 +331,11 @@ pub fn nll_loss_forward(
             } else {
                 1.0
             };
-            let total: f64 = losses.iter().sum();
+            let total: f64 = if use_par {
+                losses.par_iter().sum()
+            } else {
+                losses.iter().sum()
+            };
             let out = match reduction {
                 0 => {
                     let mut o = OwnedTensor::new(DType::F64, target.shape.clone());
@@ -268,21 +360,27 @@ pub fn mse_loss(a: &BorrowedTensor, b: &BorrowedTensor, reduction: i64) -> PyRes
         DType::F32 => {
             let x = unsafe { typed_slice::<f32>(a) };
             let y = unsafe { typed_slice::<f32>(b) };
-            let buf: Vec<f32> = x
-                .iter()
-                .zip(y.iter())
-                .map(|(x, y)| (x - y) * (x - y))
-                .collect();
+            let buf: Vec<f32> = if n >= 16 * 1024 {
+                x.par_iter()
+                    .zip(y.par_iter())
+                    .map(|(x, y)| (x - y) * (x - y))
+                    .collect()
+            } else {
+                x.iter().zip(y.iter()).map(|(x, y)| (x - y) * (x - y)).collect()
+            };
             reduce_loss(&buf, n, reduction, &mut out)?;
         }
         DType::F64 => {
             let x = unsafe { typed_slice::<f64>(a) };
             let y = unsafe { typed_slice::<f64>(b) };
-            let buf: Vec<f64> = x
-                .iter()
-                .zip(y.iter())
-                .map(|(x, y)| (x - y) * (x - y))
-                .collect();
+            let buf: Vec<f64> = if n >= 16 * 1024 {
+                x.par_iter()
+                    .zip(y.par_iter())
+                    .map(|(x, y)| (x - y) * (x - y))
+                    .collect()
+            } else {
+                x.iter().zip(y.iter()).map(|(x, y)| (x - y) * (x - y)).collect()
+            };
             reduce_loss(&buf, n, reduction, &mut out)?;
         }
         DType::I64 | DType::I32 | DType::Bool => {
@@ -306,36 +404,38 @@ pub fn smooth_l1_loss(
         DType::F32 => {
             let x = unsafe { typed_slice::<f32>(a) };
             let y = unsafe { typed_slice::<f32>(b) };
-            let buf: Vec<f32> = x
-                .iter()
-                .zip(y.iter())
-                .map(|(x, y)| {
-                    let d = (x - y).abs();
-                    if d < beta {
-                        0.5 * d * d / beta
-                    } else {
-                        d - 0.5 * beta
-                    }
-                })
-                .collect();
+            let compute = |(x, y): (&f32, &f32)| -> f32 {
+                let d = (x - y).abs();
+                if d < beta {
+                    0.5 * d * d / beta
+                } else {
+                    d - 0.5 * beta
+                }
+            };
+            let buf: Vec<f32> = if n >= 16 * 1024 {
+                x.par_iter().zip(y.par_iter()).map(compute).collect()
+            } else {
+                x.iter().zip(y.iter()).map(compute).collect()
+            };
             reduce_loss(&buf, n, reduction, &mut out)?;
         }
         DType::F64 => {
             let x = unsafe { typed_slice::<f64>(a) };
             let y = unsafe { typed_slice::<f64>(b) };
             let beta64 = beta as f64;
-            let buf: Vec<f64> = x
-                .iter()
-                .zip(y.iter())
-                .map(|(x, y)| {
-                    let d = (x - y).abs();
-                    if d < beta64 {
-                        0.5 * d * d / beta64
-                    } else {
-                        d - 0.5 * beta64
-                    }
-                })
-                .collect();
+            let compute = |(x, y): (&f64, &f64)| -> f64 {
+                let d = (x - y).abs();
+                if d < beta64 {
+                    0.5 * d * d / beta64
+                } else {
+                    d - 0.5 * beta64
+                }
+            };
+            let buf: Vec<f64> = if n >= 16 * 1024 {
+                x.par_iter().zip(y.par_iter()).map(compute).collect()
+            } else {
+                x.iter().zip(y.iter()).map(compute).collect()
+            };
             reduce_loss(&buf, n, reduction, &mut out)?;
         }
         DType::I64 | DType::I32 | DType::Bool => {
@@ -353,29 +453,33 @@ pub fn binary_cross_entropy(
 ) -> PyResult<OwnedTensor> {
     let n = elem_count(&a.shape);
     let mut out = OwnedTensor::new(a.dtype, a.shape.clone());
-    let clamp = |x: f32| x.clamp(1e-12, 1.0 - 1e-12);
     match a.dtype {
         DType::F32 => {
             let x = unsafe { typed_slice::<f32>(a) };
             let y = unsafe { typed_slice::<f32>(b) };
-            let buf: Vec<f32> = x
-                .iter()
-                .zip(y.iter())
-                .map(|(&x, &y)| -(y * clamp(x).ln() + (1.0 - y) * (1.0 - clamp(x)).ln()))
-                .collect();
+            let compute = |(&x, &y): (&f32, &f32)| -> f32 {
+                let cx = x.clamp(1e-12, 1.0 - 1e-12);
+                -(y * cx.ln() + (1.0 - y) * (1.0 - cx).ln())
+            };
+            let buf: Vec<f32> = if n >= 16 * 1024 {
+                x.par_iter().zip(y.par_iter()).map(compute).collect()
+            } else {
+                x.iter().zip(y.iter()).map(compute).collect()
+            };
             reduce_loss(&buf, n, reduction, &mut out)?;
         }
         DType::F64 => {
             let x = unsafe { typed_slice::<f64>(a) };
             let y = unsafe { typed_slice::<f64>(b) };
-            let buf: Vec<f64> = x
-                .iter()
-                .zip(y.iter())
-                .map(|(&x, &y)| {
-                    let cx = x.clamp(1e-12, 1.0 - 1e-12);
-                    -(y * cx.ln() + (1.0 - y) * (1.0 - cx).ln())
-                })
-                .collect();
+            let compute = |(&x, &y): (&f64, &f64)| -> f64 {
+                let cx = x.clamp(1e-12, 1.0 - 1e-12);
+                -(y * cx.ln() + (1.0 - y) * (1.0 - cx).ln())
+            };
+            let buf: Vec<f64> = if n >= 16 * 1024 {
+                x.par_iter().zip(y.par_iter()).map(compute).collect()
+            } else {
+                x.iter().zip(y.iter()).map(compute).collect()
+            };
             reduce_loss(&buf, n, reduction, &mut out)?;
         }
         DType::I64 | DType::I32 | DType::Bool => {

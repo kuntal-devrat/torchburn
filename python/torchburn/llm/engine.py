@@ -95,7 +95,20 @@ class UniversalEngine:
                     self._wgpu_decoder.reset_kv_cache()
                     print("[\033[95miGPU Active\033[0m] End-to-End GPU Compute Graph active (1-shot command stream).")
                 except Exception as wgpu_err:
-                    print(f"[\033[93mWarning\033[0m] End-to-end WGPU decoder init ({wgpu_err}), falling back to layer-wise shaders.")
+                    # Genuine fallback, not a silent no-op: the GPU adapter could
+                    # not be initialized (headless box, missing driver, device
+                    # init failure). The weights are CPU tensors in the same int4
+                    # layout the CPU kernels consume, so re-point every
+                    # quantized layer at the portable SIMD CPU backend and hand
+                    # decode to the zero-Python Rust decoder instead.
+                    print(f"[\033[93mWarning\033[0m] WGPU decoder init failed ({wgpu_err}); falling back to CPU SIMD decode.")
+                    _set_quant_backend(self.raw_model, "cpu")
+                    try:
+                        print("[\033[92mTorchBurn\033[0m] Initializing Pure Rust Decoder (CPU fallback)...")
+                        self._rust_decoder = torchburn.create_rust_qwen_decoder(self.raw_model)
+                        print("[\033[92mTorchBurn\033[0m] Pure Rust Decoder active (CPU fallback).")
+                    except Exception as dec_err:
+                        print(f"[\033[93mWarning\033[0m] Pure-Rust decoder fallback failed ({dec_err}); using fused layer SIMD.")
 
             self.model = self.raw_model
             self._is_compiled = True
@@ -404,3 +417,14 @@ class UniversalEngine:
             if packet["type"] == "token":
                 parts.append(packet["text"])
         return "".join(parts)
+
+
+def _set_quant_backend(model: nn.Module, backend: str) -> None:
+    """Re-point every quantized linear layer at a backend ("cpu" / "igpu").
+
+    The int4/int8 buffers live on the CPU in a backend-agnostic layout, so
+    switching a layer's backend only changes which native kernel runs — no
+    re-quantization or data movement is needed."""
+    for module in model.modules():
+        if hasattr(module, "backend") and hasattr(module, "qweight"):
+            module.backend = backend

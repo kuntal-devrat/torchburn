@@ -336,18 +336,20 @@ impl WgpuQwenDecoder {
             .collect();
 
         // 2. Uniform buffers
+        // Note: rmsnorm/swiglu/residual shaders use vec4<f32> bindings,
+        // so n must be the vec4 count (total_elements / 4).
         let rmsnorm_params_data: [u32; 4] =
-            [hidden_size as u32, (rms_norm_eps as f32).to_bits(), 0, 0];
+            [(hidden_size / 4) as u32, (rms_norm_eps as f32).to_bits(), 0, 0];
         let rmsnorm_params_buf = create_uniform_buffer(&device, &queue, unsafe {
             std::slice::from_raw_parts(rmsnorm_params_data.as_ptr() as *const u8, 16)
         });
 
-        let swiglu_params_data: [u32; 4] = [intermediate_size as u32, 0, 0, 0];
+        let swiglu_params_data: [u32; 4] = [(intermediate_size / 4) as u32, 0, 0, 0];
         let swiglu_params_buf = create_uniform_buffer(&device, &queue, unsafe {
             std::slice::from_raw_parts(swiglu_params_data.as_ptr() as *const u8, 16)
         });
 
-        let residual_params_data: [u32; 4] = [hidden_size as u32, 0, 0, 0];
+        let residual_params_data: [u32; 4] = [(hidden_size / 4) as u32, 0, 0, 0];
         let residual_params_buf = create_uniform_buffer(&device, &queue, unsafe {
             std::slice::from_raw_parts(residual_params_data.as_ptr() as *const u8, 16)
         });

@@ -14,7 +14,7 @@ use crate::dlpack::{self, unsupported, BorrowedTensor, DType, OwnedTensor};
 use crate::quantization::{
     dot_f32_f32, fast_rms_norm, fast_vector_add, gemv_w4a32_grouped, gemv_w4a32_grouped_v2,
     pack_rows_w4a32_group64_v1_to_v2, quantize_activation_to_u8,
-    swiglu_neuron_w4a32_group64_avx512, swiglu_neuron_w4a8_group64_vnni_avx512,
+    swiglu_neuron_w4a32_dot_dispatch,
 };
 
 pub(crate) unsafe fn typed_slice<T>(t: &BorrowedTensor) -> &[T] {
@@ -773,6 +773,10 @@ impl RustQwenDecoder {
             #[cfg(not(target_arch = "x86_64"))]
             let has_vnni = false;
 
+            // Pre-quantise the activation for the W4A8 VNNI path only when this
+            // CPU actually has VNNI and the layout is 64-wide groups (the only
+            // layout the packed-VNNI kernel understands).  The neuron helper
+            // re-checks and falls back to W4A32 AVX-512 / AVX2 / scalar.
             let (x_u8_opt, s_x) = if has_vnni && group_size == 64 {
                 let (u, s) =
                     unsafe { quantize_activation_to_u8(self.normed_buf.as_ptr(), hidden_size) };
@@ -803,46 +807,22 @@ impl RustQwenDecoder {
                         0.0
                     };
 
-                    let (g_sum, u_sum) = if let Some(x_u8_p) = x_u8_ptr {
-                        #[cfg(target_arch = "x86_64")]
-                        {
-                            unsafe {
-                                swiglu_neuron_w4a8_group64_vnni_avx512(
-                                    x_u8_p as *const u8,
-                                    s_x,
-                                    gw_row,
-                                    gs_row,
-                                    uw_row,
-                                    us_row,
-                                    num_groups_k,
-                                )
-                            }
-                        }
-                        #[cfg(not(target_arch = "x86_64"))]
-                        {
-                            let _ = (x_u8_p, s_x);
-                            unsafe {
-                                swiglu_neuron_w4a32_group64_avx512(
-                                    x_p,
-                                    gw_row,
-                                    gs_row,
-                                    uw_row,
-                                    us_row,
-                                    num_groups_k,
-                                )
-                            }
-                        }
-                    } else {
-                        unsafe {
-                            swiglu_neuron_w4a32_group64_avx512(
-                                x_p,
-                                gw_row,
-                                gs_row,
-                                uw_row,
-                                us_row,
-                                num_groups_k,
-                            )
-                        }
+                    // CPU-feature + group-size aware dispatch (AVX-512 VNNI >
+                    // AVX-512 > AVX2 > portable scalar).  Portable and safe on
+                    // every tier — no unconditional AVX-512 calls.
+                    let (g_sum, u_sum) = unsafe {
+                        swiglu_neuron_w4a32_dot_dispatch(
+                            x_p,
+                            x_u8_ptr.map(|p| p as *const u8),
+                            s_x,
+                            gw_row,
+                            gs_row,
+                            uw_row,
+                            us_row,
+                            num_groups_k,
+                            hidden_size,
+                            group_size,
+                        )
                     };
 
                     let g = g_sum + gb;

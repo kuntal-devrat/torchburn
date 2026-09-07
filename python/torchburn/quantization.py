@@ -16,6 +16,15 @@ import torch.nn as nn
 from . import _torchburn as _native
 
 
+def _flattened_rows(shape: torch.Size) -> int:
+    """Rows after the linear kernels flatten ``(..., K)`` to 2D: product of all
+    dims except the last (1 for a vector / scalar input)."""
+    rows = 1
+    for d in shape[:-1]:
+        rows *= int(d)
+    return rows
+
+
 def quantize_weight_int8(w: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
     """Quantize 2D weight matrix (N, K) to symmetric INT8 with per-channel scale (N,).
     
@@ -629,10 +638,31 @@ class QuantizedLinear(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if self.bits == 8:
             return w8a32_linear(x, self.qweight, self.scales, self.bias)
-        else:
-            if self.backend == "igpu" or os.environ.get("TORCHBURN_DEVICE", "").lower() in ("gpu", "igpu", "vulkan"):
-                return wgpu_w4a32_grouped_linear(x, self.qweight, self.scales, self.bias, group_size=self.group_size)
-            return w4a32_grouped_linear(x, self.qweight, self.scales, self.bias, group_size=self.group_size)
+
+        # The GPU (Vulkan/Metal/DX12) layer kernel is a single-row GEMV compute
+        # shader: one host submission + readback sync per invocation, so it only
+        # pays off for token-at-a-time decode (m == 1). Batched work (prefill,
+        # m > 1) is routed to the SIMD CPU kernel, which processes the whole
+        # batch in one native call instead of issuing one GPU round-trip per
+        # row. Both paths consume the *same* packed int4 layout, so this routing
+        # never changes results, only which engine computes them. When the GPU
+        # adapter cannot be initialized we also fall back to the CPU kernel
+        # instead of crashing mid-forward.
+        gpu_preferred = self.backend == "igpu" or os.environ.get(
+            "TORCHBURN_DEVICE", ""
+        ).lower() in ("gpu", "igpu", "vulkan")
+        m = 1 if x.dim() <= 1 else _flattened_rows(x.shape)
+
+        if gpu_preferred and m == 1:
+            try:
+                return wgpu_w4a32_grouped_linear(
+                    x, self.qweight, self.scales, self.bias, group_size=self.group_size
+                )
+            except Exception:
+                # GPU adapter unavailable / driver error: fall through to the
+                # portable SIMD CPU kernel instead of crashing mid-decode.
+                pass
+        return w4a32_grouped_linear(x, self.qweight, self.scales, self.bias, group_size=self.group_size)
 
     def extra_repr(self) -> str:
         return f"in_features={self.in_features}, out_features={self.out_features}, bias={self.bias is not None}, bits={self.bits}, group_size={self.group_size}, backend={self.backend}"

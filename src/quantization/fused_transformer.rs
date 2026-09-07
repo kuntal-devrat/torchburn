@@ -263,16 +263,11 @@ pub fn fused_transformer_layer_step_w4a32(
     #[cfg(not(target_arch = "x86_64"))]
     let has_vnni = false;
 
-    #[cfg(target_arch = "x86_64")]
-    let has_avx512 = is_x86_feature_detected!("avx512f") && is_x86_feature_detected!("avx512bw");
-    #[cfg(not(target_arch = "x86_64"))]
-    let has_avx512 = false;
-
-    #[cfg(target_arch = "x86_64")]
-    let has_avx2 = is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma");
-    #[cfg(not(target_arch = "x86_64"))]
-    let has_avx2 = false;
-
+    // Pre-quantise the activation for W4A8 VNNI only when the CPU actually
+    // supports it and the layout is full 64-wide groups.  The neuron helper
+    // re-checks every tier, so non-VNNI / non-AVX-512 / non-64-group CPUs
+    // always take a kernel they support (never an unconditional AVX-512 call
+    // and never a (0,0) placeholder).
     let (x_u8_opt, s_x) = if has_vnni && group_size == 64 {
         let (u, s) = unsafe { quantize_activation_to_u8(normed.as_ptr(), hidden_size) };
         (Some(u), s)
@@ -302,81 +297,21 @@ pub fn fused_transformer_layer_step_w4a32(
                 0.0
             };
 
-            let (g_sum, u_sum) = if let Some(x_u8_p) = x_u8_ptr {
-                #[cfg(target_arch = "x86_64")]
-                {
-                    unsafe {
-                        swiglu_neuron_w4a8_group64_vnni_avx512(
-                            x_u8_p as *const u8,
-                            s_x,
-                            gw_row,
-                            gs_row,
-                            uw_row,
-                            us_row,
-                            num_groups_k,
-                        )
-                    }
-                }
-                #[cfg(not(target_arch = "x86_64"))]
-                {
-                    let _ = (x_u8_p, s_x);
-                    (0.0, 0.0)
-                }
-            } else if has_avx512 {
-                #[cfg(target_arch = "x86_64")]
-                {
-                    if group_size == 64 {
-                        unsafe {
-                            swiglu_neuron_w4a32_group64_avx512(
-                                x_p,
-                                gw_row,
-                                gs_row,
-                                uw_row,
-                                us_row,
-                                num_groups_k,
-                            )
-                        }
-                    } else {
-                        (0.0, 0.0)
-                    }
-                }
-                #[cfg(not(target_arch = "x86_64"))]
-                {
-                    (0.0, 0.0)
-                }
-            } else if has_avx2 {
-                #[cfg(target_arch = "x86_64")]
-                {
-                    if group_size == 64 {
-                        unsafe {
-                            swiglu_neuron_w4a32_group64_avx2(
-                                x_p,
-                                gw_row,
-                                gs_row,
-                                uw_row,
-                                us_row,
-                                num_groups_k,
-                            )
-                        }
-                    } else {
-                        (0.0, 0.0)
-                    }
-                }
-                #[cfg(not(target_arch = "x86_64"))]
-                {
-                    (0.0, 0.0)
-                }
-            } else {
-                unsafe {
-                    swiglu_neuron_w4a32_group64_avx512(
-                        x_p,
-                        gw_row,
-                        gs_row,
-                        uw_row,
-                        us_row,
-                        num_groups_k,
-                    )
-                }
+            // CPU-feature + group-size aware dispatch (VNNI > AVX-512 > AVX2 >
+            // scalar) — portable across x86 tiers and non-x86 (Apple/ARM).
+            let (g_sum, u_sum) = unsafe {
+                swiglu_neuron_w4a32_dot_dispatch(
+                    x_p,
+                    x_u8_ptr.map(|p| p as *const u8),
+                    s_x,
+                    gw_row,
+                    gs_row,
+                    uw_row,
+                    us_row,
+                    num_groups_k,
+                    hidden_size,
+                    group_size,
+                )
             };
 
             let g = g_sum + gb;

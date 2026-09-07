@@ -408,12 +408,26 @@ struct ManagedBuffer {
     dl: DLManagedTensor,
     data: Vec<u64>,
     shape: Vec<i64>,
+    /// Logical dtype for the process-wide recycle list; pooling is keyed on
+    /// it so differently-typed buffers never alias.
+    dtype: DType,
+    /// Only buffers produced by the zero-copy engine paths are recycled back
+    /// to the free list when Python drops them. Custom-coded exports (int4/
+    /// int8 quantized payloads with non-standard DLDataType) are freed
+    /// directly instead, since `DType` cannot describe their byte layout.
+    poolable: bool,
 }
 
 /// DLPack deleter: frees the boxed `ManagedBuffer` (reconstructed from the
-/// raw pointer we boxed).
+/// raw pointer we boxed). Buffers from the engine output path are returned
+/// to the process-wide free list so repeated same-shape calls skip the
+/// malloc + zero-fill.
 unsafe extern "C" fn managed_buffer_deleter(ptr: *mut DLManagedTensor) {
-    let _ = Box::from_raw(ptr as *mut ManagedBuffer);
+    let mut buf = Box::from_raw(ptr as *mut ManagedBuffer);
+    if buf.poolable {
+        let data = std::mem::take(&mut buf.data);
+        crate::memory_pool::give_buffer_global(buf.dtype, data);
+    }
 }
 
 /// PyCapsule destructor for capsules we produce.
@@ -472,6 +486,8 @@ pub fn owned_to_capsule(py: Python<'_>, tensor: &OwnedTensor) -> PyResult<Py<PyC
         },
         data,
         shape,
+        dtype,
+        poolable: true,
     };
     let raw = Box::into_raw(Box::new(buffer)) as *mut DLManagedTensor;
     // SAFETY: PyCapsule_New either returns a valid owned reference or null;
@@ -518,6 +534,8 @@ pub fn owned_to_capsule_owned(py: Python<'_>, tensor: OwnedTensor) -> PyResult<P
         },
         data,
         shape,
+        dtype,
+        poolable: true,
     };
     let raw = Box::into_raw(Box::new(buffer)) as *mut DLManagedTensor;
     let capsule_ptr = unsafe {
@@ -541,6 +559,7 @@ pub fn owned_to_capsule_typed(
 ) -> PyResult<Py<PyCapsule>> {
     let data = tensor.data;
     let shape = tensor.shape;
+    let dtype = tensor.dtype;
     let data_ptr = data.as_ptr() as *mut c_void;
     let shape_ptr = shape.as_ptr() as *mut i64;
     let buffer = ManagedBuffer {
@@ -566,6 +585,8 @@ pub fn owned_to_capsule_typed(
         },
         data,
         shape,
+        dtype,
+        poolable: false,
     };
     let raw = Box::into_raw(Box::new(buffer)) as *mut DLManagedTensor;
     let capsule_ptr = unsafe {

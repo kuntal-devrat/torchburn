@@ -22,6 +22,21 @@ struct GraphCache {
     order: std::collections::VecDeque<i64>,
 }
 
+impl GraphCache {
+    /// Promote a handle to the back of the eviction queue (most recently used).
+    /// If the handle is not in the queue, this is a no-op.
+    fn touch(&mut self, handle: i64) {
+        // Remove from current position and push to back (most recently used).
+        // VecDeque::retain is O(n) but n <= 1024, which is negligible.
+        let len = self.order.len();
+        self.order.retain(|&h| h != handle);
+        // Only re-add if it was actually in the queue (i.e., we removed something).
+        if self.order.len() < len {
+            self.order.push_back(handle);
+        }
+    }
+}
+
 fn graph_cache() -> &'static RwLock<GraphCache> {
     static INSTANCE: OnceLock<RwLock<GraphCache>> = OnceLock::new();
     INSTANCE.get_or_init(|| {
@@ -162,6 +177,17 @@ pub fn execute_prepared(
     handle: i64,
     capsules: &[Bound<'_, PyCapsule>],
 ) -> PyResult<Vec<Py<PyCapsule>>> {
+    // LRU promotion: take write lock briefly to promote, then downcast to read lock.
+    {
+        let mut cache = graph_cache().write().unwrap_or_else(|e| e.into_inner());
+        if !cache.graphs.contains_key(&handle) {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "invalid graph handle {handle}"
+            )));
+        }
+        cache.touch(handle);
+    }
+
     let cache = graph_cache().read().unwrap_or_else(|e| e.into_inner());
     let graph = cache.graphs.get(&handle).ok_or_else(|| {
         pyo3::exceptions::PyValueError::new_err(format!("invalid graph handle {handle}"))

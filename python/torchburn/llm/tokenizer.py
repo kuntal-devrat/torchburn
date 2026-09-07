@@ -16,6 +16,14 @@ class UniversalTokenizer:
         self.eos_token_id = eos_token_id
         self.pad_token_id = pad_token_id if pad_token_id is not None else eos_token_id
         self._chat_template = getattr(tokenizer_obj, "chat_template", None)
+        # Cache whether encode() supports add_special_tokens (checked once)
+        self._encode_supports_special_tokens: Optional[bool] = None
+        try:
+            import inspect
+            params = inspect.signature(tokenizer_obj.encode).parameters
+            self._encode_supports_special_tokens = "add_special_tokens" in params
+        except Exception:
+            self._encode_supports_special_tokens = False
 
     @classmethod
     def from_pretrained(
@@ -105,10 +113,8 @@ class UniversalTokenizer:
         it (transformers / tokenizers both expose the flag on ``encode``).
         """
         try:
-            import inspect
             enc = self._tok.encode
-            params = inspect.signature(enc).parameters
-            if "add_special_tokens" in params:
+            if self._encode_supports_special_tokens:
                 res = enc(text, add_special_tokens=add_special_tokens)
             else:
                 res = enc(text)

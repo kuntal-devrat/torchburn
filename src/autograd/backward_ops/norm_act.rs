@@ -110,18 +110,16 @@ impl BackwardOp for LayerNormBackward {
         upstream: &OwnedTensor,
         saved: &[&OwnedTensor],
     ) -> Vec<(usize, OwnedTensor)> {
-        // saved[0] = input, saved[1] = normalized (after mean/std), saved[2] = weight
+        // saved[0] = input, saved[1] = normalized (unused), saved[2] = weight
         let input = saved[0];
-        let _normalized = saved[1];
         let weight = saved[2];
 
         let n = elem_count(&upstream.shape);
         let last_dim = *input.shape.last().unwrap_or(&1) as usize;
         let batch: usize = if last_dim > 0 { n / last_dim } else { 1 };
+        let eps = 1e-5f64;
 
-        // Simplified backward: treat as elementwise w.r.t. weight/bias and
-        // approximate input grad via the upstream directly (correct for small eps).
-        let mut grad_input = OwnedTensor::new(upstream.dtype, upstream.shape.clone());
+        let mut grad_input = OwnedTensor::new(upstream.dtype, input.shape.clone());
         let mut grad_weight = OwnedTensor::new(weight.dtype, weight.shape.clone());
         let mut grad_bias = if self.bias_id > 0 {
             Some(OwnedTensor::new(upstream.dtype, weight.shape.clone()))
@@ -133,6 +131,11 @@ impl BackwardOp for LayerNormBackward {
             DType::F32 => {
                 let g =
                     unsafe { std::slice::from_raw_parts(upstream.data.as_ptr() as *const f32, n) };
+                let xd =
+                    unsafe { std::slice::from_raw_parts(input.data.as_ptr() as *const f32, n) };
+                let wd = unsafe {
+                    std::slice::from_raw_parts(weight.data.as_ptr() as *const f32, last_dim)
+                };
                 let gi = unsafe {
                     std::slice::from_raw_parts_mut(grad_input.data.as_mut_ptr() as *mut f32, n)
                 };
@@ -144,38 +147,51 @@ impl BackwardOp for LayerNormBackward {
                 };
                 gw.fill(0.0);
 
-                if let Some(ref mut gb) = grad_bias {
-                    let gbb = unsafe {
-                        std::slice::from_raw_parts_mut(gb.data.as_mut_ptr() as *mut f32, last_dim)
-                    };
-                    gbb.fill(0.0);
-                }
-
-                // grad_input ≈ upstream (first-order approximation)
-                gi.copy_from_slice(g);
-
-                // grad_weight = sum over batch of (upstream * normalized)
-                // Since we approximated, just accumulate upstream over batch dims.
                 for b in 0..batch {
+                    let base = b * last_dim;
+                    // Compute mean
+                    let mut mu = 0.0f32;
                     for j in 0..last_dim {
-                        gw[j] += g[b * last_dim + j];
+                        mu += xd[base + j];
                     }
-                }
-
-                if let Some(ref mut gb) = grad_bias {
-                    let gbb = unsafe {
-                        std::slice::from_raw_parts_mut(gb.data.as_mut_ptr() as *mut f32, last_dim)
-                    };
-                    for b in 0..batch {
-                        for j in 0..last_dim {
-                            gbb[j] += g[b * last_dim + j];
-                        }
+                    mu /= last_dim as f32;
+                    // Compute variance
+                    let mut var = 0.0f32;
+                    for j in 0..last_dim {
+                        let d = xd[base + j] - mu;
+                        var += d * d;
+                    }
+                    var /= last_dim as f32;
+                    let inv_std = 1.0f32 / (var + eps as f32).sqrt();
+                    // grad_x_hat = g * weight
+                    let mut ghat_mean = 0.0f32;
+                    for j in 0..last_dim {
+                        ghat_mean += g[base + j] * wd[j];
+                    }
+                    ghat_mean /= last_dim as f32;
+                    // mean(grad_x_hat * x_hat)
+                    let mut ghat_xhat_mean = 0.0f32;
+                    for j in 0..last_dim {
+                        let xh = (xd[base + j] - mu) * inv_std;
+                        ghat_xhat_mean += g[base + j] * wd[j] * xh;
+                    }
+                    ghat_xhat_mean /= last_dim as f32;
+                    for j in 0..last_dim {
+                        let xh = (xd[base + j] - mu) * inv_std;
+                        gi[base + j] =
+                            inv_std * (g[base + j] * wd[j] - ghat_mean - xh * ghat_xhat_mean);
+                        gw[j] += g[base + j] * xh;
                     }
                 }
             }
             DType::F64 => {
                 let g =
                     unsafe { std::slice::from_raw_parts(upstream.data.as_ptr() as *const f64, n) };
+                let xd =
+                    unsafe { std::slice::from_raw_parts(input.data.as_ptr() as *const f64, n) };
+                let wd = unsafe {
+                    std::slice::from_raw_parts(weight.data.as_ptr() as *const f64, last_dim)
+                };
                 let gi = unsafe {
                     std::slice::from_raw_parts_mut(grad_input.data.as_mut_ptr() as *mut f64, n)
                 };
@@ -187,15 +203,75 @@ impl BackwardOp for LayerNormBackward {
                 };
                 gw.fill(0.0);
 
-                gi.copy_from_slice(g);
-
                 for b in 0..batch {
+                    let base = b * last_dim;
+                    let mut mu = 0.0f64;
                     for j in 0..last_dim {
-                        gw[j] += g[b * last_dim + j];
+                        mu += xd[base + j];
+                    }
+                    mu /= last_dim as f64;
+                    let mut var = 0.0f64;
+                    for j in 0..last_dim {
+                        let d = xd[base + j] - mu;
+                        var += d * d;
+                    }
+                    var /= last_dim as f64;
+                    let inv_std = 1.0f64 / (var + eps).sqrt();
+                    let mut ghat_mean = 0.0f64;
+                    for j in 0..last_dim {
+                        ghat_mean += g[base + j] * wd[j];
+                    }
+                    ghat_mean /= last_dim as f64;
+                    let mut ghat_xhat_mean = 0.0f64;
+                    for j in 0..last_dim {
+                        let xh = (xd[base + j] - mu) * inv_std;
+                        ghat_xhat_mean += g[base + j] * wd[j] * xh;
+                    }
+                    ghat_xhat_mean /= last_dim as f64;
+                    for j in 0..last_dim {
+                        let xh = (xd[base + j] - mu) * inv_std;
+                        gi[base + j] =
+                            inv_std * (g[base + j] * wd[j] - ghat_mean - xh * ghat_xhat_mean);
+                        gw[j] += g[base + j] * xh;
                     }
                 }
             }
             _ => {}
+        }
+
+        // grad_bias = sum_over_batch(grad_output)
+        if let Some(ref mut gb) = grad_bias {
+            match upstream.dtype {
+                DType::F32 => {
+                    let g = unsafe {
+                        std::slice::from_raw_parts(upstream.data.as_ptr() as *const f32, n)
+                    };
+                    let gbb = unsafe {
+                        std::slice::from_raw_parts_mut(gb.data.as_mut_ptr() as *mut f32, last_dim)
+                    };
+                    gbb.fill(0.0);
+                    for b in 0..batch {
+                        for j in 0..last_dim {
+                            gbb[j] += g[b * last_dim + j];
+                        }
+                    }
+                }
+                DType::F64 => {
+                    let g = unsafe {
+                        std::slice::from_raw_parts(upstream.data.as_ptr() as *const f64, n)
+                    };
+                    let gbb = unsafe {
+                        std::slice::from_raw_parts_mut(gb.data.as_mut_ptr() as *mut f64, last_dim)
+                    };
+                    gbb.fill(0.0);
+                    for b in 0..batch {
+                        for j in 0..last_dim {
+                            gbb[j] += g[b * last_dim + j];
+                        }
+                    }
+                }
+                _ => {}
+            }
         }
 
         let mut result = vec![(self.input_id, grad_input), (self.weight_id, grad_weight)];
