@@ -111,6 +111,17 @@ fn apply<T: Scalar>(op: BinaryOp, x: T, y: T) -> T {
     }
 }
 
+/// `apply(op, scalar, x)` — scalar operand on the left (for `sub`/`div` the
+/// operand order matters and differs from the vectorized splat direction).
+fn apply_rev<T: Scalar>(op: BinaryOp, scalar: T, x: T) -> T {
+    match op {
+        BinaryOp::Add => scalar + x,
+        BinaryOp::Sub => scalar - x,
+        BinaryOp::Mul => scalar * x,
+        BinaryOp::Div => scalar / x,
+    }
+}
+
 /// Read a tensor's elements as a typed slice.
 ///
 /// Strided views can reach element indices beyond `elem_count` (their shape
@@ -251,15 +262,6 @@ fn binary_splat_f64(a: &[f64], out: &mut [f64], f: impl Fn(f64) -> f64 + Sync) {
 }
 
 #[inline(always)]
-fn simd_binary_f32_contig(op: BinaryOp, a: &[f32], b: &[f32], out: &mut [f32]) {
-    match op {
-        BinaryOp::Add => binary_zip_f32(a, b, out, |x, y| x + y),
-        BinaryOp::Sub => binary_zip_f32(a, b, out, |x, y| x - y),
-        BinaryOp::Mul => binary_zip_f32(a, b, out, |x, y| x * y),
-        BinaryOp::Div => binary_zip_f32(a, b, out, |x, y| x / y),
-    }
-}
-#[inline(always)]
 fn simd_binary_f64_contig(op: BinaryOp, a: &[f64], b: &[f64], out: &mut [f64]) {
     match op {
         BinaryOp::Add => binary_zip_f64(a, b, out, |x, y| x + y),
@@ -291,9 +293,295 @@ fn relu_zip_f32(a: &[f32], out: &mut [f32]) {
     }
 }
 
+// ── Runtime-dispatched AVX2 / AVX-512 elementwise kernels ─────────────
+//
+// The portable x86-64 wheel compiles at the x86-64-v2 baseline (SSE4.2), so
+// LLVM auto-vectorization tops out at 4-wide f32. Eager PyTorch ships AVX-512
+// kernels and runs ~2x faster on modern CPUs for bandwidth-limited elementwise
+// work. These `#[target_feature]` kernels are selected once per call via
+// `dispatch::cpu_features()` (same pattern as the quantized GEMV path) so the
+// portable wheel gets AVX2/AVX-512 speed where the CPU supports it. Results
+// are bit-identical to the scalar path (no FMA, plain IEEE ops).
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn binary_zip_f32_avx2(op: BinaryOp, a: &[f32], b: &[f32], out: &mut [f32]) {
+    use std::arch::x86_64::*;
+    let n = out.len();
+    let mut i = 0usize;
+    while i + 8 <= n {
+        let av = _mm256_loadu_ps(a.as_ptr().add(i));
+        let bv = _mm256_loadu_ps(b.as_ptr().add(i));
+        let r = match op {
+            BinaryOp::Add => _mm256_add_ps(av, bv),
+            BinaryOp::Sub => _mm256_sub_ps(av, bv),
+            BinaryOp::Mul => _mm256_mul_ps(av, bv),
+            BinaryOp::Div => _mm256_div_ps(av, bv),
+        };
+        _mm256_storeu_ps(out.as_mut_ptr().add(i), r);
+        i += 8;
+    }
+    while i < n {
+        out[i] = match op {
+            BinaryOp::Add => a[i] + b[i],
+            BinaryOp::Sub => a[i] - b[i],
+            BinaryOp::Mul => a[i] * b[i],
+            BinaryOp::Div => a[i] / b[i],
+        };
+        i += 1;
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f")]
+unsafe fn binary_zip_f32_avx512(op: BinaryOp, a: &[f32], b: &[f32], out: &mut [f32]) {
+    use std::arch::x86_64::*;
+    let n = out.len();
+    let mut i = 0usize;
+    while i + 16 <= n {
+        let av = _mm512_loadu_ps(a.as_ptr().add(i));
+        let bv = _mm512_loadu_ps(b.as_ptr().add(i));
+        let r = match op {
+            BinaryOp::Add => _mm512_add_ps(av, bv),
+            BinaryOp::Sub => _mm512_sub_ps(av, bv),
+            BinaryOp::Mul => _mm512_mul_ps(av, bv),
+            BinaryOp::Div => _mm512_div_ps(av, bv),
+        };
+        _mm512_storeu_ps(out.as_mut_ptr().add(i), r);
+        i += 16;
+    }
+    while i < n {
+        out[i] = match op {
+            BinaryOp::Add => a[i] + b[i],
+            BinaryOp::Sub => a[i] - b[i],
+            BinaryOp::Mul => a[i] * b[i],
+            BinaryOp::Div => a[i] / b[i],
+        };
+        i += 1;
+    }
+}
+
+/// f32 zip engine with runtime AVX2/AVX-512 dispatch; scalar fallback keeps
+/// every x86 machine (and the portable baseline) correct. Rayon chunking is
+/// done here so each worker thread runs the widest SIMD available.
+#[inline(always)]
+fn simd_binary_f32_contig(op: BinaryOp, a: &[f32], b: &[f32], out: &mut [f32]) {
+    let n = out.len();
+    #[cfg(target_arch = "x86_64")]
+    let (feats, fast) = {
+        let f = crate::dispatch::cpu_features();
+        (f, f.avx512f || (f.avx2 && f.fma))
+    };
+    #[cfg(not(target_arch = "x86_64"))]
+    let fast = false;
+    if !fast {
+        return binary_zip_f32(a, b, out, |x, y| apply(op, x, y));
+    }
+    #[cfg(target_arch = "x86_64")]
+    let run = |a: &[f32], b: &[f32], o: &mut [f32]| unsafe {
+        if feats.avx512f {
+            binary_zip_f32_avx512(op, a, b, o);
+        } else {
+            binary_zip_f32_avx2(op, a, b, o);
+        }
+    };
+    #[cfg(not(target_arch = "x86_64"))]
+    let run = |a: &[f32], b: &[f32], o: &mut [f32]| {
+        let _ = (a, b, o);
+    };
+    if n >= PAR_THRESHOLD {
+        use rayon::prelude::*;
+        out.par_chunks_mut(PAR_CHUNK)
+            .enumerate()
+            .for_each(|(ci, chunk)| {
+                let s = ci * PAR_CHUNK;
+                run(&a[s..s + chunk.len()], &b[s..s + chunk.len()], chunk);
+            });
+    } else {
+        run(a, b, out);
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn binary_splat_f32_avx2(op: BinaryOp, a: &[f32], scalar: f32, rev: bool, out: &mut [f32]) {
+    use std::arch::x86_64::*;
+    let n = out.len();
+    let sv = _mm256_set1_ps(scalar);
+    let mut i = 0usize;
+    while i + 8 <= n {
+        let av = _mm256_loadu_ps(a.as_ptr().add(i));
+        let r = match (op, rev) {
+            (BinaryOp::Add, _) => _mm256_add_ps(av, sv),
+            (BinaryOp::Sub, false) => _mm256_sub_ps(av, sv),
+            (BinaryOp::Sub, true) => _mm256_sub_ps(sv, av),
+            (BinaryOp::Mul, _) => _mm256_mul_ps(av, sv),
+            (BinaryOp::Div, false) => _mm256_div_ps(av, sv),
+            (BinaryOp::Div, true) => _mm256_div_ps(sv, av),
+        };
+        _mm256_storeu_ps(out.as_mut_ptr().add(i), r);
+        i += 8;
+    }
+    while i < n {
+        out[i] = if rev {
+            apply_rev(op, scalar, a[i])
+        } else {
+            apply(op, a[i], scalar)
+        };
+        i += 1;
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f")]
+unsafe fn binary_splat_f32_avx512(op: BinaryOp, a: &[f32], scalar: f32, rev: bool, out: &mut [f32]) {
+    use std::arch::x86_64::*;
+    let n = out.len();
+    let sv = _mm512_set1_ps(scalar);
+    let mut i = 0usize;
+    while i + 16 <= n {
+        let av = _mm512_loadu_ps(a.as_ptr().add(i));
+        let r = match (op, rev) {
+            (BinaryOp::Add, _) => _mm512_add_ps(av, sv),
+            (BinaryOp::Sub, false) => _mm512_sub_ps(av, sv),
+            (BinaryOp::Sub, true) => _mm512_sub_ps(sv, av),
+            (BinaryOp::Mul, _) => _mm512_mul_ps(av, sv),
+            (BinaryOp::Div, false) => _mm512_div_ps(av, sv),
+            (BinaryOp::Div, true) => _mm512_div_ps(sv, av),
+        };
+        _mm512_storeu_ps(out.as_mut_ptr().add(i), r);
+        i += 16;
+    }
+    while i < n {
+        out[i] = if rev {
+            apply_rev(op, scalar, a[i])
+        } else {
+            apply(op, a[i], scalar)
+        };
+        i += 1;
+    }
+}
+
+/// f32 scalar-splat engine (`out[i] = a[i] op scalar` or `scalar op a[i]`)
+/// with runtime AVX2/AVX-512 dispatch.
+#[inline(always)]
+fn simd_binary_splat_f32(op: BinaryOp, a: &[f32], scalar: f32, rev: bool, out: &mut [f32]) {
+    let n = out.len();
+    #[cfg(target_arch = "x86_64")]
+    let (feats, fast) = {
+        let f = crate::dispatch::cpu_features();
+        (f, f.avx512f || (f.avx2 && f.fma))
+    };
+    #[cfg(not(target_arch = "x86_64"))]
+    let fast = false;
+    if !fast {
+        return binary_splat_f32(a, out, |x| {
+            if rev {
+                apply_rev(op, scalar, x)
+            } else {
+                apply(op, x, scalar)
+            }
+        });
+    }
+    #[cfg(target_arch = "x86_64")]
+    let run = |a: &[f32], o: &mut [f32]| unsafe {
+        if feats.avx512f {
+            binary_splat_f32_avx512(op, a, scalar, rev, o);
+        } else {
+            binary_splat_f32_avx2(op, a, scalar, rev, o);
+        }
+    };
+    #[cfg(not(target_arch = "x86_64"))]
+    let run = |a: &[f32], o: &mut [f32]| {
+        let _ = (a, o);
+    };
+    if n >= PAR_THRESHOLD {
+        use rayon::prelude::*;
+        out.par_chunks_mut(PAR_CHUNK)
+            .enumerate()
+            .for_each(|(ci, chunk)| {
+                let s = ci * PAR_CHUNK;
+                run(&a[s..s + chunk.len()], chunk);
+            });
+    } else {
+        run(a, out);
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn relu_f32_avx2(a: &[f32], out: &mut [f32]) {
+    use std::arch::x86_64::*;
+    let n = out.len();
+    let zero = _mm256_setzero_ps();
+    let mut i = 0usize;
+    while i + 8 <= n {
+        let av = _mm256_loadu_ps(a.as_ptr().add(i));
+        let r = _mm256_max_ps(av, zero);
+        _mm256_storeu_ps(out.as_mut_ptr().add(i), r);
+        i += 8;
+    }
+    while i < n {
+        out[i] = if a[i] > 0.0 { a[i] } else { 0.0 };
+        i += 1;
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f")]
+unsafe fn relu_f32_avx512(a: &[f32], out: &mut [f32]) {
+    use std::arch::x86_64::*;
+    let n = out.len();
+    let zero = _mm512_setzero_ps();
+    let mut i = 0usize;
+    while i + 16 <= n {
+        let av = _mm512_loadu_ps(a.as_ptr().add(i));
+        let r = _mm512_max_ps(av, zero);
+        _mm512_storeu_ps(out.as_mut_ptr().add(i), r);
+        i += 16;
+    }
+    while i < n {
+        out[i] = if a[i] > 0.0 { a[i] } else { 0.0 };
+        i += 1;
+    }
+}
+
 #[inline(always)]
 fn simd_relu_f32_contig(a: &[f32], out: &mut [f32]) {
-    relu_zip_f32(a, out);
+    let n = out.len();
+    #[cfg(target_arch = "x86_64")]
+    let (feats, fast) = {
+        let f = crate::dispatch::cpu_features();
+        (f, f.avx512f || f.avx2)
+    };
+    #[cfg(not(target_arch = "x86_64"))]
+    let fast = false;
+    if !fast {
+        return relu_zip_f32(a, out);
+    }
+    #[cfg(target_arch = "x86_64")]
+    let run = |a: &[f32], o: &mut [f32]| unsafe {
+        if feats.avx512f {
+            relu_f32_avx512(a, o);
+        } else {
+            relu_f32_avx2(a, o);
+        }
+    };
+    #[cfg(not(target_arch = "x86_64"))]
+    let run = |a: &[f32], o: &mut [f32]| {
+        let _ = (a, o);
+    };
+    if n >= PAR_THRESHOLD {
+        use rayon::prelude::*;
+        out.par_chunks_mut(PAR_CHUNK)
+            .enumerate()
+            .for_each(|(ci, chunk)| {
+                let s = ci * PAR_CHUNK;
+                run(&a[s..s + chunk.len()], chunk);
+            });
+    } else {
+        run(a, out);
+    }
 }
 
 fn run_binary<T: Scalar>(
@@ -321,7 +609,27 @@ fn run_binary<T: Scalar>(
     }
 
     // Fast path 2: one operand is an effective scalar (0-d or all-1 dims).
-    // The other must be contiguous so plain linear indexing reads it.
+    // The other must be contiguous so plain linear indexing reads it. f32
+    // takes the runtime-dispatched AVX2/AVX-512 splat kernels.
+    // `run_binary` is only instantiated for f32/f64, so a 4-byte element is f32.
+    if b.elem_count() == 1 && a_contig && std::mem::size_of::<T>() == 4 {
+        let scalar = unsafe { std::ptr::read(b_data.as_ptr() as *const f32) };
+        let a_f32 = unsafe { std::slice::from_raw_parts(a_data.as_ptr() as *const f32, n) };
+        let out_f32 = unsafe {
+            std::slice::from_raw_parts_mut(out_data.as_mut_ptr() as *mut f32, n)
+        };
+        simd_binary_splat_f32(op, a_f32, scalar, false, out_f32);
+        return;
+    }
+    if a.elem_count() == 1 && b_contig && std::mem::size_of::<T>() == 4 {
+        let scalar = unsafe { std::ptr::read(a_data.as_ptr() as *const f32) };
+        let b_f32 = unsafe { std::slice::from_raw_parts(b_data.as_ptr() as *const f32, n) };
+        let out_f32 = unsafe {
+            std::slice::from_raw_parts_mut(out_data.as_mut_ptr() as *mut f32, n)
+        };
+        simd_binary_splat_f32(op, b_f32, scalar, true, out_f32);
+        return;
+    }
     if a.elem_count() == 1 && b_contig {
         let scalar = a_data[0];
         map_in_place(n, out_data, |i| apply(op, scalar, b_data[i]));

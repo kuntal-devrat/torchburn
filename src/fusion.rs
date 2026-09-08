@@ -1029,15 +1029,26 @@ pub fn run_chain(
     let out_shape_rt = out_shape.clone();
     let mut out = OwnedTensor::new(dtype, out_shape);
     match dtype {
-        DType::F32 => run_chain_typed::<f32>(
-            &rexprs,
-            &leaves,
-            slots,
-            capsules,
-            &mut out,
-            out_n,
-            &out_shape_rt,
-        )?,
+        // f32 chains whose leaves are contiguous/scalar and whose ops are all
+        // lane-wise (add/sub/mul/div/relu/abs/neg) get the 8-wide lane pass:
+        // the per-element serial dependency chain then runs on 8 independent
+        // elements at once (ILP ~8x), turning compute-bound chains into
+        // bandwidth-bound passes. Results are bit-identical per element.
+        DType::F32 => {
+            if chain_f32_lane_eligible(&rexprs, &leaves) {
+                run_chain_f32_lanes(&rexprs, &leaves, slots, capsules, &mut out, out_n)?;
+            } else {
+                run_chain_typed::<f32>(
+                    &rexprs,
+                    &leaves,
+                    slots,
+                    capsules,
+                    &mut out,
+                    out_n,
+                    &out_shape_rt,
+                )?;
+            }
+        }
         DType::F64 => run_chain_typed::<f64>(
             &rexprs,
             &leaves,
@@ -1050,6 +1061,129 @@ pub fn run_chain(
         _ => unreachable!(),
     }
     Ok(out)
+}
+
+/// True when the fused chain can be evaluated with the 8-wide f32 lane pass:
+/// every leaf is contiguous (Identity) or a scalar (Scalar), and every op is
+/// lane-wise (bit-identical per element to `apply_unary`/`apply_binary`).
+fn chain_f32_lane_eligible(rexprs: &[RExpr], leaves: &[LeafInfo]) -> bool {
+    leaves
+        .iter()
+        .all(|l| !matches!(l.map, LeafMap::General { .. }))
+        && rexprs.iter().all(|e| match e.op {
+            ChainOp::Binary(b) => matches!(
+                b,
+                BinaryKind::Add | BinaryKind::Sub | BinaryKind::Mul | BinaryKind::Div
+            ),
+            ChainOp::Unary(u) => matches!(u, UnaryKind::Relu | UnaryKind::Abs | UnaryKind::Neg),
+        })
+}
+
+/// f32 lane pass for eligible chains: processes 8 elements per iteration with
+/// `wide::f32x8`. The per-element serial dependency chain (`vals[m]`) is
+/// carried per lane, so 8 independent elements pipeline through the chain.
+/// The last partial group (<8 elements) falls back to the scalar pass.
+fn run_chain_f32_lanes(
+    rexprs: &[RExpr],
+    leaves: &[LeafInfo],
+    slots: &[Slot],
+    capsules: &[crate::dlpack::CapsuleRef],
+    out: &mut OwnedTensor,
+    out_n: usize,
+) -> PyResult<()> {
+    let mut leaf_data: Vec<&[f32]> = Vec::with_capacity(leaves.len());
+    for leaf in leaves {
+        let view = crate::engine::slot_view(slots, capsules, leaf.slot)?;
+        leaf_data.push(unsafe {
+            std::slice::from_raw_parts(view.data as *const f32, view.buffer_len())
+        });
+    }
+    let out_data =
+        unsafe { std::slice::from_raw_parts_mut(out.data.as_mut_ptr() as *mut f32, out_n) };
+    if out_n >= CHAIN_PAR_THRESHOLD {
+        use rayon::prelude::*;
+        out_data
+            .par_chunks_mut(CHAIN_PAR_CHUNK)
+            .enumerate()
+            .for_each(|(ci, chunk)| {
+                let start = ci * CHAIN_PAR_CHUNK;
+                run_chunk_f32_lanes(rexprs, leaves, &leaf_data, start, chunk);
+            });
+    } else {
+        run_chunk_f32_lanes(rexprs, leaves, &leaf_data, 0, out_data);
+    }
+    Ok(())
+}
+
+/// Load 8 contiguous f32 lanes (the caller guarantees `s[..8]` is in bounds:
+/// Identity leaves are as long as the output, and groups only start where a
+/// full group fits).
+#[inline(always)]
+fn copy8(s: &[f32]) -> [f32; 8] {
+    let mut a = [0.0f32; 8];
+    a.copy_from_slice(&s[..8]);
+    a
+}
+
+#[inline(always)]
+fn run_chunk_f32_lanes(
+    rexprs: &[RExpr],
+    leaves: &[LeafInfo],
+    leaf_data: &[&[f32]],
+    start: usize,
+    chunk: &mut [f32],
+) {
+    let n_exprs = rexprs.len();
+    debug_assert!(n_exprs <= 32, "chain lane pass supports up to 32 exprs");
+    let mut vals = [wide::f32x8::ZERO; 32];
+    let n_groups = chunk.len() / 8;
+    let mut off = 0usize;
+    for _ in 0..n_groups {
+        let f = start + off;
+        for (k, e) in rexprs.iter().enumerate() {
+            let av = match e.a {
+                RArg::Chain(m) => vals[m],
+                RArg::Leaf(li) => match leaves[li].map {
+                    LeafMap::Identity => wide::f32x8::new(copy8(&leaf_data[li][f..])),
+                    LeafMap::Scalar => wide::f32x8::splat(leaf_data[li][0]),
+                    _ => unsafe { std::hint::unreachable_unchecked() },
+                },
+            };
+            let v = match e.op {
+                ChainOp::Unary(u) => match u {
+                    UnaryKind::Relu => wide::CmpGt::cmp_gt(av, wide::f32x8::ZERO)
+                        .blend(av, wide::f32x8::ZERO),
+                    UnaryKind::Abs => av.abs(),
+                    UnaryKind::Neg => av * wide::f32x8::splat(-1.0),
+                    _ => unsafe { std::hint::unreachable_unchecked() },
+                },
+                ChainOp::Binary(b) => {
+                    let bv = match e.b.expect("binary op has second operand") {
+                        RArg::Chain(m) => vals[m],
+                        RArg::Leaf(li) => match leaves[li].map {
+                            LeafMap::Identity => wide::f32x8::new(copy8(&leaf_data[li][f..])),
+                            LeafMap::Scalar => wide::f32x8::splat(leaf_data[li][0]),
+                            _ => unsafe { std::hint::unreachable_unchecked() },
+                        },
+                    };
+                    match b {
+                        BinaryKind::Add => av + bv,
+                        BinaryKind::Sub => av - bv,
+                        BinaryKind::Mul => av * bv,
+                        BinaryKind::Div => av / bv,
+                    }
+                }
+            };
+            vals[k] = v;
+        }
+        let out8 = vals[n_exprs - 1].to_array();
+        chunk[off..off + 8].copy_from_slice(&out8);
+        off += 8;
+    }
+    // Tail group (<8 elements): exact scalar semantics.
+    if off < chunk.len() {
+        run_chunk_single_pass(rexprs, leaves, leaf_data, start + off, &mut chunk[off..]);
+    }
 }
 
 #[inline(always)]

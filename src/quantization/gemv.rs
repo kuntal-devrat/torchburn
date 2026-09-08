@@ -537,19 +537,22 @@ unsafe fn dot_f32_u4_neon(x: *const f32, w_packed: *const u8, len: usize) -> f32
     total
 }
 
-/// ARM NEON: 64-element grouped INT4 dot product with group-wise scale.
-/// Equivalent to `dot_f32_u4_group64_avx512` / `dot_f32_u4_group64_avx2`.
+/// ARM NEON: shared nibble-pipeline core for grouped INT4 dots.
+///
+/// Processes `chunks` chunks of 16 int4 elements (8 packed bytes each) — the
+/// same 64-bit pipeline as `dot_f32_u4_neon`, hoisted so both the 64-element
+/// and 32-element group kernels share one implementation.
 #[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "neon")]
-unsafe fn dot_f32_u4_group64_neon(x: *const f32, w_packed: *const u8) -> f32 {
+#[inline(always)]
+unsafe fn dot_f32_u4_chunks_neon(x: *const f32, w_packed: *const u8, chunks: usize) -> f32 {
     use std::arch::aarch64::*;
     // 64-bit (uint8x8_t) nibble pipeline — see `dot_f32_u4_neon`.
     let mask_low = vdup_n_u8(0x0F);
     let sub8 = vdup_n_s8(8);
     let mut sum = vdupq_n_f32(0.0);
 
-    // Process 64 elements = 32 bytes = 2 chunks of 16 elements (8 bytes each).
-    for chunk in 0..2 {
+    for chunk in 0..chunks {
         let w_off = chunk * 8;
         let x_off = chunk * 16;
 
@@ -581,6 +584,27 @@ unsafe fn dot_f32_u4_group64_neon(x: *const f32, w_packed: *const u8) -> f32 {
     vaddvq_f32(sum)
 }
 
+/// ARM NEON: 64-element grouped INT4 dot product with group-wise scale.
+/// Equivalent to `dot_f32_u4_group64_avx512` / `dot_f32_u4_group64_avx2`.
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+#[inline(always)]
+unsafe fn dot_f32_u4_group64_neon(x: *const f32, w_packed: *const u8) -> f32 {
+    // 64 elements = 32 packed bytes = 4 chunks of 16 elements (8 bytes each).
+    // (Historically this looped 2 chunks, silently dropping the second half of
+    // every group — parity failure on Apple Silicon: rel err ~7.6e-1.)
+    dot_f32_u4_chunks_neon(x, w_packed, 4)
+}
+
+/// ARM NEON: 32-element grouped INT4 dot product with group-wise scale.
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+#[inline(always)]
+unsafe fn dot_f32_u4_group32_neon(x: *const f32, w_packed: *const u8) -> f32 {
+    // 32 elements = 16 packed bytes = 2 chunks of 16 elements (8 bytes each).
+    dot_f32_u4_chunks_neon(x, w_packed, 2)
+}
+
 /// ARM NEON: full row GEMV with group-wise scales (group_size=64).
 #[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "neon")]
@@ -594,6 +618,24 @@ unsafe fn gemv_row_w4a32_group64_neon(
     let mut row_sum = 0.0f32;
     for g in 0..num_groups {
         let dot = dot_f32_u4_group64_neon(x.add(g * 64), w_row.add(g * bytes_per_group));
+        row_sum += dot * *s_row.add(g);
+    }
+    row_sum
+}
+
+/// ARM NEON: full row GEMV with group-wise scales (group_size=32).
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn gemv_row_w4a32_group32_neon(
+    x: *const f32,
+    w_row: *const u8,
+    s_row: *const f32,
+    num_groups: usize,
+) -> f32 {
+    let bytes_per_group = 32 / 2; // 16 bytes per group
+    let mut row_sum = 0.0f32;
+    for g in 0..num_groups {
+        let dot = dot_f32_u4_group32_neon(x.add(g * 32), w_row.add(g * bytes_per_group));
         row_sum += dot * *s_row.add(g);
     }
     row_sum
@@ -1582,11 +1624,10 @@ unsafe fn dot_f32_u4_group32_fast(
             return dot_f32_u4_group32_avx2(x, w_packed);
         }
     }
-    // NEON path uses 64-element kernel for 32-element groups (processes 32 + tail)
     #[cfg(target_arch = "aarch64")]
     {
         if has_neon {
-            return dot_f32_u4_group64_neon(x, w_packed);
+            return dot_f32_u4_group32_neon(x, w_packed);
         }
     }
     #[cfg(target_arch = "aarch64")]
@@ -1605,6 +1646,12 @@ unsafe fn dot_f32_u4_group64(x: *const f32, w_packed: *const u8) -> f32 {
             return dot_f32_u4_group64_avx2(x, w_packed);
         }
     }
+    #[cfg(target_arch = "aarch64")]
+    {
+        if crate::dispatch::cpu_features().neon {
+            return dot_f32_u4_group64_neon(x, w_packed);
+        }
+    }
     dot_f32_u4_group_scalar(x, w_packed, 64)
 }
 
@@ -1617,6 +1664,12 @@ unsafe fn dot_f32_u4_group32(x: *const f32, w_packed: *const u8) -> f32 {
         }
         if crate::dispatch::cpu_features().avx2 && crate::dispatch::cpu_features().fma {
             return dot_f32_u4_group32_avx2(x, w_packed);
+        }
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        if crate::dispatch::cpu_features().neon {
+            return dot_f32_u4_group32_neon(x, w_packed);
         }
     }
     dot_f32_u4_group_scalar(x, w_packed, 32)
@@ -1758,10 +1811,25 @@ pub unsafe fn gemv_w4a32_grouped(
                 {
                     0.0f32
                 }
-            } else if has_neon && group_size == 64 {
+            } else if has_neon {
                 #[cfg(target_arch = "aarch64")]
                 {
-                    unsafe { gemv_row_w4a32_group64_neon(x_p, w_row, s_row, num_groups) }
+                    if group_size == 64 {
+                        gemv_row_w4a32_group64_neon(x_p, w_row, s_row, num_groups)
+                    } else if group_size == 32 {
+                        gemv_row_w4a32_group32_neon(x_p, w_row, s_row, num_groups)
+                    } else {
+                        let mut s = 0.0f32;
+                        for g in 0..num_groups {
+                            let cur_len = (k - g * group_size).min(group_size);
+                            s += dot_f32_u4_group_scalar(
+                                x_p.add(g * group_size),
+                                w_row.add(g * bytes_per_group),
+                                cur_len,
+                            ) * *s_row.add(g);
+                        }
+                        s
+                    }
                 }
                 #[cfg(not(target_arch = "aarch64"))]
                 {

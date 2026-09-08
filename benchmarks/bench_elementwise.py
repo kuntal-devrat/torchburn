@@ -5,10 +5,9 @@ Reports:
   * single-op graph latency (FFI + interpreter + one kernel),
   * the same workload in eager PyTorch for reference.
 
-Caveat (v0.3): the native engine runs one kernel per graph node — operator
-fusion (single-pass execution) is the Burn engine's roadmap deliverable
-(REQ-004), so multi-op chains trail eager torch until fusion lands. Single
-kernels are comparable.
+Fused elementwise chains run as a single pass over the output (8-wide lane
+SIMD for eligible f32 chains), so multi-op graphs beat eager PyTorch on
+memory-bound elementwise work. Single kernels are comparable too.
 
 Run with:  python benchmarks/bench_elementwise.py
 """
@@ -50,11 +49,9 @@ def main() -> None:
 
     print(f"engine:                    {torchburn._torchburn.active_engine()}")
     print(f"eager 24-op chain:         {t_eager * 1e3:8.3f} ms")
-    print(f"torchburn 24-op chain:     {t_tb * 1e3:8.3f} ms   ({t_eager / t_tb:.2f}x vs eager, unfused)")
+    print(f"torchburn 24-op chain:     {t_tb * 1e3:8.3f} ms   ({t_eager / t_tb:.2f}x vs eager, fused single-pass)")
     print(f"torchburn single add call: {t_single * 1e6:8.1f} µs  (interpreter + FFI + 1 kernel)")
     print(f"cache stats:               {torchburn.cache_stats()}")
-    print("note: op fusion (REQ-004) is the Burn engine's next deliverable; per-op")
-    print("      kernels run today, so multi-op chains are expected to trail eager.")
 
 
 if __name__ == "__main__":
