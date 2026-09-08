@@ -81,65 +81,92 @@ pub struct DLManagedTensor {
 // DTypes supported by the native engine
 // ---------------------------------------------------------------------------
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub enum DType {
+    F16,
+    BF16,
     F32,
     F64,
     /// Signed 64-bit integers (indices, class targets).
     I64,
     /// Signed 32-bit integers (compact indices).
     I32,
-    /// Boolean masks and 8-bit quantized buffers (int8, uint8, bool).
+    /// Signed 8-bit integers (quantized weights).
+    I8,
+    /// Unsigned 8-bit integers (quantized activations, packed weights).
+    U8,
+    /// Boolean masks (DLPack kDLBool code 6, 8 bits).
     Bool,
 }
+
+/// DLPack kDLBFloat code (bfloat16).
+pub const DL_DTYPE_BFLOAT: u8 = 4;
 
 impl DType {
     pub fn elem_size(self) -> usize {
         match self {
-            DType::F32 => 4,
-            DType::F64 => 8,
-            DType::I64 => 8,
-            DType::I32 => 4,
-            DType::Bool => 1,
+            DType::F16 | DType::BF16 => 2,
+            DType::F32 | DType::I32 => 4,
+            DType::F64 | DType::I64 => 8,
+            DType::I8 | DType::U8 | DType::Bool => 1,
         }
     }
 
     pub fn dl_code(self) -> u8 {
         match self {
-            DType::F32 | DType::F64 => DL_DTYPE_FLOAT,
-            DType::I64 | DType::I32 => DL_DTYPE_INT,
+            DType::F16 | DType::F32 | DType::F64 => DL_DTYPE_FLOAT,
+            DType::BF16 => DL_DTYPE_BFLOAT,
+            DType::I64 | DType::I32 | DType::I8 => DL_DTYPE_INT,
+            DType::U8 => DL_DTYPE_UINT,
             DType::Bool => DL_DTYPE_BOOL,
         }
     }
 
     pub fn dl_bits(self) -> u8 {
         match self {
-            DType::F32 => 32,
-            DType::F64 => 64,
-            DType::I64 => 64,
-            DType::I32 => 32,
-            DType::Bool => 8,
+            DType::F16 | DType::BF16 => 16,
+            DType::F32 | DType::I32 => 32,
+            DType::F64 | DType::I64 => 64,
+            DType::I8 | DType::U8 | DType::Bool => 8,
         }
     }
 
     pub fn name(self) -> &'static str {
         match self {
+            DType::F16 => "f16",
+            DType::BF16 => "bf16",
             DType::F32 => "f32",
             DType::F64 => "f64",
             DType::I64 => "i64",
             DType::I32 => "i32",
+            DType::I8 => "i8",
+            DType::U8 => "u8",
             DType::Bool => "bool",
         }
+    }
+
+    /// True if this is a floating-point type that supports arithmetic.
+    pub const fn is_float(self) -> bool {
+        matches!(self, DType::F16 | DType::BF16 | DType::F32 | DType::F64)
+    }
+
+    /// True if this is an integer type.
+    pub const fn is_int(self) -> bool {
+        matches!(self, DType::I8 | DType::U8 | DType::I32 | DType::I64)
     }
 }
 
 pub fn dtype_from_spec(spec: &str) -> Option<DType> {
     match spec {
+        "f16" => Some(DType::F16),
+        "bf16" => Some(DType::BF16),
         "f32" => Some(DType::F32),
         "f64" => Some(DType::F64),
         "i64" => Some(DType::I64),
         "i32" => Some(DType::I32),
-        "i8" | "u8" | "bool" => Some(DType::Bool),
+        "i8" => Some(DType::I8),
+        "u8" => Some(DType::U8),
+        "bool" => Some(DType::Bool),
         _ => None,
     }
 }
@@ -153,6 +180,35 @@ pub fn contiguous_strides(shape: &[i64]) -> Vec<i64> {
         acc = acc.saturating_mul(shape[i].max(0));
     }
     strides
+}
+
+/// Allocation-free contiguity check over raw shape/stride slices.
+///
+/// Hot kernels previously called `contiguous_strides(&shape) == strides`,
+/// allocating a `Vec<i64>` per op (~50ns + allocator lock). Call this instead,
+/// or `BorrowedTensor::is_contiguous()` on views.
+#[inline(always)]
+pub fn is_contiguous_shape_strides(shape: &[i64], strides: &[i64]) -> bool {
+    if shape.len() != strides.len() {
+        return false;
+    }
+    if shape.is_empty() {
+        return true;
+    }
+    let mut expected: i64 = 1;
+    for (&dim, &stride) in shape.iter().zip(strides.iter()).rev() {
+        if dim == 0 {
+            return true;
+        }
+        if dim == 1 {
+            continue;
+        }
+        if stride != expected {
+            return false;
+        }
+        expected = expected.saturating_mul(dim);
+    }
+    true
 }
 
 pub fn elem_count(shape: &[i64]) -> usize {
@@ -212,13 +268,18 @@ impl BorrowedTensor {
                 )));
             }
             let dtype = match (dl.dtype.code, dl.dtype.bits) {
+                (DL_DTYPE_FLOAT, 16) => DType::F16,
+                (DL_DTYPE_BFLOAT, 16) => DType::BF16,
                 (DL_DTYPE_FLOAT, 32) => DType::F32,
                 (DL_DTYPE_FLOAT, 64) => DType::F64,
                 (DL_DTYPE_INT, 64) => DType::I64,
                 (DL_DTYPE_INT, 32) => DType::I32,
-                (DL_DTYPE_INT, 8) => DType::Bool,
-                (DL_DTYPE_UINT, 8) => DType::Bool,
+                (DL_DTYPE_INT, 8) => DType::I8,
+                (DL_DTYPE_UINT, 8) => DType::U8,
                 (DL_DTYPE_BOOL, 8) => DType::Bool,
+                // torch bool is (code=6, bits=8); some exporters use (int,8)/(uint,8)
+                // for bool masks — accept only when lanes indicate a mask is
+                // impossible to distinguish; prefer explicit I8/U8 (above).
                 (code, bits) => {
                     return Err(unsupported(&format!(
                         "unsupported dtype (code={code}, bits={bits})"

@@ -138,7 +138,7 @@ pub fn equal(a: &BorrowedTensor, b: &BorrowedTensor) -> PyResult<OwnedTensor> {
                 }
             }
         }
-        DType::Bool => {
+        DType::I8 | DType::U8 | DType::Bool | DType::F16 | DType::BF16 => {
             let ad = unsafe { typed_slice::<u8>(a) };
             let bd = unsafe { typed_slice::<u8>(b) };
             for i in 0..n {
@@ -213,7 +213,7 @@ pub fn is_nonzero(a: &BorrowedTensor) -> PyResult<OwnedTensor> {
                 }
             }
         }
-        DType::Bool => {
+        DType::I8 | DType::U8 | DType::Bool | DType::F16 | DType::BF16 => {
             let d = unsafe { typed_slice::<u8>(a) };
             for &v in d.iter().take(n) {
                 if v != 0 {

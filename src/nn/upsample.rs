@@ -149,7 +149,13 @@ pub fn upsample_nearest2d(
         DType::F32 => upsample_nearest2d_f32(input, out_h, out_w),
         DType::F64 => upsample_nearest2d_f64(input, out_h, out_w),
 
-        DType::I64 | DType::I32 | DType::Bool => {
+        DType::I64
+        | DType::I32
+        | DType::I8
+        | DType::U8
+        | DType::Bool
+        | DType::F16
+        | DType::BF16 => {
             return Err(unsupported("this kernel only supports f32/f64 tensors"));
         }
     }
@@ -289,7 +295,13 @@ pub fn upsample_bilinear2d(
         DType::F32 => upsample_bilinear2d_f32(input, out_h, out_w),
         DType::F64 => upsample_bilinear2d_f64(input, out_h, out_w),
 
-        DType::I64 | DType::I32 | DType::Bool => {
+        DType::I64
+        | DType::I32
+        | DType::I8
+        | DType::U8
+        | DType::Bool
+        | DType::F16
+        | DType::BF16 => {
             return Err(unsupported("this kernel only supports f32/f64 tensors"));
         }
     }

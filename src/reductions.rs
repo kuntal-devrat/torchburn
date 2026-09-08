@@ -39,6 +39,138 @@ fn reduce_shape(shape: &[i64], dim: usize, keepdim: bool) -> Vec<i64> {
     }
 }
 
+use rayon::prelude::*;
+use wide::f32x8;
+
+fn fast_sum_f32(data: &[f32]) -> f64 {
+    let n = data.len();
+    if n >= 32768 {
+        let chunk_size = (n / rayon::current_num_threads()).max(8192);
+        data.par_chunks(chunk_size)
+            .map(|chunk| {
+                let mut acc0 = f32x8::ZERO;
+                let mut acc1 = f32x8::ZERO;
+                let chunks16 = chunk.len() / 16;
+                let mut off = 0;
+                for _ in 0..chunks16 {
+                    acc0 += f32x8::from(unsafe {
+                        std::ptr::read_unaligned(chunk.as_ptr().add(off) as *const [f32; 8])
+                    });
+                    acc1 += f32x8::from(unsafe {
+                        std::ptr::read_unaligned(chunk.as_ptr().add(off + 8) as *const [f32; 8])
+                    });
+                    off += 16;
+                }
+                let mut s = (acc0 + acc1).reduce_add() as f64;
+                while off < chunk.len() {
+                    s += chunk[off] as f64;
+                    off += 1;
+                }
+                s
+            })
+            .sum()
+    } else {
+        let mut acc0 = f32x8::ZERO;
+        let mut acc1 = f32x8::ZERO;
+        let chunks16 = n / 16;
+        let mut off = 0;
+        for _ in 0..chunks16 {
+            acc0 += f32x8::from(unsafe {
+                std::ptr::read_unaligned(data.as_ptr().add(off) as *const [f32; 8])
+            });
+            acc1 += f32x8::from(unsafe {
+                std::ptr::read_unaligned(data.as_ptr().add(off + 8) as *const [f32; 8])
+            });
+            off += 16;
+        }
+        let mut s = (acc0 + acc1).reduce_add() as f64;
+        while off < n {
+            s += data[off] as f64;
+            off += 1;
+        }
+        s
+    }
+}
+
+fn fast_sum_f64(data: &[f64]) -> f64 {
+    let n = data.len();
+    if n >= 32768 {
+        let chunk_size = (n / rayon::current_num_threads()).max(8192);
+        data.par_chunks(chunk_size)
+            .map(|chunk| chunk.iter().copied().sum::<f64>())
+            .sum()
+    } else {
+        data.iter().copied().sum()
+    }
+}
+
+fn fast_max_f32(data: &[f32]) -> (f32, usize) {
+    let n = data.len();
+    if n >= 32768 {
+        let chunk_size = (n / rayon::current_num_threads()).max(8192);
+        data.par_chunks(chunk_size)
+            .enumerate()
+            .map(|(chunk_idx, chunk)| {
+                let base = chunk_idx * chunk_size;
+                let mut m_val = f32::NEG_INFINITY;
+                let mut m_idx = 0;
+                for (i, &v) in chunk.iter().enumerate() {
+                    if v > m_val {
+                        m_val = v;
+                        m_idx = base + i;
+                    }
+                }
+                (m_val, m_idx)
+            })
+            .reduce(
+                || (f32::NEG_INFINITY, 0),
+                |a, b| if b.0 > a.0 { b } else { a },
+            )
+    } else {
+        let mut m_val = f32::NEG_INFINITY;
+        let mut m_idx = 0;
+        for (i, &v) in data.iter().enumerate() {
+            if v > m_val {
+                m_val = v;
+                m_idx = i;
+            }
+        }
+        (m_val, m_idx)
+    }
+}
+
+fn fast_min_f32(data: &[f32]) -> (f32, usize) {
+    let n = data.len();
+    if n >= 32768 {
+        let chunk_size = (n / rayon::current_num_threads()).max(8192);
+        data.par_chunks(chunk_size)
+            .enumerate()
+            .map(|(chunk_idx, chunk)| {
+                let base = chunk_idx * chunk_size;
+                let mut m_val = f32::INFINITY;
+                let mut m_idx = 0;
+                for (i, &v) in chunk.iter().enumerate() {
+                    if v < m_val {
+                        m_val = v;
+                        m_idx = base + i;
+                    }
+                }
+                (m_val, m_idx)
+            })
+            .reduce(|| (f32::INFINITY, 0), |a, b| if b.0 < a.0 { b } else { a })
+    } else {
+        let mut m_val = f32::INFINITY;
+        let mut m_idx = 0;
+        for (i, &v) in data.iter().enumerate() {
+            if v < m_val {
+                m_val = v;
+                m_idx = i;
+            }
+        }
+        (m_val, m_idx)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Sum
 // ---------------------------------------------------------------------------
@@ -66,6 +198,70 @@ fn sum_f32(a: &BorrowedTensor, dim: usize, keepdim: bool) -> OwnedTensor {
     let outer_size = outer_stride as usize;
     let inner_size = inner_stride as usize;
 
+    // Fast path: reducing the innermost dimension (contiguous access)
+    if dim == rank - 1 && inner_size == 1 {
+        use wide::f32x8;
+        let par_threshold = 4096; // parallelize when outer_size is large
+        let compute_row = |outer: usize, out_ptr: *mut f32| {
+            let base = outer * dim_size;
+            let row = &a_data[base..base + dim_size];
+            // SIMD accumulation with 4× unrolling
+            let mut acc0 = f32x8::ZERO;
+            let mut acc1 = f32x8::ZERO;
+            let mut acc2 = f32x8::ZERO;
+            let mut acc3 = f32x8::ZERO;
+            let chunks32 = dim_size / 32;
+            let mut off = 0;
+            for _ in 0..chunks32 {
+                acc0 += f32x8::from(unsafe {
+                    std::ptr::read_unaligned(row.as_ptr().add(off) as *const [f32; 8])
+                });
+                acc1 += f32x8::from(unsafe {
+                    std::ptr::read_unaligned(row.as_ptr().add(off + 8) as *const [f32; 8])
+                });
+                acc2 += f32x8::from(unsafe {
+                    std::ptr::read_unaligned(row.as_ptr().add(off + 16) as *const [f32; 8])
+                });
+                acc3 += f32x8::from(unsafe {
+                    std::ptr::read_unaligned(row.as_ptr().add(off + 24) as *const [f32; 8])
+                });
+                off += 32;
+            }
+            let mut sum = ((acc0 + acc1) + (acc2 + acc3)).reduce_add();
+            // Handle remainder
+            let chunks8 = (dim_size - off) / 8;
+            for _ in 0..chunks8 {
+                let v = f32x8::from(unsafe {
+                    std::ptr::read_unaligned(row.as_ptr().add(off) as *const [f32; 8])
+                });
+                sum += v.reduce_add();
+                off += 8;
+            }
+            while off < dim_size {
+                sum += row[off];
+                off += 1;
+            }
+            unsafe {
+                *out_ptr.add(outer) = sum;
+            }
+        };
+
+        if outer_size >= par_threshold {
+            use rayon::prelude::*;
+            let out_p = out_data.as_mut_ptr() as usize;
+            (0..outer_size).into_par_iter().for_each(|outer| {
+                compute_row(outer, out_p as *mut f32);
+            });
+        } else {
+            let out_p = out_data.as_mut_ptr();
+            for outer in 0..outer_size {
+                compute_row(outer, out_p);
+            }
+        }
+        return out;
+    }
+
+    // Generic path for non-innermost dimensions
     for outer in 0..outer_size {
         for inner in 0..inner_size {
             let mut sum = 0.0f32;
@@ -134,7 +330,13 @@ pub fn sum(a: &BorrowedTensor, dim: Option<isize>, keepdim: bool) -> PyResult<Ow
             Ok(match a.dtype {
                 DType::F32 => sum_f32(a, d, keepdim),
                 DType::F64 => sum_f64(a, d, keepdim),
-                DType::I64 | DType::I32 | DType::Bool => {
+                DType::I64
+                | DType::I32
+                | DType::I8
+                | DType::U8
+                | DType::Bool
+                | DType::F16
+                | DType::BF16 => {
                     return Err(unsupported("this kernel only supports f32/f64 tensors"))
                 }
             })
@@ -142,12 +344,15 @@ pub fn sum(a: &BorrowedTensor, dim: Option<isize>, keepdim: bool) -> PyResult<Ow
         None => {
             // Reduce all dims — scalar output
             let total: f64 = match a.dtype {
-                DType::F32 => unsafe { typed_slice::<f32>(a) }
-                    .iter()
-                    .map(|&x| x as f64)
-                    .sum(),
-                DType::F64 => unsafe { typed_slice::<f64>(a) }.iter().copied().sum(),
-                DType::I64 | DType::I32 | DType::Bool => {
+                DType::F32 => fast_sum_f32(unsafe { typed_slice::<f32>(a) }),
+                DType::F64 => fast_sum_f64(unsafe { typed_slice::<f64>(a) }),
+                DType::I64
+                | DType::I32
+                | DType::I8
+                | DType::U8
+                | DType::Bool
+                | DType::F16
+                | DType::BF16 => {
                     return Err(unsupported("this kernel only supports f32/f64 tensors"))
                 }
             };
@@ -161,7 +366,13 @@ pub fn sum(a: &BorrowedTensor, dim: Option<isize>, keepdim: bool) -> PyResult<Ow
                     let d = unsafe { typed_mut_slice::<f64>(&mut out) };
                     d[0] = total;
                 }
-                DType::I64 | DType::I32 | DType::Bool => {
+                DType::I64
+                | DType::I32
+                | DType::I8
+                | DType::U8
+                | DType::Bool
+                | DType::F16
+                | DType::BF16 => {
                     return Err(unsupported("this kernel only supports f32/f64 tensors"));
                 }
             }
@@ -194,7 +405,13 @@ pub fn mean(a: &BorrowedTensor, dim: Option<isize>, keepdim: bool) -> PyResult<O
                         *v /= dim_size;
                     }
                 }
-                DType::I64 | DType::I32 | DType::Bool => {
+                DType::I64
+                | DType::I32
+                | DType::I8
+                | DType::U8
+                | DType::Bool
+                | DType::F16
+                | DType::BF16 => {
                     return Err(unsupported("this kernel only supports f32/f64 tensors"));
                 }
             }
@@ -203,12 +420,15 @@ pub fn mean(a: &BorrowedTensor, dim: Option<isize>, keepdim: bool) -> PyResult<O
         None => {
             let total_elems = elem_count(&a.shape) as f64;
             let total: f64 = match a.dtype {
-                DType::F32 => unsafe { typed_slice::<f32>(a) }
-                    .iter()
-                    .map(|&x| x as f64)
-                    .sum(),
-                DType::F64 => unsafe { typed_slice::<f64>(a) }.iter().copied().sum(),
-                DType::I64 | DType::I32 | DType::Bool => {
+                DType::F32 => fast_sum_f32(unsafe { typed_slice::<f32>(a) }),
+                DType::F64 => fast_sum_f64(unsafe { typed_slice::<f64>(a) }),
+                DType::I64
+                | DType::I32
+                | DType::I8
+                | DType::U8
+                | DType::Bool
+                | DType::F16
+                | DType::BF16 => {
                     return Err(unsupported("this kernel only supports f32/f64 tensors"))
                 }
             };
@@ -223,7 +443,13 @@ pub fn mean(a: &BorrowedTensor, dim: Option<isize>, keepdim: bool) -> PyResult<O
                     let d = unsafe { typed_mut_slice::<f64>(&mut out) };
                     d[0] = mean_val;
                 }
-                DType::I64 | DType::I32 | DType::Bool => {
+                DType::I64
+                | DType::I32
+                | DType::I8
+                | DType::U8
+                | DType::Bool
+                | DType::F16
+                | DType::BF16 => {
                     return Err(unsupported("this kernel only supports f32/f64 tensors"));
                 }
             }
@@ -381,7 +607,13 @@ pub fn max_reduce(
             Ok(match a.dtype {
                 DType::F32 => max_f32(a, d, keepdim),
                 DType::F64 => max_f64(a, d, keepdim),
-                DType::I64 | DType::I32 | DType::Bool => {
+                DType::I64
+                | DType::I32
+                | DType::I8
+                | DType::U8
+                | DType::Bool
+                | DType::F16
+                | DType::BF16 => {
                     return Err(unsupported("this kernel only supports f32/f64 tensors"))
                 }
             })
@@ -391,14 +623,7 @@ pub fn max_reduce(
             match a.dtype {
                 DType::F32 => {
                     let data = unsafe { typed_slice::<f32>(a) };
-                    let mut max_val = f32::NEG_INFINITY;
-                    let mut max_i = 0usize;
-                    for (i, &v) in data.iter().enumerate() {
-                        if v > max_val {
-                            max_val = v;
-                            max_i = i;
-                        }
-                    }
+                    let (max_val, max_i) = fast_max_f32(data);
                     let mut out_val = OwnedTensor::new(DType::F32, vec![]);
                     let mut out_idx = OwnedTensor::new(DType::I64, vec![]);
                     {
@@ -433,7 +658,13 @@ pub fn max_reduce(
                     }
                     Ok((out_val, out_idx))
                 }
-                DType::I64 | DType::I32 | DType::Bool => {
+                DType::I64
+                | DType::I32
+                | DType::I8
+                | DType::U8
+                | DType::Bool
+                | DType::F16
+                | DType::BF16 => {
                     return Err(unsupported("this kernel only supports f32/f64 tensors"));
                 }
             }
@@ -546,7 +777,13 @@ pub fn min_reduce(
             Ok(match a.dtype {
                 DType::F32 => min_f32(a, d, keepdim),
                 DType::F64 => min_f64(a, d, keepdim),
-                DType::I64 | DType::I32 | DType::Bool => {
+                DType::I64
+                | DType::I32
+                | DType::I8
+                | DType::U8
+                | DType::Bool
+                | DType::F16
+                | DType::BF16 => {
                     return Err(unsupported("this kernel only supports f32/f64 tensors"))
                 }
             })
@@ -554,14 +791,7 @@ pub fn min_reduce(
         None => match a.dtype {
             DType::F32 => {
                 let data = unsafe { typed_slice::<f32>(a) };
-                let mut min_val = f32::INFINITY;
-                let mut min_i = 0usize;
-                for (i, &v) in data.iter().enumerate() {
-                    if v < min_val {
-                        min_val = v;
-                        min_i = i;
-                    }
-                }
+                let (min_val, min_i) = fast_min_f32(data);
                 let mut out_val = OwnedTensor::new(DType::F32, vec![]);
                 let mut out_idx = OwnedTensor::new(DType::I64, vec![]);
                 {
@@ -596,7 +826,13 @@ pub fn min_reduce(
                 }
                 Ok((out_val, out_idx))
             }
-            DType::I64 | DType::I32 | DType::Bool => {
+            DType::I64
+            | DType::I32
+            | DType::I8
+            | DType::U8
+            | DType::Bool
+            | DType::F16
+            | DType::BF16 => {
                 return Err(unsupported("this kernel only supports f32/f64 tensors"));
             }
         },
@@ -634,9 +870,13 @@ pub fn argmin(a: &BorrowedTensor, dim: Option<isize>, keepdim: bool) -> PyResult
             }
             out
         }
-        DType::I64 | DType::I32 | DType::Bool => {
-            return Err(unsupported("this kernel only supports f32/f64 tensors"))
-        }
+        DType::I64
+        | DType::I32
+        | DType::I8
+        | DType::U8
+        | DType::Bool
+        | DType::F16
+        | DType::BF16 => return Err(unsupported("this kernel only supports f32/f64 tensors")),
     };
     let (_, idx) = max_reduce(&BorrowedTensor::from_owned(&negated), dim, keepdim)?;
     Ok(idx)
@@ -676,7 +916,13 @@ pub fn std_dev(
             Ok(out)
         }
 
-        DType::I64 | DType::I32 | DType::Bool => {
+        DType::I64
+        | DType::I32
+        | DType::I8
+        | DType::U8
+        | DType::Bool
+        | DType::F16
+        | DType::BF16 => {
             return Err(unsupported("this kernel only supports f32/f64 tensors"));
         }
     }
@@ -763,7 +1009,13 @@ fn variance(
                         }
                     }
                 }
-                DType::I64 | DType::I32 | DType::Bool => {
+                DType::I64
+                | DType::I32
+                | DType::I8
+                | DType::U8
+                | DType::Bool
+                | DType::F16
+                | DType::BF16 => {
                     return Err(unsupported("this kernel only supports f32/f64 tensors"));
                 }
             }
@@ -802,7 +1054,13 @@ fn variance(
                     let d = unsafe { typed_mut_slice::<f64>(&mut out) };
                     d[0] = sum_sq / n;
                 }
-                DType::I64 | DType::I32 | DType::Bool => {
+                DType::I64
+                | DType::I32
+                | DType::I8
+                | DType::U8
+                | DType::Bool
+                | DType::F16
+                | DType::BF16 => {
                     return Err(unsupported("this kernel only supports f32/f64 tensors"));
                 }
             }
@@ -888,7 +1146,13 @@ pub fn cumsum(a: &BorrowedTensor, dim: isize) -> PyResult<OwnedTensor> {
             }
         }
 
-        DType::I64 | DType::I32 | DType::Bool => {
+        DType::I64
+        | DType::I32
+        | DType::I8
+        | DType::U8
+        | DType::Bool
+        | DType::F16
+        | DType::BF16 => {
             return Err(unsupported("this kernel only supports f32/f64 tensors"));
         }
     }
@@ -969,7 +1233,13 @@ pub fn prod(a: &BorrowedTensor, dim: Option<isize>, keepdim: bool) -> PyResult<O
                         }
                     }
                 }
-                DType::I64 | DType::I32 | DType::Bool => {
+                DType::I64
+                | DType::I32
+                | DType::I8
+                | DType::U8
+                | DType::Bool
+                | DType::F16
+                | DType::BF16 => {
                     return Err(unsupported("this kernel only supports f32/f64 tensors"));
                 }
             }
@@ -982,7 +1252,13 @@ pub fn prod(a: &BorrowedTensor, dim: Option<isize>, keepdim: bool) -> PyResult<O
                     .map(|&x| x as f64)
                     .product(),
                 DType::F64 => unsafe { typed_slice::<f64>(a) }.iter().copied().product(),
-                DType::I64 | DType::I32 | DType::Bool => {
+                DType::I64
+                | DType::I32
+                | DType::I8
+                | DType::U8
+                | DType::Bool
+                | DType::F16
+                | DType::BF16 => {
                     return Err(unsupported("this kernel only supports f32/f64 tensors"))
                 }
             };
@@ -996,7 +1272,13 @@ pub fn prod(a: &BorrowedTensor, dim: Option<isize>, keepdim: bool) -> PyResult<O
                     let d = unsafe { typed_mut_slice::<f64>(&mut out) };
                     d[0] = total;
                 }
-                DType::I64 | DType::I32 | DType::Bool => {
+                DType::I64
+                | DType::I32
+                | DType::I8
+                | DType::U8
+                | DType::Bool
+                | DType::F16
+                | DType::BF16 => {
                     return Err(unsupported("this kernel only supports f32/f64 tensors"));
                 }
             }
@@ -1030,9 +1312,13 @@ pub fn norm(a: &BorrowedTensor, dim: Option<isize>, keepdim: bool) -> PyResult<O
             }
             out
         }
-        DType::I64 | DType::I32 | DType::Bool => {
-            return Err(unsupported("this kernel only supports f32/f64 tensors"))
-        }
+        DType::I64
+        | DType::I32
+        | DType::I8
+        | DType::U8
+        | DType::Bool
+        | DType::F16
+        | DType::BF16 => return Err(unsupported("this kernel only supports f32/f64 tensors")),
     };
     let summed = sum(&BorrowedTensor::from_owned(&squared), dim, keepdim)?;
     // sqrt
@@ -1058,7 +1344,13 @@ pub fn norm(a: &BorrowedTensor, dim: Option<isize>, keepdim: bool) -> PyResult<O
             Ok(out)
         }
 
-        DType::I64 | DType::I32 | DType::Bool => {
+        DType::I64
+        | DType::I32
+        | DType::I8
+        | DType::U8
+        | DType::Bool
+        | DType::F16
+        | DType::BF16 => {
             return Err(unsupported("this kernel only supports f32/f64 tensors"));
         }
     }

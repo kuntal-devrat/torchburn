@@ -43,7 +43,9 @@ fn greedy_sample_is_argmax() {
 fn sample_within_vocab_and_nonzero_mass() {
     // Sampling with real params must stay in-bounds and (for top_p=1) pick
     // from the top-k with positive probability.
-    let mut logits: Vec<f32> = (0..151936).map(|i| (i as f32 * 0.007).sin() * 5.0).collect();
+    let mut logits: Vec<f32> = (0..151936)
+        .map(|i| (i as f32 * 0.007).sin() * 5.0)
+        .collect();
     logits[7] = 40.0;
     logits[88] = 39.0;
     let mut seen: Vec<usize> = Vec::new();
@@ -52,5 +54,8 @@ fn sample_within_vocab_and_nonzero_mass() {
         assert!(tok < logits.len());
         seen.push(tok);
     }
-    assert!(seen.contains(&7) || seen.contains(&88), "top tokens never sampled");
+    assert!(
+        seen.contains(&7) || seen.contains(&88),
+        "top tokens never sampled"
+    );
 }

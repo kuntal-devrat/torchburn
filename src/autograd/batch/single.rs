@@ -216,31 +216,27 @@ pub fn backward_single(
                                 )
                             };
                             // grad_a = g @ b^T  (parallelize over rows of g)
-                            ga.par_chunks_mut(k)
-                                .enumerate()
-                                .for_each(|(i, ga_row)| {
-                                    let g_row = &g[i * n..(i + 1) * n];
-                                    for j in 0..k {
-                                        let b_row = &bd[j * n..(j + 1) * n];
-                                        let mut s = 0.0f32;
-                                        for kk in 0..n {
-                                            s += g_row[kk] * b_row[kk];
-                                        }
-                                        ga_row[j] = s;
+                            ga.par_chunks_mut(k).enumerate().for_each(|(i, ga_row)| {
+                                let g_row = &g[i * n..(i + 1) * n];
+                                for j in 0..k {
+                                    let b_row = &bd[j * n..(j + 1) * n];
+                                    let mut s = 0.0f32;
+                                    for kk in 0..n {
+                                        s += g_row[kk] * b_row[kk];
                                     }
-                                });
+                                    ga_row[j] = s;
+                                }
+                            });
                             // grad_b = a^T @ g  (parallelize over rows of a^T = cols of a)
-                            gb.par_chunks_mut(n)
-                                .enumerate()
-                                .for_each(|(i, gb_row)| {
-                                    for j in 0..n {
-                                        let mut s = 0.0f32;
-                                        for kk in 0.._m {
-                                            s += ad[kk * k + i] * g[kk * n + j];
-                                        }
-                                        gb_row[j] = s;
+                            gb.par_chunks_mut(n).enumerate().for_each(|(i, gb_row)| {
+                                for j in 0..n {
+                                    let mut s = 0.0f32;
+                                    for kk in 0.._m {
+                                        s += ad[kk * k + i] * g[kk * n + j];
                                     }
-                                });
+                                    gb_row[j] = s;
+                                }
+                            });
                         }
                         DType::F64 => {
                             let g = unsafe {
@@ -267,30 +263,26 @@ pub fn backward_single(
                                     k * n,
                                 )
                             };
-                            ga.par_chunks_mut(k)
-                                .enumerate()
-                                .for_each(|(i, ga_row)| {
-                                    let g_row = &g[i * n..(i + 1) * n];
-                                    for j in 0..k {
-                                        let b_row = &bd[j * n..(j + 1) * n];
-                                        let mut s = 0.0f64;
-                                        for kk in 0..n {
-                                            s += g_row[kk] * b_row[kk];
-                                        }
-                                        ga_row[j] = s;
+                            ga.par_chunks_mut(k).enumerate().for_each(|(i, ga_row)| {
+                                let g_row = &g[i * n..(i + 1) * n];
+                                for j in 0..k {
+                                    let b_row = &bd[j * n..(j + 1) * n];
+                                    let mut s = 0.0f64;
+                                    for kk in 0..n {
+                                        s += g_row[kk] * b_row[kk];
                                     }
-                                });
-                            gb.par_chunks_mut(n)
-                                .enumerate()
-                                .for_each(|(i, gb_row)| {
-                                    for j in 0..n {
-                                        let mut s = 0.0f64;
-                                        for kk in 0.._m {
-                                            s += ad[kk * k + i] * g[kk * n + j];
-                                        }
-                                        gb_row[j] = s;
+                                    ga_row[j] = s;
+                                }
+                            });
+                            gb.par_chunks_mut(n).enumerate().for_each(|(i, gb_row)| {
+                                for j in 0..n {
+                                    let mut s = 0.0f64;
+                                    for kk in 0.._m {
+                                        s += ad[kk * k + i] * g[kk * n + j];
                                     }
-                                });
+                                    gb_row[j] = s;
+                                }
+                            });
                         }
                         _ => {}
                     }

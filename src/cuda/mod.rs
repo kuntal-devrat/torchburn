@@ -14,7 +14,13 @@
 mod backend;
 
 #[cfg(feature = "cuda")]
+pub mod decoder;
+
+#[cfg(feature = "cuda")]
 pub use backend::*;
+
+#[cfg(feature = "cuda")]
+pub use decoder::CudaQwenDecoder;
 
 #[cfg(not(feature = "cuda"))]
 mod fallback {

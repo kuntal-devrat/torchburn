@@ -30,6 +30,12 @@ pub enum CpuTier {
     Avx512 = 3,
     /// AVX-512F + AVX-512BW + AVX-512 VNNI (vpdpbusd).
     Avx512Vnni = 4,
+    /// AVX-512 BF16 (Sapphire Rapids+, Zen 4+).
+    Avx512Bf16 = 5,
+    /// AVX-512 FP16 (Sapphire Rapids+ with native half-precision).
+    Avx512Fp16 = 6,
+    /// Intel AMX (Advanced Matrix Extensions — tile matmul).
+    Amx = 7,
 }
 
 impl CpuTier {
@@ -40,6 +46,9 @@ impl CpuTier {
             CpuTier::Avx2 => "avx2",
             CpuTier::Avx512 => "avx512",
             CpuTier::Avx512Vnni => "avx512_vnni",
+            CpuTier::Avx512Bf16 => "avx512_bf16",
+            CpuTier::Avx512Fp16 => "avx512_fp16",
+            CpuTier::Amx => "amx",
         }
     }
 }
@@ -53,10 +62,17 @@ pub struct CpuFeatures {
     pub avx512f: bool,
     pub avx512bw: bool,
     pub avx512vnni: bool,
+    pub avx512bf16: bool,
+    pub avx512fp16: bool,
+    pub amx_tile: bool,
+    pub amx_int8: bool,
+    pub amx_bf16: bool,
     pub neon: bool,
     pub neon_fp16: bool,
     /// ARM I8MM: int8 matrix multiply extensions (M1 Pro+, Cortex-A510+).
     pub neon_i8mm: bool,
+    /// ARM dotprod: int8 dot product (Cortex-A75+, Apple M1+).
+    pub neon_dotprod: bool,
     /// ARM SVE / SVE2: scalable vector extensions.
     pub neon_sve: bool,
     /// ARM SVE2: integer dot product and widening operations.
@@ -65,7 +81,13 @@ pub struct CpuFeatures {
 
 impl CpuFeatures {
     pub const fn tier(&self) -> CpuTier {
-        if self.avx512vnni && self.avx512f && self.avx512bw {
+        if self.amx_tile && self.amx_int8 {
+            CpuTier::Amx
+        } else if self.avx512fp16 && self.avx512f {
+            CpuTier::Avx512Fp16
+        } else if self.avx512bf16 && self.avx512f {
+            CpuTier::Avx512Bf16
+        } else if self.avx512vnni && self.avx512f && self.avx512bw {
             CpuTier::Avx512Vnni
         } else if self.avx512f && self.avx512bw {
             CpuTier::Avx512
@@ -81,34 +103,160 @@ impl CpuFeatures {
     pub const fn tier_name(&self) -> &'static str {
         self.tier().name()
     }
+
+    /// Check if this CPU supports any VNNI-class integer dot product
+    /// acceleration (AVX-512 VNNI on x86, dotprod/I8MM on ARM).
+    pub const fn has_int_dot(&self) -> bool {
+        self.avx512vnni || self.neon_dotprod || self.neon_i8mm
+    }
 }
 
 /// Per-tier instances used by the `dispatch-test` override.
-pub(crate) const TIER_FEATURES: [CpuFeatures; 5] = [
+/// Covers all 8 [`CpuTier`] variants so parity tests can force every tier.
+pub(crate) const TIER_FEATURES: [CpuFeatures; 8] = [
     CpuFeatures {
-        avx2: false, fma: false, avx512f: false, avx512bw: false,
-        avx512vnni: false, neon: false, neon_fp16: false,
-        neon_i8mm: false, neon_sve: false, neon_sve2: false,
+        avx2: false,
+        fma: false,
+        avx512f: false,
+        avx512bw: false,
+        avx512vnni: false,
+        avx512bf16: false,
+        avx512fp16: false,
+        amx_tile: false,
+        amx_int8: false,
+        amx_bf16: false,
+        neon: false,
+        neon_fp16: false,
+        neon_i8mm: false,
+        neon_dotprod: false,
+        neon_sve: false,
+        neon_sve2: false,
     },
     CpuFeatures {
-        avx2: false, fma: false, avx512f: false, avx512bw: false,
-        avx512vnni: false, neon: true, neon_fp16: true,
-        neon_i8mm: false, neon_sve: false, neon_sve2: false,
+        avx2: false,
+        fma: false,
+        avx512f: false,
+        avx512bw: false,
+        avx512vnni: false,
+        avx512bf16: false,
+        avx512fp16: false,
+        amx_tile: false,
+        amx_int8: false,
+        amx_bf16: false,
+        neon: true,
+        neon_fp16: true,
+        neon_i8mm: false,
+        neon_dotprod: true,
+        neon_sve: false,
+        neon_sve2: false,
     },
     CpuFeatures {
-        avx2: true, fma: true, avx512f: false, avx512bw: false,
-        avx512vnni: false, neon: false, neon_fp16: false,
-        neon_i8mm: false, neon_sve: false, neon_sve2: false,
+        avx2: true,
+        fma: true,
+        avx512f: false,
+        avx512bw: false,
+        avx512vnni: false,
+        avx512bf16: false,
+        avx512fp16: false,
+        amx_tile: false,
+        amx_int8: false,
+        amx_bf16: false,
+        neon: false,
+        neon_fp16: false,
+        neon_i8mm: false,
+        neon_dotprod: false,
+        neon_sve: false,
+        neon_sve2: false,
     },
     CpuFeatures {
-        avx2: true, fma: true, avx512f: true, avx512bw: true,
-        avx512vnni: false, neon: false, neon_fp16: false,
-        neon_i8mm: false, neon_sve: false, neon_sve2: false,
+        avx2: true,
+        fma: true,
+        avx512f: true,
+        avx512bw: true,
+        avx512vnni: false,
+        avx512bf16: false,
+        avx512fp16: false,
+        amx_tile: false,
+        amx_int8: false,
+        amx_bf16: false,
+        neon: false,
+        neon_fp16: false,
+        neon_i8mm: false,
+        neon_dotprod: false,
+        neon_sve: false,
+        neon_sve2: false,
     },
     CpuFeatures {
-        avx2: true, fma: true, avx512f: true, avx512bw: true,
-        avx512vnni: true, neon: false, neon_fp16: false,
-        neon_i8mm: false, neon_sve: false, neon_sve2: false,
+        avx2: true,
+        fma: true,
+        avx512f: true,
+        avx512bw: true,
+        avx512vnni: true,
+        avx512bf16: false,
+        avx512fp16: false,
+        amx_tile: false,
+        amx_int8: false,
+        amx_bf16: false,
+        neon: false,
+        neon_fp16: false,
+        neon_i8mm: false,
+        neon_dotprod: false,
+        neon_sve: false,
+        neon_sve2: false,
+    },
+    CpuFeatures {
+        avx2: true,
+        fma: true,
+        avx512f: true,
+        avx512bw: true,
+        avx512vnni: true,
+        avx512bf16: true,
+        avx512fp16: false,
+        amx_tile: false,
+        amx_int8: false,
+        amx_bf16: true,
+        neon: false,
+        neon_fp16: false,
+        neon_i8mm: false,
+        neon_dotprod: false,
+        neon_sve: false,
+        neon_sve2: false,
+    },
+    CpuFeatures {
+        avx2: true,
+        fma: true,
+        avx512f: true,
+        avx512bw: true,
+        avx512vnni: true,
+        avx512bf16: true,
+        avx512fp16: true,
+        amx_tile: false,
+        amx_int8: false,
+        amx_bf16: true,
+        neon: false,
+        neon_fp16: false,
+        neon_i8mm: false,
+        neon_dotprod: false,
+        neon_sve: false,
+        neon_sve2: false,
+    },
+    CpuFeatures {
+        avx2: true,
+        fma: true,
+        avx512f: true,
+        avx512bw: true,
+        avx512vnni: true,
+        avx512bf16: true,
+        avx512fp16: true,
+        amx_tile: true,
+        amx_int8: true,
+        amx_bf16: true,
+        neon: false,
+        neon_fp16: false,
+        neon_i8mm: false,
+        neon_dotprod: false,
+        neon_sve: false,
+        neon_sve2: false,
     },
 ];
 
@@ -121,9 +269,18 @@ fn detect() -> CpuFeatures {
             avx512f: std::arch::is_x86_feature_detected!("avx512f"),
             avx512bw: std::arch::is_x86_feature_detected!("avx512bw"),
             avx512vnni: std::arch::is_x86_feature_detected!("avx512vnni"),
+            avx512bf16: std::arch::is_x86_feature_detected!("avx512bf16"),
+            // avx512fp16 detection — not all Rust toolchains support this yet
+            avx512fp16: cfg!(target_feature = "avx512fp16"),
+            // AMX detection requires nightly (unstable feature x86_amx_intrinsics).
+            // Default to false on stable; users on nightly can override via cfg.
+            amx_tile: false,
+            amx_int8: false,
+            amx_bf16: false,
             neon: false,
             neon_fp16: false,
             neon_i8mm: false,
+            neon_dotprod: false,
             neon_sve: false,
             neon_sve2: false,
         }
@@ -136,9 +293,15 @@ fn detect() -> CpuFeatures {
             avx512f: false,
             avx512bw: false,
             avx512vnni: false,
+            avx512bf16: false,
+            avx512fp16: false,
+            amx_tile: false,
+            amx_int8: false,
+            amx_bf16: false,
             neon: std::arch::is_aarch64_feature_detected!("neon"),
             neon_fp16: std::arch::is_aarch64_feature_detected!("fp16"),
             neon_i8mm: std::arch::is_aarch64_feature_detected!("i8mm"),
+            neon_dotprod: std::arch::is_aarch64_feature_detected!("dotprod"),
             neon_sve: std::arch::is_aarch64_feature_detected!("sve"),
             neon_sve2: std::arch::is_aarch64_feature_detected!("sve2"),
         }
@@ -156,15 +319,27 @@ static FEATURES: OnceLock<CpuFeatures> = OnceLock::new();
 static OVERRIDE: AtomicU8 = AtomicU8::new(0);
 
 /// Cached CPU feature set, resolved once per process.
+///
+/// Hot kernels MUST call this instead of `is_x86_feature_detected!` — CPUID
+/// inside a per-row/per-token loop costs ~100-300ns per layer. This is two
+/// cache-line loads after the one-time [`OnceLock`] init.
+#[inline(always)]
 pub fn cpu_features() -> &'static CpuFeatures {
     #[cfg(feature = "dispatch-test")]
     {
         let o = OVERRIDE.load(Ordering::Relaxed);
-        if o >= 1 && o <= 5 {
+        if o >= 1 && (o as usize) <= TIER_FEATURES.len() {
             return &TIER_FEATURES[(o - 1) as usize];
         }
     }
     FEATURES.get_or_init(detect)
+}
+
+/// Fast tier check for hot loops: hoist `cpu_features()` out of the loop,
+/// then call `tier_at_least` / field reads on the cached reference.
+#[inline(always)]
+pub fn tier_at_least(tier: CpuTier) -> bool {
+    cpu_features().tier() >= tier
 }
 
 /// Force a specific feature tier (tests only, `dispatch-test` feature).
@@ -200,6 +375,9 @@ mod tests {
         assert_eq!(TIER_FEATURES[2].tier(), CpuTier::Avx2);
         assert_eq!(TIER_FEATURES[3].tier(), CpuTier::Avx512);
         assert_eq!(TIER_FEATURES[4].tier(), CpuTier::Avx512Vnni);
+        assert_eq!(TIER_FEATURES[5].tier(), CpuTier::Avx512Bf16);
+        assert_eq!(TIER_FEATURES[6].tier(), CpuTier::Avx512Fp16);
+        assert_eq!(TIER_FEATURES[7].tier(), CpuTier::Amx);
     }
 
     #[test]
@@ -230,6 +408,9 @@ mod tests {
             CpuTier::Avx2,
             CpuTier::Avx512,
             CpuTier::Avx512Vnni,
+            CpuTier::Avx512Bf16,
+            CpuTier::Avx512Fp16,
+            CpuTier::Amx,
         ] {
             force_tier(tier);
             assert_eq!(cpu_features().tier(), tier);

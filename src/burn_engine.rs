@@ -22,9 +22,7 @@
 //!   the zero-copy guarantee (REQ-003) belongs to the native engine; the
 //!   fused wgpu engine will own its device buffers instead.
 
-use crate::dlpack::{
-    self, contiguous_strides, dtype_from_spec, unsupported, BorrowedTensor, DType, OwnedTensor,
-};
+use crate::dlpack::{self, dtype_from_spec, unsupported, BorrowedTensor, DType, OwnedTensor};
 use crate::engine::{self, Node, Payload};
 use burn::backend::NdArray;
 use burn::tensor::activation::{
@@ -69,7 +67,7 @@ fn read_inputs(payload: &Payload, capsules: &[Bound<'_, PyCapsule>]) -> PyResult
         if t.dtype != DType::F32 {
             return Err(unsupported("burn engine currently supports f32 only"));
         }
-        if t.strides != contiguous_strides(&t.shape) {
+        if !t.is_contiguous() {
             return Err(unsupported("burn engine requires contiguous inputs"));
         }
         let n = t.elem_count();

@@ -204,20 +204,18 @@ pub fn fused_swiglu_mlp_w4a32(
         let min_chunk = (n_inter / (n_threads * 4)).max(8);
 
         #[cfg(target_arch = "x86_64")]
-        let has_vnni = is_x86_feature_detected!("avx512vnni")
-            && is_x86_feature_detected!("avx512f")
-            && is_x86_feature_detected!("avx512bw");
+        let has_vnni = crate::dispatch::cpu_features().avx512vnni;
         #[cfg(not(target_arch = "x86_64"))]
         let has_vnni = false;
 
         #[cfg(target_arch = "x86_64")]
         let has_avx512 =
-            is_x86_feature_detected!("avx512f") && is_x86_feature_detected!("avx512bw");
+            crate::dispatch::cpu_features().avx512f && crate::dispatch::cpu_features().avx512bw;
         #[cfg(not(target_arch = "x86_64"))]
         let has_avx512 = false;
 
         #[cfg(target_arch = "x86_64")]
-        let has_avx2 = is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma");
+        let has_avx2 = crate::dispatch::cpu_features().avx2 && crate::dispatch::cpu_features().fma;
         #[cfg(not(target_arch = "x86_64"))]
         let has_avx2 = false;
 
@@ -455,17 +453,16 @@ pub(crate) unsafe fn swiglu_neuron_w4a32_dot_dispatch(
     group_size: usize,
 ) -> (f32, f32) {
     #[cfg(target_arch = "x86_64")]
-    let has_vnni = is_x86_feature_detected!("avx512vnni")
-        && is_x86_feature_detected!("avx512f")
-        && is_x86_feature_detected!("avx512bw");
+    let has_vnni = crate::dispatch::cpu_features().avx512vnni;
     #[cfg(not(target_arch = "x86_64"))]
     let has_vnni = false;
     #[cfg(target_arch = "x86_64")]
-    let has_avx512 = is_x86_feature_detected!("avx512f") && is_x86_feature_detected!("avx512bw");
+    let has_avx512 =
+        crate::dispatch::cpu_features().avx512f && crate::dispatch::cpu_features().avx512bw;
     #[cfg(not(target_arch = "x86_64"))]
     let has_avx512 = false;
     #[cfg(target_arch = "x86_64")]
-    let has_avx2 = is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma");
+    let has_avx2 = crate::dispatch::cpu_features().avx2 && crate::dispatch::cpu_features().fma;
     #[cfg(not(target_arch = "x86_64"))]
     let has_avx2 = false;
 
@@ -509,7 +506,9 @@ pub(crate) unsafe fn swiglu_neuron_w4a32_dot_dispatch(
     if full_groups && group_size == 64 && has_avx512 {
         #[cfg(target_arch = "x86_64")]
         {
-            return swiglu_neuron_w4a32_group64_avx512(x, gw_row, gs_row, uw_row, us_row, num_groups);
+            return swiglu_neuron_w4a32_group64_avx512(
+                x, gw_row, gs_row, uw_row, us_row, num_groups,
+            );
         }
         #[cfg(not(target_arch = "x86_64"))]
         {
@@ -519,7 +518,9 @@ pub(crate) unsafe fn swiglu_neuron_w4a32_dot_dispatch(
     if full_groups && group_size == 32 && has_avx512 {
         #[cfg(target_arch = "x86_64")]
         {
-            return swiglu_neuron_w4a32_group32_avx512(x, gw_row, gs_row, uw_row, us_row, num_groups);
+            return swiglu_neuron_w4a32_group32_avx512(
+                x, gw_row, gs_row, uw_row, us_row, num_groups,
+            );
         }
         #[cfg(not(target_arch = "x86_64"))]
         {
@@ -645,8 +646,7 @@ pub fn quantize_linear_weights_int4(w: &BorrowedTensor) -> PyResult<(OwnedTensor
 pub unsafe fn dot_f32_f32(a: *const f32, b: *const f32, len: usize) -> f32 {
     #[cfg(target_arch = "x86_64")]
     {
-        let feats = crate::dispatch::cpu_features();
-        if feats.avx512f && len >= 16 {
+        if crate::dispatch::cpu_features().avx512f && len >= 16 {
             use std::arch::x86_64::*;
             let mut acc = _mm512_setzero_ps();
             let mut i = 0;
@@ -663,7 +663,7 @@ pub unsafe fn dot_f32_f32(a: *const f32, b: *const f32, len: usize) -> f32 {
             }
             return sum;
         }
-        if feats.avx2 && feats.fma && len >= 8 {
+        if crate::dispatch::cpu_features().avx2 && crate::dispatch::cpu_features().fma && len >= 8 {
             use std::arch::x86_64::*;
             let mut acc = _mm256_setzero_ps();
             let mut i = 0;
@@ -674,6 +674,26 @@ pub unsafe fn dot_f32_f32(a: *const f32, b: *const f32, len: usize) -> f32 {
                 i += 8;
             }
             let mut sum = hsum256_ps_avx(acc);
+            while i < len {
+                sum += *a.add(i) * *b.add(i);
+                i += 1;
+            }
+            return sum;
+        }
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        if len >= 4 {
+            use std::arch::aarch64::*;
+            let mut acc = vdupq_n_f32(0.0);
+            let mut i = 0;
+            while i + 4 <= len {
+                let av = vld1q_f32(a.add(i));
+                let bv = vld1q_f32(b.add(i));
+                acc = vfmaq_f32(acc, av, bv);
+                i += 4;
+            }
+            let mut sum = vaddvq_f32(acc);
             while i < len {
                 sum += *a.add(i) * *b.add(i);
                 i += 1;
@@ -1079,7 +1099,7 @@ unsafe fn fast_rms_norm_avx512(x: *const f32, w: *const f32, out: *mut f32, n: u
 pub unsafe fn fast_rms_norm(x: *const f32, w: *const f32, out: *mut f32, n: usize, eps: f32) {
     #[cfg(target_arch = "x86_64")]
     {
-        if is_x86_feature_detected!("avx512f") {
+        if crate::dispatch::cpu_features().avx512f {
             fast_rms_norm_avx512(x, w, out, n, eps);
             return;
         }
@@ -1111,16 +1131,187 @@ unsafe fn fast_vector_add_avx512(dst: *mut f32, src: *const f32, n: usize) {
     }
 }
 
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn fast_vector_add_avx2(dst: *mut f32, src: *const f32, n: usize) {
+    use std::arch::x86_64::*;
+    let num_chunks = n / 8;
+    for c in 0..num_chunks {
+        let d = _mm256_loadu_ps(dst.add(c * 8));
+        let s = _mm256_loadu_ps(src.add(c * 8));
+        _mm256_storeu_ps(dst.add(c * 8), _mm256_add_ps(d, s));
+    }
+    for i in (num_chunks * 8)..n {
+        *dst.add(i) += *src.add(i);
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
+unsafe fn fast_vector_add_neon(dst: *mut f32, src: *const f32, n: usize) {
+    use std::arch::aarch64::*;
+    let num_chunks = n / 4;
+    for c in 0..num_chunks {
+        let d = vld1q_f32(dst.add(c * 4));
+        let s = vld1q_f32(src.add(c * 4));
+        vst1q_f32(dst.add(c * 4), vaddq_f32(d, s));
+    }
+    for i in (num_chunks * 4)..n {
+        *dst.add(i) += *src.add(i);
+    }
+}
+
 #[inline(always)]
 pub(crate) unsafe fn fast_vector_add(dst: *mut f32, src: *const f32, n: usize) {
     #[cfg(target_arch = "x86_64")]
     {
-        if is_x86_feature_detected!("avx512f") {
+        if crate::dispatch::cpu_features().avx512f {
             fast_vector_add_avx512(dst, src, n);
             return;
         }
+        if crate::dispatch::cpu_features().avx2 {
+            fast_vector_add_avx2(dst, src, n);
+            return;
+        }
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        fast_vector_add_neon(dst, src, n);
+        return;
     }
     for i in 0..n {
         *dst.add(i) += *src.add(i);
     }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f")]
+unsafe fn fast_vector_fma_avx512(dst: *mut f32, src: *const f32, scale: f32, n: usize) {
+    use std::arch::x86_64::*;
+    let s_vec = _mm512_set1_ps(scale);
+    let num_chunks = n / 16;
+    for c in 0..num_chunks {
+        let d = _mm512_loadu_ps(dst.add(c * 16));
+        let s = _mm512_loadu_ps(src.add(c * 16));
+        _mm512_storeu_ps(dst.add(c * 16), _mm512_fmadd_ps(s_vec, s, d));
+    }
+    for i in (num_chunks * 16)..n {
+        *dst.add(i) += scale * *src.add(i);
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn fast_vector_fma_avx2(dst: *mut f32, src: *const f32, scale: f32, n: usize) {
+    use std::arch::x86_64::*;
+    let s_vec = _mm256_set1_ps(scale);
+    let num_chunks = n / 8;
+    for c in 0..num_chunks {
+        let d = _mm256_loadu_ps(dst.add(c * 8));
+        let s = _mm256_loadu_ps(src.add(c * 8));
+        _mm256_storeu_ps(dst.add(c * 8), _mm256_fmadd_ps(s_vec, s, d));
+    }
+    for i in (num_chunks * 8)..n {
+        *dst.add(i) += scale * *src.add(i);
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
+unsafe fn fast_vector_fma_neon(dst: *mut f32, src: *const f32, scale: f32, n: usize) {
+    use std::arch::aarch64::*;
+    let s_vec = vdupq_n_f32(scale);
+    let num_chunks = n / 4;
+    for c in 0..num_chunks {
+        let d = vld1q_f32(dst.add(c * 4));
+        let s = vld1q_f32(src.add(c * 4));
+        vst1q_f32(dst.add(c * 4), vfmaq_f32(d, s, s_vec));
+    }
+    for i in (num_chunks * 4)..n {
+        *dst.add(i) += scale * *src.add(i);
+    }
+}
+
+#[inline(always)]
+pub(crate) unsafe fn fast_vector_fma(dst: *mut f32, src: *const f32, scale: f32, n: usize) {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if crate::dispatch::cpu_features().avx512f {
+            fast_vector_fma_avx512(dst, src, scale, n);
+            return;
+        }
+        if crate::dispatch::cpu_features().avx2 && crate::dispatch::cpu_features().fma {
+            fast_vector_fma_avx2(dst, src, scale, n);
+            return;
+        }
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        fast_vector_fma_neon(dst, src, scale, n);
+        return;
+    }
+    for i in 0..n {
+        *dst.add(i) += scale * *src.add(i);
+    }
+}
+
+/// Batched prefill SwiGLU MLP for INT4 (W4A32).
+///
+/// For `m == 1` delegates to the per-token `fused_swiglu_mlp_w4a32` path
+/// (same hot path, no cost). For `m > 1` (prompt prefill) it calls the
+/// Rayon-parallel `gemm_w4a32_grouped` for both gate and up projections,
+/// applies SwiGLU element-wise, then calls `gemm_w4a32_grouped` for down.
+///
+/// This replaces the token-loop inside `fused_swiglu_mlp_w4a32` with a
+/// fully-parallel 2D tiled GEMM, giving 2–5× prefill throughput on CPU.
+pub fn fused_swiglu_mlp_batched_w4a32(
+    x: &BorrowedTensor,
+    gate_w: &BorrowedTensor,
+    gate_s: &BorrowedTensor,
+    gate_b: Option<&BorrowedTensor>,
+    up_w: &BorrowedTensor,
+    up_s: &BorrowedTensor,
+    up_b: Option<&BorrowedTensor>,
+    down_w: &BorrowedTensor,
+    down_s: &BorrowedTensor,
+    down_b: Option<&BorrowedTensor>,
+    group_size: usize,
+) -> PyResult<OwnedTensor> {
+    use crate::quantization::packed_v2::w4a32_grouped_linear;
+
+    let x_rank = x.shape.len();
+    if x_rank < 1 {
+        return Err(unsupported(
+            "fused_swiglu_mlp_batched_w4a32: x needs ≥1 dim",
+        ));
+    }
+    let m = elem_count(&x.shape[..x_rank - 1]);
+
+    // Single token: reuse the existing per-token fused GEMV path.
+    if m == 1 {
+        return fused_swiglu_mlp_w4a32(
+            x, gate_w, gate_s, gate_b, up_w, up_s, up_b, down_w, down_s, down_b, group_size,
+        );
+    }
+
+    let n_inter = gate_w.shape[0] as usize;
+
+    // ── Gate GEMM + Up GEMM: each (m, k) × (n_inter, k)^T → (m, n_inter) ─
+    let mut gate_out = w4a32_grouped_linear(x, gate_w, gate_s, gate_b, group_size)?;
+    let up_out = w4a32_grouped_linear(x, up_w, up_s, up_b, group_size)?;
+
+    // ── SwiGLU fused in-place: gate_out[i] = silu(gate[i]) * up[i] ───────
+    {
+        let g = unsafe { typed_mut_slice::<f32>(&mut gate_out) };
+        // up_out is OwnedTensor: read its f32 payload directly (same layout
+        // as typed_slice over a view, without allocating a BorrowedTensor).
+        let u: &[f32] =
+            unsafe { std::slice::from_raw_parts(up_out.data.as_ptr() as *const f32, m * n_inter) };
+        for i in 0..(m * n_inter) {
+            let gv = g[i];
+            g[i] = (gv / (1.0 + (-gv).exp())) * u[i];
+        }
+    }
+
+    // ── Down GEMM: (m, n_inter) × (n_out, n_inter)^T → (m, n_out) ────────
+    let h_view = gate_out.as_view();
+    w4a32_grouped_linear(&h_view, down_w, down_s, down_b, group_size)
 }

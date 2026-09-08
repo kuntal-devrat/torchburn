@@ -4,7 +4,7 @@
 //! (1.0 for true, 0.0 for false) to stay within the f32/f64 engine.
 //! Unary math ops (abs, neg, sign, sqrt, exp, log, etc.) are elementwise.
 
-use crate::dlpack::{contiguous_strides, unsupported, BorrowedTensor, DType, OwnedTensor};
+use crate::dlpack::{unsupported, BorrowedTensor, DType, OwnedTensor};
 use crate::kernels::Scalar;
 use pyo3::prelude::*;
 use std::f64;
@@ -97,8 +97,8 @@ pub fn comparison(op: &str, a: &BorrowedTensor, b: &BorrowedTensor) -> PyResult<
     }
     let out_shape = crate::kernels::broadcast_shape(&a.shape, &b.shape)?;
     let mut out = OwnedTensor::new(DType::F32, out_shape);
-    let a_contig = a.strides == contiguous_strides(&a.shape);
-    let b_contig = b.strides == contiguous_strides(&b.shape);
+    let a_contig = a.is_contiguous();
+    let b_contig = b.is_contiguous();
     let same_shape = a.shape == b.shape && a_contig && b_contig;
 
     match a.dtype {
@@ -134,9 +134,13 @@ pub fn comparison(op: &str, a: &BorrowedTensor, b: &BorrowedTensor) -> PyResult<
                 run_cmp_broadcast::<f64>(a, b, &mut out, cmp_f64);
             }
         }
-        DType::I64 | DType::I32 | DType::Bool => {
-            return Err(unsupported("this kernel only supports f32/f64 tensors"))
-        }
+        DType::I64
+        | DType::I32
+        | DType::I8
+        | DType::U8
+        | DType::Bool
+        | DType::F16
+        | DType::BF16 => return Err(unsupported("this kernel only supports f32/f64 tensors")),
     }
     Ok(out)
 }
@@ -191,9 +195,7 @@ fn run_logical_binary(
 pub fn logical_and(a: &BorrowedTensor, b: &BorrowedTensor) -> PyResult<OwnedTensor> {
     let out_shape = crate::kernels::broadcast_shape(&a.shape, &b.shape)?;
     let mut out = OwnedTensor::new(DType::F32, out_shape);
-    let same_shape = a.shape == b.shape
-        && a.strides == contiguous_strides(&a.shape)
-        && b.strides == contiguous_strides(&b.shape);
+    let same_shape = a.shape == b.shape && a.is_contiguous() && b.is_contiguous();
     if same_shape {
         let n = out.elem_count();
         let a_data = unsafe { typed_slice::<f32>(a) };
@@ -215,9 +217,7 @@ pub fn logical_and(a: &BorrowedTensor, b: &BorrowedTensor) -> PyResult<OwnedTens
 pub fn logical_or(a: &BorrowedTensor, b: &BorrowedTensor) -> PyResult<OwnedTensor> {
     let out_shape = crate::kernels::broadcast_shape(&a.shape, &b.shape)?;
     let mut out = OwnedTensor::new(DType::F32, out_shape);
-    let same_shape = a.shape == b.shape
-        && a.strides == contiguous_strides(&a.shape)
-        && b.strides == contiguous_strides(&b.shape);
+    let same_shape = a.shape == b.shape && a.is_contiguous() && b.is_contiguous();
     if same_shape {
         let n = out.elem_count();
         let a_data = unsafe { typed_slice::<f32>(a) };
@@ -241,7 +241,7 @@ pub fn logical_not(a: &BorrowedTensor) -> PyResult<OwnedTensor> {
     let a_data = unsafe { typed_slice::<f32>(a) };
     let out_data = unsafe { typed_mut_slice::<f32>(&mut out) };
     let n = a.elem_count();
-    if a.strides == contiguous_strides(&a.shape) {
+    if a.is_contiguous() {
         for i in 0..n {
             out_data[i] = if a_data[i] == 0.0 { 1.0 } else { 0.0 };
         }
@@ -343,7 +343,7 @@ fn run_unary_general_f64(a: &BorrowedTensor, out: &mut OwnedTensor, f: impl Fn(f
 
 fn unary_f32(a: &BorrowedTensor, f: impl Fn(f32) -> f32 + Sync + Send) -> PyResult<OwnedTensor> {
     let mut out = OwnedTensor::new(DType::F32, a.shape.clone());
-    if a.strides == contiguous_strides(&a.shape) {
+    if a.is_contiguous() {
         run_unary_contig_f32(a, &mut out, f);
     } else {
         run_unary_general_f32(a, &mut out, f);
@@ -353,10 +353,72 @@ fn unary_f32(a: &BorrowedTensor, f: impl Fn(f32) -> f32 + Sync + Send) -> PyResu
 
 fn unary_f64(a: &BorrowedTensor, f: impl Fn(f64) -> f64 + Sync + Send) -> PyResult<OwnedTensor> {
     let mut out = OwnedTensor::new(DType::F64, a.shape.clone());
-    if a.strides == contiguous_strides(&a.shape) {
+    if a.is_contiguous() {
         run_unary_contig_f64(a, &mut out, f);
     } else {
         run_unary_general_f64(a, &mut out, f);
+    }
+    Ok(out)
+}
+
+fn unary_f16(a: &BorrowedTensor, f: impl Fn(f32) -> f32 + Sync + Send) -> PyResult<OwnedTensor> {
+    let mut out = OwnedTensor::new(DType::F16, a.shape.clone());
+    let a_data = unsafe { typed_slice::<half::f16>(a) };
+    let out_data = unsafe { typed_mut_slice::<half::f16>(&mut out) };
+    if a.is_contiguous() {
+        use rayon::prelude::*;
+        out_data.par_iter_mut().enumerate().for_each(|(i, o)| {
+            *o = half::f16::from_f32(f(a_data[i].to_f32()));
+        });
+    } else {
+        let n = a.elem_count();
+        let a_rank = a.shape.len();
+        let mut coords = vec![0usize; a_rank];
+        for i in 0..n {
+            let mut rem = i;
+            for d in (0..a_rank).rev() {
+                coords[d] = rem % (a.shape[d].max(1) as usize);
+                rem /= a.shape[d].max(1) as usize;
+            }
+            let mut ai = 0usize;
+            for d in 0..a_rank {
+                if a.shape[d] > 1 {
+                    ai += coords[d] * a.strides[d] as usize;
+                }
+            }
+            out_data[i] = half::f16::from_f32(f(a_data[ai].to_f32()));
+        }
+    }
+    Ok(out)
+}
+
+fn unary_bf16(a: &BorrowedTensor, f: impl Fn(f32) -> f32 + Sync + Send) -> PyResult<OwnedTensor> {
+    let mut out = OwnedTensor::new(DType::BF16, a.shape.clone());
+    let a_data = unsafe { typed_slice::<half::bf16>(a) };
+    let out_data = unsafe { typed_mut_slice::<half::bf16>(&mut out) };
+    if a.is_contiguous() {
+        use rayon::prelude::*;
+        out_data.par_iter_mut().enumerate().for_each(|(i, o)| {
+            *o = half::bf16::from_f32(f(a_data[i].to_f32()));
+        });
+    } else {
+        let n = a.elem_count();
+        let a_rank = a.shape.len();
+        let mut coords = vec![0usize; a_rank];
+        for i in 0..n {
+            let mut rem = i;
+            for d in (0..a_rank).rev() {
+                coords[d] = rem % (a.shape[d].max(1) as usize);
+                rem /= a.shape[d].max(1) as usize;
+            }
+            let mut ai = 0usize;
+            for d in 0..a_rank {
+                if a.shape[d] > 1 {
+                    ai += coords[d] * a.strides[d] as usize;
+                }
+            }
+            out_data[i] = half::bf16::from_f32(f(a_data[ai].to_f32()));
+        }
     }
     Ok(out)
 }
@@ -365,9 +427,11 @@ pub fn abs(a: &BorrowedTensor) -> PyResult<OwnedTensor> {
     match a.dtype {
         DType::F32 => unary_f32(a, |x| x.abs()),
         DType::F64 => unary_f64(a, |x| x.abs()),
+        DType::F16 => unary_f16(a, |x| x.abs()),
+        DType::BF16 => unary_bf16(a, |x| x.abs()),
 
-        DType::I64 | DType::I32 | DType::Bool => {
-            return Err(unsupported("this kernel only supports f32/f64 tensors"));
+        DType::I64 | DType::I32 | DType::I8 | DType::U8 | DType::Bool => {
+            return Err(unsupported("this kernel only supports float tensors"));
         }
     }
 }
@@ -377,7 +441,13 @@ pub fn neg(a: &BorrowedTensor) -> PyResult<OwnedTensor> {
         DType::F32 => unary_f32(a, |x| -x),
         DType::F64 => unary_f64(a, |x| -x),
 
-        DType::I64 | DType::I32 | DType::Bool => {
+        DType::I64
+        | DType::I32
+        | DType::I8
+        | DType::U8
+        | DType::Bool
+        | DType::F16
+        | DType::BF16 => {
             return Err(unsupported("this kernel only supports f32/f64 tensors"));
         }
     }
@@ -388,7 +458,13 @@ pub fn sign(a: &BorrowedTensor) -> PyResult<OwnedTensor> {
         DType::F32 => unary_f32(a, |x| x.signum()),
         DType::F64 => unary_f64(a, |x| x.signum()),
 
-        DType::I64 | DType::I32 | DType::Bool => {
+        DType::I64
+        | DType::I32
+        | DType::I8
+        | DType::U8
+        | DType::Bool
+        | DType::F16
+        | DType::BF16 => {
             return Err(unsupported("this kernel only supports f32/f64 tensors"));
         }
     }
@@ -399,7 +475,13 @@ pub fn sqrt(a: &BorrowedTensor) -> PyResult<OwnedTensor> {
         DType::F32 => unary_f32(a, |x| x.sqrt()),
         DType::F64 => unary_f64(a, |x| x.sqrt()),
 
-        DType::I64 | DType::I32 | DType::Bool => {
+        DType::I64
+        | DType::I32
+        | DType::I8
+        | DType::U8
+        | DType::Bool
+        | DType::F16
+        | DType::BF16 => {
             return Err(unsupported("this kernel only supports f32/f64 tensors"));
         }
     }
@@ -410,7 +492,13 @@ pub fn rsqrt(a: &BorrowedTensor) -> PyResult<OwnedTensor> {
         DType::F32 => unary_f32(a, |x| 1.0 / x.sqrt()),
         DType::F64 => unary_f64(a, |x| 1.0 / x.sqrt()),
 
-        DType::I64 | DType::I32 | DType::Bool => {
+        DType::I64
+        | DType::I32
+        | DType::I8
+        | DType::U8
+        | DType::Bool
+        | DType::F16
+        | DType::BF16 => {
             return Err(unsupported("this kernel only supports f32/f64 tensors"));
         }
     }
@@ -421,7 +509,13 @@ pub fn exp(a: &BorrowedTensor) -> PyResult<OwnedTensor> {
         DType::F32 => unary_f32(a, |x| x.exp()),
         DType::F64 => unary_f64(a, |x| x.exp()),
 
-        DType::I64 | DType::I32 | DType::Bool => {
+        DType::I64
+        | DType::I32
+        | DType::I8
+        | DType::U8
+        | DType::Bool
+        | DType::F16
+        | DType::BF16 => {
             return Err(unsupported("this kernel only supports f32/f64 tensors"));
         }
     }
@@ -432,7 +526,13 @@ pub fn log(a: &BorrowedTensor) -> PyResult<OwnedTensor> {
         DType::F32 => unary_f32(a, |x| x.ln()),
         DType::F64 => unary_f64(a, |x| x.ln()),
 
-        DType::I64 | DType::I32 | DType::Bool => {
+        DType::I64
+        | DType::I32
+        | DType::I8
+        | DType::U8
+        | DType::Bool
+        | DType::F16
+        | DType::BF16 => {
             return Err(unsupported("this kernel only supports f32/f64 tensors"));
         }
     }
@@ -443,7 +543,13 @@ pub fn reciprocal(a: &BorrowedTensor) -> PyResult<OwnedTensor> {
         DType::F32 => unary_f32(a, |x| 1.0 / x),
         DType::F64 => unary_f64(a, |x| 1.0 / x),
 
-        DType::I64 | DType::I32 | DType::Bool => {
+        DType::I64
+        | DType::I32
+        | DType::I8
+        | DType::U8
+        | DType::Bool
+        | DType::F16
+        | DType::BF16 => {
             return Err(unsupported("this kernel only supports f32/f64 tensors"));
         }
     }
@@ -454,7 +560,13 @@ pub fn ceil(a: &BorrowedTensor) -> PyResult<OwnedTensor> {
         DType::F32 => unary_f32(a, |x| x.ceil()),
         DType::F64 => unary_f64(a, |x| x.ceil()),
 
-        DType::I64 | DType::I32 | DType::Bool => {
+        DType::I64
+        | DType::I32
+        | DType::I8
+        | DType::U8
+        | DType::Bool
+        | DType::F16
+        | DType::BF16 => {
             return Err(unsupported("this kernel only supports f32/f64 tensors"));
         }
     }
@@ -465,7 +577,13 @@ pub fn floor(a: &BorrowedTensor) -> PyResult<OwnedTensor> {
         DType::F32 => unary_f32(a, |x| x.floor()),
         DType::F64 => unary_f64(a, |x| x.floor()),
 
-        DType::I64 | DType::I32 | DType::Bool => {
+        DType::I64
+        | DType::I32
+        | DType::I8
+        | DType::U8
+        | DType::Bool
+        | DType::F16
+        | DType::BF16 => {
             return Err(unsupported("this kernel only supports f32/f64 tensors"));
         }
     }
@@ -501,7 +619,13 @@ pub fn clamp(a: &BorrowedTensor, min: f64, max: f64) -> PyResult<OwnedTensor> {
         DType::F32 => run_clamp_f32(a, &mut out, min as f32, max as f32),
         DType::F64 => run_clamp_f64(a, &mut out, min, max),
 
-        DType::I64 | DType::I32 | DType::Bool => {
+        DType::I64
+        | DType::I32
+        | DType::I8
+        | DType::U8
+        | DType::Bool
+        | DType::F16
+        | DType::BF16 => {
             return Err(unsupported("this kernel only supports f32/f64 tensors"));
         }
     }
@@ -512,7 +636,13 @@ pub fn sin(a: &BorrowedTensor) -> PyResult<OwnedTensor> {
     match a.dtype {
         DType::F32 => unary_f32(a, |x| x.sin()),
         DType::F64 => unary_f64(a, |x| x.sin()),
-        DType::I64 | DType::I32 | DType::Bool => {
+        DType::I64
+        | DType::I32
+        | DType::I8
+        | DType::U8
+        | DType::Bool
+        | DType::F16
+        | DType::BF16 => {
             return Err(unsupported("this kernel only supports f32/f64 tensors"));
         }
     }
@@ -522,7 +652,13 @@ pub fn cos(a: &BorrowedTensor) -> PyResult<OwnedTensor> {
     match a.dtype {
         DType::F32 => unary_f32(a, |x| x.cos()),
         DType::F64 => unary_f64(a, |x| x.cos()),
-        DType::I64 | DType::I32 | DType::Bool => {
+        DType::I64
+        | DType::I32
+        | DType::I8
+        | DType::U8
+        | DType::Bool
+        | DType::F16
+        | DType::BF16 => {
             return Err(unsupported("this kernel only supports f32/f64 tensors"));
         }
     }
@@ -562,7 +698,13 @@ pub fn round(a: &BorrowedTensor) -> PyResult<OwnedTensor> {
                 r.round()
             }
         }),
-        DType::I64 | DType::I32 | DType::Bool => {
+        DType::I64
+        | DType::I32
+        | DType::I8
+        | DType::U8
+        | DType::Bool
+        | DType::F16
+        | DType::BF16 => {
             return Err(unsupported("this kernel only supports f32/f64 tensors"));
         }
     }
@@ -613,7 +755,13 @@ pub fn clamp_min(a: &BorrowedTensor, min: f64) -> PyResult<OwnedTensor> {
     match a.dtype {
         DType::F32 => run_clamp_min_f32(a, &mut out, min as f32),
         DType::F64 => run_clamp_min_f64(a, &mut out, min),
-        DType::I64 | DType::I32 | DType::Bool => {
+        DType::I64
+        | DType::I32
+        | DType::I8
+        | DType::U8
+        | DType::Bool
+        | DType::F16
+        | DType::BF16 => {
             return Err(unsupported("this kernel only supports f32/f64 tensors"));
         }
     }
@@ -625,7 +773,13 @@ pub fn clamp_max(a: &BorrowedTensor, max: f64) -> PyResult<OwnedTensor> {
     match a.dtype {
         DType::F32 => run_clamp_max_f32(a, &mut out, max as f32),
         DType::F64 => run_clamp_max_f64(a, &mut out, max),
-        DType::I64 | DType::I32 | DType::Bool => {
+        DType::I64
+        | DType::I32
+        | DType::I8
+        | DType::U8
+        | DType::Bool
+        | DType::F16
+        | DType::BF16 => {
             return Err(unsupported("this kernel only supports f32/f64 tensors"));
         }
     }
@@ -641,7 +795,13 @@ pub fn pow_scalar(a: &BorrowedTensor, exp: f64) -> PyResult<OwnedTensor> {
         DType::F32 => unary_f32(a, |x| x.powf(exp as f32)),
         DType::F64 => unary_f64(a, |x| x.powf(exp)),
 
-        DType::I64 | DType::I32 | DType::Bool => {
+        DType::I64
+        | DType::I32
+        | DType::I8
+        | DType::U8
+        | DType::Bool
+        | DType::F16
+        | DType::BF16 => {
             return Err(unsupported("this kernel only supports f32/f64 tensors"));
         }
     }

@@ -393,10 +393,10 @@ unsafe fn dot_f32_i8_avx2(x: *const f32, w: *const i8, len: usize) -> f32 {
 pub unsafe fn dot_f32_i8(x: *const f32, w: *const i8, len: usize) -> f32 {
     #[cfg(target_arch = "x86_64")]
     {
-        if is_x86_feature_detected!("avx512f") && is_x86_feature_detected!("avx512bw") {
+        if crate::dispatch::cpu_features().avx512f && crate::dispatch::cpu_features().avx512bw {
             return dot_f32_i8_avx512(x, w, len);
         }
-        if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
+        if crate::dispatch::cpu_features().avx2 && crate::dispatch::cpu_features().fma {
             return dot_f32_i8_avx2(x, w, len);
         }
     }
@@ -660,7 +660,7 @@ unsafe fn dot_f32_u4_avx2(x: *const f32, w_packed: *const u8, len: usize) -> f32
 unsafe fn dot_f32_u4(x: *const f32, w_packed: *const u8, len: usize) -> f32 {
     #[cfg(target_arch = "x86_64")]
     {
-        if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
+        if crate::dispatch::cpu_features().avx2 && crate::dispatch::cpu_features().fma {
             return dot_f32_u4_avx2(x, w_packed, len);
         }
     }
@@ -699,7 +699,7 @@ pub(crate) unsafe fn gemv_w8a32(
     let has_avx512 = {
         #[cfg(target_arch = "x86_64")]
         {
-            is_x86_feature_detected!("avx512f") && is_x86_feature_detected!("avx512bw")
+            crate::dispatch::cpu_features().avx512f && crate::dispatch::cpu_features().avx512bw
         }
         #[cfg(not(target_arch = "x86_64"))]
         {
@@ -872,7 +872,7 @@ pub(crate) unsafe fn gemv_w8a32(
     let has_avx2 = {
         #[cfg(target_arch = "x86_64")]
         {
-            is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma")
+            crate::dispatch::cpu_features().avx2 && crate::dispatch::cpu_features().fma
         }
         #[cfg(not(target_arch = "x86_64"))]
         {
@@ -1420,7 +1420,7 @@ pub(crate) unsafe fn quantize_activation_to_u8(x: *const f32, k: usize) -> (Vec<
     let mut x_u8 = vec![0u8; k];
     #[cfg(target_arch = "x86_64")]
     {
-        if is_x86_feature_detected!("avx512f") && is_x86_feature_detected!("avx512bw") {
+        if crate::dispatch::cpu_features().avx512f && crate::dispatch::cpu_features().avx512bw {
             let s = quantize_activation_to_u8_avx512(x, k, x_u8.as_mut_ptr());
             return (x_u8, s);
         }
@@ -1581,10 +1581,10 @@ unsafe fn dot_f32_u4_group32_fast(
 unsafe fn dot_f32_u4_group64(x: *const f32, w_packed: *const u8) -> f32 {
     #[cfg(target_arch = "x86_64")]
     {
-        if is_x86_feature_detected!("avx512f") && is_x86_feature_detected!("avx512bw") {
+        if crate::dispatch::cpu_features().avx512f && crate::dispatch::cpu_features().avx512bw {
             return dot_f32_u4_group64_avx512(x, w_packed);
         }
-        if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
+        if crate::dispatch::cpu_features().avx2 && crate::dispatch::cpu_features().fma {
             return dot_f32_u4_group64_avx2(x, w_packed);
         }
     }
@@ -1595,10 +1595,10 @@ unsafe fn dot_f32_u4_group64(x: *const f32, w_packed: *const u8) -> f32 {
 unsafe fn dot_f32_u4_group32(x: *const f32, w_packed: *const u8) -> f32 {
     #[cfg(target_arch = "x86_64")]
     {
-        if is_x86_feature_detected!("avx512f") && is_x86_feature_detected!("avx512bw") {
+        if crate::dispatch::cpu_features().avx512f && crate::dispatch::cpu_features().avx512bw {
             return dot_f32_u4_group32_avx512(x, w_packed);
         }
-        if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
+        if crate::dispatch::cpu_features().avx2 && crate::dispatch::cpu_features().fma {
             return dot_f32_u4_group32_avx2(x, w_packed);
         }
     }
@@ -1744,9 +1744,7 @@ pub unsafe fn gemv_w4a32_grouped(
             } else if has_neon && group_size == 64 {
                 #[cfg(target_arch = "aarch64")]
                 {
-                    unsafe {
-                        gemv_row_w4a32_group64_neon(x_p, w_row, s_row, num_groups)
-                    }
+                    unsafe { gemv_row_w4a32_group64_neon(x_p, w_row, s_row, num_groups) }
                 }
                 #[cfg(not(target_arch = "aarch64"))]
                 {
@@ -1768,4 +1766,45 @@ pub unsafe fn gemv_w4a32_grouped(
             let b = if let Some(bp) = b_p { *bp.add(j) } else { 0.0 };
             *out_p.add(j) = row_sum + b;
         });
+}
+
+/// Batched W4A32 GEMM for prompt prefill: computes Y = X * W^T + B
+/// where X is [M, K] contiguous activations, W is [N, K/2] INT4 packed weights,
+/// B is optional [N] bias, and Y is [M, N] output activations.
+/// Uses 2D parallel tiling across rows M and output features N to saturate CPU caches.
+pub unsafe fn gemm_w4a32_grouped(
+    x: *const f32,
+    w: *const u8,
+    scales: *const f32,
+    bias: Option<*const f32>,
+    out: *mut f32,
+    m: usize,
+    n: usize,
+    k: usize,
+    group_size: usize,
+) {
+    use rayon::prelude::*;
+
+    if m == 1 {
+        gemv_w4a32_grouped(x, w, scales, bias, out, n, k, group_size);
+        return;
+    }
+
+    // Cast raw pointers to usize so the Rayon closure captures Send+Sync values.
+    // Safety: caller guarantees the ranges [0, m*k), [0, n*k/2), [0, n*num_groups),
+    // and [0, m*n) are all valid and non-overlapping across rows.
+    let x_usize = x as usize;
+    let w_usize = w as usize;
+    let s_usize = scales as usize;
+    let b_usize = bias.map(|bp| bp as usize);
+    let out_usize = out as usize;
+
+    (0..m).into_par_iter().for_each(|i| {
+        let row_x = (x_usize as *const f32).add(i * k);
+        let row_out = (out_usize as *mut f32).add(i * n);
+        let w_p = w_usize as *const u8;
+        let s_p = s_usize as *const f32;
+        let b_p = b_usize.map(|bp| bp as *const f32);
+        gemv_w4a32_grouped(row_x, w_p, s_p, b_p, row_out, n, k, group_size);
+    });
 }

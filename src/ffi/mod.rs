@@ -42,7 +42,13 @@ pub(crate) unsafe fn capsule_to_owned(view: &dlpack::BorrowedTensor) -> dlpack::
             let dst = std::slice::from_raw_parts_mut(owned.data.as_mut_ptr() as *mut i32, n);
             dst.copy_from_slice(src);
         }
-        dlpack::DType::Bool => {
+        dlpack::DType::F16 | dlpack::DType::BF16 => {
+            // F16/BF16 are 2-byte types — copy as raw u16
+            let src = std::slice::from_raw_parts(view.data as *const u16, n);
+            let dst = std::slice::from_raw_parts_mut(owned.data.as_mut_ptr() as *mut u16, n);
+            dst.copy_from_slice(src);
+        }
+        dlpack::DType::I8 | dlpack::DType::U8 | dlpack::DType::Bool => {
             let src = std::slice::from_raw_parts(view.data as *const u8, n);
             let dst = std::slice::from_raw_parts_mut(owned.data.as_mut_ptr() as *mut u8, n);
             dst.copy_from_slice(src);

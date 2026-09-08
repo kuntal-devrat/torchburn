@@ -73,7 +73,7 @@ pub(crate) fn try_dispatch(
                 return Err(unsupported("reshape: shape not conveyed via kwargs"));
             }
             let resolved = shape_ops::resolve_shape(&a.shape, &shape)?;
-            if a.strides == contiguous_strides(&a.shape) {
+            if a.is_contiguous() {
                 let new_strides = contiguous_strides(&resolved);
                 slots.push(Slot::View {
                     data: a.data,
@@ -261,7 +261,7 @@ pub(crate) fn try_dispatch(
         // ensures inputs are contiguous before passing to the Rust engine).
         "contiguous" => {
             let a = slot_view(slots, capsules, arg_index(node, 0)?)?;
-            if a.strides == contiguous_strides(&a.shape) {
+            if a.is_contiguous() {
                 slots.push(Slot::View {
                     data: a.data,
                     shape: Arc::from(a.shape.as_slice()),

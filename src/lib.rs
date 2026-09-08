@@ -104,7 +104,8 @@ pub mod wgpu;
 pub mod cuda;
 
 /// Metal native backend for Apple Silicon (feature-gated behind `metal-native`).
-#[cfg(all(target_os = "macos", feature = "metal-native"))]
+/// Shared on macOS + iOS (unified-memory architecture).
+#[cfg(all(any(target_os = "macos", target_os = "ios"), feature = "metal-native"))]
 pub mod metal;
 
 /// GGUF file parser for llama.cpp quantized models.
@@ -122,6 +123,8 @@ fn _torchburn(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<crate::llm::RustQwenDecoder>()?;
     #[cfg(feature = "burn-wgpu")]
     m.add_class::<crate::wgpu::WgpuQwenDecoder>()?;
+    #[cfg(feature = "cuda")]
+    m.add_class::<crate::cuda::CudaQwenDecoder>()?;
 
     // Core engine FFI
     m.add_function(wrap_pyfunction!(ffi::engine_ffi::execute, m)?)?;
@@ -207,14 +210,15 @@ fn _torchburn(m: &Bound<'_, PyModule>) -> PyResult<()> {
         ffi::quantization_ffi::wgpu_w4a32_grouped_linear,
         m
     )?)?;
+    m.add_function(wrap_pyfunction!(
+        ffi::quantization_ffi::fused_swiglu_mlp_batched_w4a32,
+        m
+    )?)?;
 
     // GGUF FFI
     m.add_function(wrap_pyfunction!(ffi::gguf_ffi::gguf_info, m)?)?;
     m.add_function(wrap_pyfunction!(ffi::gguf_ffi::gguf_tensors, m)?)?;
     m.add_function(wrap_pyfunction!(ffi::gguf_ffi::gguf_metadata, m)?)?;
-
-    // CUDA/Metal backend info (available via gpu_ffi already, but add convenience)
-    m.add_function(wrap_pyfunction!(ffi::gpu_ffi::gpu_backend, m)?)?;
 
     Ok(())
 }

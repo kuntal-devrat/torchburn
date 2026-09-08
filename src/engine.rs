@@ -10,10 +10,10 @@ use crate::dlpack::{
     contiguous_strides, dtype_from_spec, unsupported, BorrowedTensor, CapsuleRef, DType,
     OwnedTensor,
 };
+use ahash::AHashMap as HashMap;
 use pyo3::prelude::*;
 use pyo3::types::PyCapsule;
 use serde_json::Value;
-use std::collections::HashMap;
 
 use crate::{
     fft_complex, fusion, kernels, linalg, math_ops,

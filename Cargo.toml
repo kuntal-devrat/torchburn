@@ -1,6 +1,6 @@
 [package]
 name = "torchburn"
-version = "0.6.0"
+version = "0.6.1"
 edition = "2021"
 description = "Hardware-agnostic PyTorch compilation backend: PyO3 + DLPack zero-copy FFI bridge to a Rust execution engine with BLAKE3 structural graph caching"
 license = "Apache-2.0"
@@ -23,7 +23,9 @@ serde_json = "1"
 wide = "0.7"
 libm = "0.2"
 smallvec = "1"
-half = "2"
+half = { version = "2", features = ["num-traits"] }
+ahash = "0.8"
+crossbeam-utils = "0.8"
 
 # Optional Burn execution engine (Phase 2/3). Compile with:
 #   maturin develop --features burn          # ndarray CPU backend
@@ -38,7 +40,8 @@ openblas-src = { version = "0.10", optional = true, features = ["cblas", "static
 cudarc = { version = "0.13", optional = true, features = ["std", "f16", "cuda-version-from-build-system"] }
 
 # Metal native backend (Apple Silicon unified memory, bypasses WGPU).
-[target.'cfg(target_os = "macos")'.dependencies]
+# Enabled on macOS + iOS (shared unified-memory architecture).
+[target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
 metal = { version = "0.29", optional = true }
 
 [features]
@@ -52,11 +55,47 @@ openblas = ["dep:openblas-src"]
 cuda = ["dep:cudarc"]
 # Metal native backend for Apple Silicon (bypasses WGPU for unified memory).
 metal-native = ["dep:metal"]
+# Meta-feature: enable every GPU path available on the host
+# (WGPU universal + CUDA where supported + Metal where supported).
+# CUDA/Metal deps are target-gated so this stays portable.
+all-gpu = ["burn-wgpu", "cuda", "metal-native"]
 
 [profile.release]
 opt-level = 3
-lto = "thin"
+lto = "fat"
 codegen-units = 1
+panic = "unwind"
+strip = true
+debug = 0
+split-debuginfo = "off"
+overflow-checks = false
+debug-assertions = false
+incremental = false
+
+# Fast CI / `cargo test --release`: thin LTO + parallel codegen.
+# Inherits everything else from release.
+[profile.release-fast]
+inherits = "release"
+lto = "thin"
+codegen-units = 16
+
+# Local bench / native wheel: identical to release, but built with
+# RUSTFLAGS="-C target-cpu=native" (see .cargo/config.native.toml).
+# Never use for portable PyPI wheels.
+[profile.native]
+inherits = "release"
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+
+[profile.bench]
+inherits = "release"
+debug = 1
+
+[profile.dev]
+opt-level = 1
+debug = 1
+split-debuginfo = "off"
 
 [dev-dependencies]
 criterion = "0.5"

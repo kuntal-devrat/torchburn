@@ -27,7 +27,9 @@ pub fn gguf_info(path: String) -> PyResult<PyObject> {
 
         let mut quant_summary = std::collections::HashMap::new();
         for t in &model.tensors {
-            *quant_summary.entry(format!("{:?}", t.quant_type)).or_insert(0usize) += 1;
+            *quant_summary
+                .entry(format!("{:?}", t.quant_type))
+                .or_insert(0usize) += 1;
         }
         dict.set_item("quant_types", quant_summary)?;
 
@@ -78,7 +80,10 @@ pub fn gguf_metadata(path: String) -> PyResult<Vec<(String, PyObject)>> {
     })
 }
 
-fn gguf_value_to_pyobject(py: Python<'_>, value: &crate::gguf::GgufMetadataValue) -> PyResult<PyObject> {
+fn gguf_value_to_pyobject(
+    py: Python<'_>,
+    value: &crate::gguf::GgufMetadataValue,
+) -> PyResult<PyObject> {
     match value {
         crate::gguf::GgufMetadataValue::U8(v) => Ok(v.into_pyobject(py)?.into()),
         crate::gguf::GgufMetadataValue::I8(v) => Ok(v.into_pyobject(py)?.into()),

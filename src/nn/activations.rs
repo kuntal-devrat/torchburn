@@ -3,9 +3,7 @@
 //! All activations support f32/f64, arbitrary strides, and are parallelized
 //! via rayon for large tensors.
 
-use crate::dlpack::{
-    contiguous_strides, elem_count, unsupported, BorrowedTensor, DType, OwnedTensor,
-};
+use crate::dlpack::{elem_count, unsupported, BorrowedTensor, DType, OwnedTensor};
 use pyo3::prelude::*;
 use wide::{f32x8, CmpGt};
 
@@ -32,7 +30,7 @@ fn apply_elementwise_f32<F: Fn(f32) -> f32 + Sync + Send>(
     let a_data = unsafe { typed_slice::<f32>(a) };
     let n = out.elem_count();
     let out_data = unsafe { typed_mut_slice::<f32>(out) };
-    let contig = a.strides == contiguous_strides(&a.shape);
+    let contig = a.is_contiguous();
     if contig {
         if n >= PAR_CHUNK {
             use rayon::prelude::*;
@@ -81,7 +79,7 @@ fn apply_elementwise_f64<F: Fn(f64) -> f64 + Sync + Send>(
     let a_data = unsafe { typed_slice::<f64>(a) };
     let n = out.elem_count();
     let out_data = unsafe { typed_mut_slice::<f64>(out) };
-    let contig = a.strides == contiguous_strides(&a.shape);
+    let contig = a.is_contiguous();
     if contig {
         if n >= PAR_CHUNK {
             use rayon::prelude::*;
@@ -135,7 +133,13 @@ where
     match a.dtype {
         DType::F32 => apply_elementwise_f32(a, &mut out, f32_fn),
         DType::F64 => apply_elementwise_f64(a, &mut out, f64_fn),
-        DType::I64 | DType::I32 | DType::Bool => {
+        DType::I64
+        | DType::I32
+        | DType::I8
+        | DType::U8
+        | DType::Bool
+        | DType::F16
+        | DType::BF16 => {
             return Err(unsupported("this kernel only supports f32/f64 tensors"));
         }
     }
@@ -183,7 +187,7 @@ fn apply_elementwise_param_f32(
     let a_data = unsafe { typed_slice::<f32>(a) };
     let n = out.elem_count();
     let out_data = unsafe { typed_mut_slice::<f32>(out) };
-    let contig = a.strides == contiguous_strides(&a.shape);
+    let contig = a.is_contiguous();
     if contig {
         if n >= PAR_CHUNK {
             use rayon::prelude::*;
@@ -231,7 +235,7 @@ fn apply_elementwise_param_f64(
     let a_data = unsafe { typed_slice::<f64>(a) };
     let n = out.elem_count();
     let out_data = unsafe { typed_mut_slice::<f64>(out) };
-    let contig = a.strides == contiguous_strides(&a.shape);
+    let contig = a.is_contiguous();
     if contig {
         if n >= PAR_CHUNK {
             use rayon::prelude::*;
@@ -276,7 +280,7 @@ fn apply_elementwise_param_f64(
 
 pub fn sigmoid(a: &BorrowedTensor) -> PyResult<OwnedTensor> {
     // SIMD fast path for contiguous f32
-    if a.dtype == DType::F32 && a.strides == contiguous_strides(&a.shape) {
+    if a.dtype == DType::F32 && a.is_contiguous() {
         let a_data = unsafe { typed_slice::<f32>(a) };
         let mut out = OwnedTensor::new(a.dtype, a.shape.clone());
         let out_data = unsafe { typed_mut_slice::<f32>(&mut out) };
@@ -306,8 +310,7 @@ pub fn sigmoid(a: &BorrowedTensor) -> PyResult<OwnedTensor> {
             let n_simd = n / 8;
             for j in 0..n_simd {
                 let offset = j * 8;
-                let v =
-                    f32x8::from(*<&[f32; 8]>::try_from(&a_data[offset..offset + 8]).unwrap());
+                let v = f32x8::from(*<&[f32; 8]>::try_from(&a_data[offset..offset + 8]).unwrap());
                 let res = fast_sigmoid_f32x8(v);
                 out_data[offset..offset + 8].copy_from_slice(&res.to_array());
             }
@@ -326,7 +329,7 @@ pub fn sigmoid(a: &BorrowedTensor) -> PyResult<OwnedTensor> {
 
 pub fn tanh_act(a: &BorrowedTensor) -> PyResult<OwnedTensor> {
     // SIMD fast path for contiguous f32
-    if a.dtype == DType::F32 && a.strides == contiguous_strides(&a.shape) {
+    if a.dtype == DType::F32 && a.is_contiguous() {
         let a_data = unsafe { typed_slice::<f32>(a) };
         let mut out = OwnedTensor::new(a.dtype, a.shape.clone());
         let out_data = unsafe { typed_mut_slice::<f32>(&mut out) };
@@ -356,8 +359,7 @@ pub fn tanh_act(a: &BorrowedTensor) -> PyResult<OwnedTensor> {
             let n_simd = n / 8;
             for j in 0..n_simd {
                 let offset = j * 8;
-                let v =
-                    f32x8::from(*<&[f32; 8]>::try_from(&a_data[offset..offset + 8]).unwrap());
+                let v = f32x8::from(*<&[f32; 8]>::try_from(&a_data[offset..offset + 8]).unwrap());
                 let res = fast_tanh_f32x8(v);
                 out_data[offset..offset + 8].copy_from_slice(&res.to_array());
             }
@@ -469,7 +471,7 @@ pub fn exact_gelu_f64(x: f64) -> f64 {
 }
 
 pub fn gelu(a: &BorrowedTensor, approximate: &str) -> PyResult<OwnedTensor> {
-    if a.dtype == DType::F32 && a.strides == contiguous_strides(&a.shape) {
+    if a.dtype == DType::F32 && a.is_contiguous() {
         let a_data = unsafe { typed_slice::<f32>(a) };
         let mut out = OwnedTensor::new(a.dtype, a.shape.clone());
         let out_data = unsafe { typed_mut_slice::<f32>(&mut out) };
@@ -522,7 +524,7 @@ pub fn gelu(a: &BorrowedTensor, approximate: &str) -> PyResult<OwnedTensor> {
 pub fn silu(a: &BorrowedTensor) -> PyResult<OwnedTensor> {
     // SiLU / Swish: x * sigmoid(x) = x / (1 + exp(-x))
     // SIMD fast path for contiguous f32
-    if a.dtype == DType::F32 && a.strides == contiguous_strides(&a.shape) {
+    if a.dtype == DType::F32 && a.is_contiguous() {
         let a_data = unsafe { typed_slice::<f32>(a) };
         let mut out = OwnedTensor::new(a.dtype, a.shape.clone());
         let out_data = unsafe { typed_mut_slice::<f32>(&mut out) };
@@ -552,8 +554,7 @@ pub fn silu(a: &BorrowedTensor) -> PyResult<OwnedTensor> {
             let n_simd = n / 8;
             for j in 0..n_simd {
                 let offset = j * 8;
-                let v =
-                    f32x8::from(*<&[f32; 8]>::try_from(&a_data[offset..offset + 8]).unwrap());
+                let v = f32x8::from(*<&[f32; 8]>::try_from(&a_data[offset..offset + 8]).unwrap());
                 let res = fast_silu_f32x8(v);
                 out_data[offset..offset + 8].copy_from_slice(&res.to_array());
             }
@@ -577,7 +578,13 @@ pub fn leaky_relu(a: &BorrowedTensor, negative_slope: f64) -> PyResult<OwnedTens
             apply_elementwise_param_f64(a, &mut out, |x| if x > 0.0 { x } else { x * ns })
         }
 
-        DType::I64 | DType::I32 | DType::Bool => {
+        DType::I64
+        | DType::I32
+        | DType::I8
+        | DType::U8
+        | DType::Bool
+        | DType::F16
+        | DType::BF16 => {
             return Err(unsupported("this kernel only supports f32/f64 tensors"));
         }
     }
@@ -602,7 +609,13 @@ pub fn elu(a: &BorrowedTensor, alpha: f64) -> PyResult<OwnedTensor> {
             }
         }),
 
-        DType::I64 | DType::I32 | DType::Bool => {
+        DType::I64
+        | DType::I32
+        | DType::I8
+        | DType::U8
+        | DType::Bool
+        | DType::F16
+        | DType::BF16 => {
             return Err(unsupported("this kernel only supports f32/f64 tensors"));
         }
     }
@@ -625,7 +638,13 @@ pub fn selu(a: &BorrowedTensor) -> PyResult<OwnedTensor> {
             (if x > 0.0 { x } else { alpha * (x.exp() - 1.0) }) * lambda
         }),
 
-        DType::I64 | DType::I32 | DType::Bool => {
+        DType::I64
+        | DType::I32
+        | DType::I8
+        | DType::U8
+        | DType::Bool
+        | DType::F16
+        | DType::BF16 => {
             return Err(unsupported("this kernel only supports f32/f64 tensors"));
         }
     }
@@ -840,7 +859,13 @@ pub fn softmax(a: &BorrowedTensor, dim: isize) -> PyResult<OwnedTensor> {
         DType::F32 => softmax_f32(a, dim, &mut out),
         DType::F64 => softmax_f64(a, dim, &mut out),
 
-        DType::I64 | DType::I32 | DType::Bool => {
+        DType::I64
+        | DType::I32
+        | DType::I8
+        | DType::U8
+        | DType::Bool
+        | DType::F16
+        | DType::BF16 => {
             return Err(unsupported("this kernel only supports f32/f64 tensors"));
         }
     }
@@ -1013,7 +1038,13 @@ pub fn log_softmax(a: &BorrowedTensor, dim: isize) -> PyResult<OwnedTensor> {
             }
         }
 
-        DType::I64 | DType::I32 | DType::Bool => {
+        DType::I64
+        | DType::I32
+        | DType::I8
+        | DType::U8
+        | DType::Bool
+        | DType::F16
+        | DType::BF16 => {
             return Err(unsupported("this kernel only supports f32/f64 tensors"));
         }
     }

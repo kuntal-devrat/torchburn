@@ -76,10 +76,19 @@ fn reduce_loss<T: LossScalar + Send + Sync>(
             let total: T = if data.len() >= 16 * 1024 {
                 // Parallel reduction for large buffers
                 data.par_chunks(16 * 1024)
-                    .map(|chunk| chunk.iter().copied().reduce(|a, b| a + b).unwrap_or(T::from_f64(0.0)))
+                    .map(|chunk| {
+                        chunk
+                            .iter()
+                            .copied()
+                            .reduce(|a, b| a + b)
+                            .unwrap_or(T::from_f64(0.0))
+                    })
                     .reduce(|| T::from_f64(0.0), |a, b| a + b)
             } else {
-                data.iter().copied().reduce(|a, b| a + b).unwrap_or(T::from_f64(0.0))
+                data.iter()
+                    .copied()
+                    .reduce(|a, b| a + b)
+                    .unwrap_or(T::from_f64(0.0))
             };
             let value: f64 = if reduction == 1 {
                 total.to_f64() / n.max(1) as f64
@@ -348,7 +357,13 @@ pub fn nll_loss_forward(
             };
             Ok(scalar_f64(out))
         }
-        DType::I64 | DType::I32 | DType::Bool => Err(unsupported("nll_loss input must be f32/f64")),
+        DType::I64
+        | DType::I32
+        | DType::I8
+        | DType::U8
+        | DType::Bool
+        | DType::F16
+        | DType::BF16 => Err(unsupported("nll_loss input must be f32/f64")),
     }
 }
 
@@ -366,7 +381,10 @@ pub fn mse_loss(a: &BorrowedTensor, b: &BorrowedTensor, reduction: i64) -> PyRes
                     .map(|(x, y)| (x - y) * (x - y))
                     .collect()
             } else {
-                x.iter().zip(y.iter()).map(|(x, y)| (x - y) * (x - y)).collect()
+                x.iter()
+                    .zip(y.iter())
+                    .map(|(x, y)| (x - y) * (x - y))
+                    .collect()
             };
             reduce_loss(&buf, n, reduction, &mut out)?;
         }
@@ -379,11 +397,20 @@ pub fn mse_loss(a: &BorrowedTensor, b: &BorrowedTensor, reduction: i64) -> PyRes
                     .map(|(x, y)| (x - y) * (x - y))
                     .collect()
             } else {
-                x.iter().zip(y.iter()).map(|(x, y)| (x - y) * (x - y)).collect()
+                x.iter()
+                    .zip(y.iter())
+                    .map(|(x, y)| (x - y) * (x - y))
+                    .collect()
             };
             reduce_loss(&buf, n, reduction, &mut out)?;
         }
-        DType::I64 | DType::I32 | DType::Bool => {
+        DType::I64
+        | DType::I32
+        | DType::I8
+        | DType::U8
+        | DType::Bool
+        | DType::F16
+        | DType::BF16 => {
             return Err(unsupported("mse_loss requires f32/f64 tensors"));
         }
     }
@@ -438,7 +465,13 @@ pub fn smooth_l1_loss(
             };
             reduce_loss(&buf, n, reduction, &mut out)?;
         }
-        DType::I64 | DType::I32 | DType::Bool => {
+        DType::I64
+        | DType::I32
+        | DType::I8
+        | DType::U8
+        | DType::Bool
+        | DType::F16
+        | DType::BF16 => {
             return Err(unsupported("smooth_l1_loss requires f32/f64 tensors"));
         }
     }
@@ -482,7 +515,13 @@ pub fn binary_cross_entropy(
             };
             reduce_loss(&buf, n, reduction, &mut out)?;
         }
-        DType::I64 | DType::I32 | DType::Bool => {
+        DType::I64
+        | DType::I32
+        | DType::I8
+        | DType::U8
+        | DType::Bool
+        | DType::F16
+        | DType::BF16 => {
             return Err(unsupported("binary_cross_entropy requires f32/f64 tensors"));
         }
     }

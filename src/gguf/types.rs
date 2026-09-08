@@ -100,9 +100,9 @@ impl GgufQuantType {
         match self {
             Self::F32 => 4,
             Self::F16 => 2,
-            Self::Q4_0 => 16 + 2, // 32 nibbles + f16 scale
+            Self::Q4_0 => 16 + 2,     // 32 nibbles + f16 scale
             Self::Q4_1 => 16 + 2 + 2, // 32 nibbles + f16 min + f16 scale
-            Self::Q8_0 => 32 + 2, // 32 bytes + f16 scale
+            Self::Q8_0 => 32 + 2,     // 32 bytes + f16 scale
             Self::Q8_1 => 32 + 2 + 2,
             Self::Q4_K => 144, // 256 weights, complex layout
             Self::Q6_K => 210,
@@ -113,7 +113,10 @@ impl GgufQuantType {
 
     /// Whether this quant type can be directly mapped to a TorchBurn kernel.
     pub fn has_native_support(&self) -> bool {
-        matches!(self, Self::Q4_0 | Self::Q4_1 | Self::Q8_0 | Self::F32 | Self::F16)
+        matches!(
+            self,
+            Self::Q4_0 | Self::Q4_1 | Self::Q8_0 | Self::F32 | Self::F16
+        )
     }
 
     /// Map to TorchBurn's native quant type if supported.
@@ -177,14 +180,24 @@ impl GgufModel {
 
     /// Get the architecture string (e.g., "llama", "qwen2").
     pub fn architecture(&self) -> Option<&str> {
-        self.get_metadata("general.architecture")
-            .and_then(|v| if let GgufMetadataValue::String(s) = v { Some(s.as_str()) } else { None })
+        self.get_metadata("general.architecture").and_then(|v| {
+            if let GgufMetadataValue::String(s) = v {
+                Some(s.as_str())
+            } else {
+                None
+            }
+        })
     }
 
     /// Get the model name.
     pub fn name(&self) -> Option<&str> {
-        self.get_metadata("general.name")
-            .and_then(|v| if let GgufMetadataValue::String(s) = v { Some(s.as_str()) } else { None })
+        self.get_metadata("general.name").and_then(|v| {
+            if let GgufMetadataValue::String(s) = v {
+                Some(s.as_str())
+            } else {
+                None
+            }
+        })
     }
 
     /// Find tensor by name.
@@ -194,7 +207,10 @@ impl GgufModel {
 
     /// List all tensors with a given prefix (e.g., "blk.0.attn_q").
     pub fn tensors_with_prefix(&self, prefix: &str) -> Vec<&GgufTensorInfo> {
-        self.tensors.iter().filter(|t| t.name.starts_with(prefix)).collect()
+        self.tensors
+            .iter()
+            .filter(|t| t.name.starts_with(prefix))
+            .collect()
     }
 
     /// Get tensor data from a memory-mapped file.

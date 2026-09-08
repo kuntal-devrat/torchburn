@@ -124,21 +124,117 @@ fn gemm_f32_into(a: &[f32], b: &[f32], out: &mut [f32], m: usize, k: usize, n: u
     }
     #[cfg(not(feature = "openblas"))]
     unsafe {
-        if m == 1 && n >= 32 {
+        if m == 1 && k >= 64 {
+            // Split-K GEMV: partition K across threads for cache locality.
+            // Each thread reads a contiguous slice of A and the corresponding
+            // rows of B — far better cache behaviour than column-parallel.
             use rayon::prelude::*;
-            let a_p = a.as_ptr() as usize;
-            let b_p = b.as_ptr() as usize;
-            let out_p = out.as_mut_ptr() as usize;
-            (0..n).into_par_iter().for_each(|j| {
-                let a_ptr = a_p as *const f32;
-                let b_ptr = b_p as *const f32;
-                let out_ptr = out_p as *mut f32;
-                let mut sum = 0.0f32;
-                for p in 0..k {
-                    sum += *a_ptr.add(p) * *b_ptr.add(p * n + j);
+            let n_threads = rayon::current_num_threads();
+            let k_per_thread = (k + n_threads - 1) / n_threads;
+
+            if n <= 4 || k < 256 {
+                // Small N: split-K with p-outer / j-inner order so B-row loads
+                // are contiguous and vectorize (8-wide f32x8 FMA).
+                // partial[j] += A[p] * B[p*n+j] streams B rows linearly.
+                let partials: Vec<Vec<f32>> = (0..n_threads)
+                    .into_par_iter()
+                    .map(|t| {
+                        let k_start = t * k_per_thread;
+                        let k_end = (k_start + k_per_thread).min(k);
+                        if k_start >= k {
+                            return vec![0.0f32; n];
+                        }
+                        let mut partial = vec![0.0f32; n];
+                        let p_ptr = partial.as_mut_ptr();
+                        let chunks = n / 8;
+                        for p in k_start..k_end {
+                            let av = *a.as_ptr().add(p);
+                            let av8 = f32x8::splat(av);
+                            let b_row_ptr = b.as_ptr().add(p * n);
+                            for c in 0..chunks {
+                                let j = c * 8;
+                                let bv = f32x8::from(std::ptr::read_unaligned(
+                                    b_row_ptr.add(j) as *const [f32; 8]
+                                ));
+                                let pv = f32x8::from(std::ptr::read_unaligned(
+                                    p_ptr.add(j) as *const [f32; 8]
+                                ));
+                                let res = av8.mul_add(bv, pv);
+                                std::ptr::write_unaligned(
+                                    p_ptr.add(j) as *mut [f32; 8],
+                                    res.to_array(),
+                                );
+                            }
+                            for j in (chunks * 8)..n {
+                                *p_ptr.add(j) += av * *b_row_ptr.add(j);
+                            }
+                        }
+                        partial
+                    })
+                    .collect();
+                // Reduce partials (serial; n is small in this branch).
+                for partial in &partials {
+                    let chunks = n / 8;
+                    let o_ptr = out.as_mut_ptr();
+                    let p_ptr = partial.as_ptr();
+                    for c in 0..chunks {
+                        let j = c * 8;
+                        let acc =
+                            f32x8::from(std::ptr::read_unaligned(o_ptr.add(j) as *const [f32; 8]));
+                        let pv =
+                            f32x8::from(std::ptr::read_unaligned(p_ptr.add(j) as *const [f32; 8]));
+                        std::ptr::write_unaligned(
+                            o_ptr.add(j) as *mut [f32; 8],
+                            (acc + pv).to_array(),
+                        );
+                    }
+                    for j in (chunks * 8)..n {
+                        *o_ptr.add(j) += *p_ptr.add(j);
+                    }
                 }
-                *out_ptr.add(j) = sum;
-            });
+            } else {
+                // Large N: parallelize over N in tiles, each tile does full K
+                // with p-outer accumulation into a tile-resident buffer so B
+                // rows stream contiguously (SIMD) instead of strided columns.
+                let tile_n = 64usize; // fits in L1
+                let n_tiles = (n + tile_n - 1) / tile_n;
+                let a_p = a.as_ptr() as usize;
+                let b_p = b.as_ptr() as usize;
+                let out_p = out.as_mut_ptr() as usize;
+                (0..n_tiles).into_par_iter().for_each(|ti| {
+                    let j_start = ti * tile_n;
+                    let j_end = (j_start + tile_n).min(n);
+                    let tlen = j_end - j_start;
+                    let a_ptr = a_p as *const f32;
+                    let b_ptr = b_p as *const f32;
+                    let out_ptr = out_p as *mut f32;
+                    // Stack-resident tile accumulator (64 f32 = 256B, L1).
+                    let mut acc = [0.0f32; 64];
+                    let chunks = tlen / 8;
+                    for p in 0..k {
+                        let av = *a_ptr.add(p);
+                        let av8 = f32x8::splat(av);
+                        let b_row_ptr = b_ptr.add(p * n + j_start);
+                        for c in 0..chunks {
+                            let j = c * 8;
+                            let bv = f32x8::from(std::ptr::read_unaligned(
+                                b_row_ptr.add(j) as *const [f32; 8]
+                            ));
+                            let pv = f32x8::from(std::ptr::read_unaligned(
+                                acc.as_ptr().add(j) as *const [f32; 8]
+                            ));
+                            std::ptr::write_unaligned(
+                                acc.as_mut_ptr().add(j) as *mut [f32; 8],
+                                av8.mul_add(bv, pv).to_array(),
+                            );
+                        }
+                        for j in (chunks * 8)..tlen {
+                            acc[j] += av * *b_row_ptr.add(j);
+                        }
+                    }
+                    std::ptr::copy_nonoverlapping(acc.as_ptr(), out_ptr.add(j_start), tlen);
+                });
+            }
             return;
         }
         sgemm(
@@ -626,8 +722,8 @@ fn matmul_2d_f32(a: &BorrowedTensor, b: &BorrowedTensor, out: &mut OwnedTensor) 
     let n = b.shape[1] as usize;
     let out_data = unsafe { typed_mut_slice::<f32>(out) };
 
-    let a_contig = a.strides == contiguous_strides(&a.shape);
-    let b_contig = b.strides == contiguous_strides(&b.shape);
+    let a_contig = a.is_contiguous();
+    let b_contig = b.is_contiguous();
 
     if a_contig && b_contig {
         let a_data = unsafe { typed_slice::<f32>(a) };
@@ -661,8 +757,8 @@ fn matmul_2d_f64(a: &BorrowedTensor, b: &BorrowedTensor, out: &mut OwnedTensor) 
     let n = b.shape[1] as usize;
     let out_data = unsafe { typed_mut_slice::<f64>(out) };
 
-    let a_contig = a.strides == contiguous_strides(&a.shape);
-    let b_contig = b.strides == contiguous_strides(&b.shape);
+    let a_contig = a.is_contiguous();
+    let b_contig = b.is_contiguous();
 
     if a_contig && b_contig {
         let a_data = unsafe { typed_slice::<f64>(a) };
@@ -714,7 +810,13 @@ pub fn matmul_2d(a: &BorrowedTensor, b: &BorrowedTensor) -> PyResult<OwnedTensor
         DType::F32 => matmul_2d_f32(a, b, &mut out),
         DType::F64 => matmul_2d_f64(a, b, &mut out),
 
-        DType::I64 | DType::I32 | DType::Bool => {
+        DType::I64
+        | DType::I32
+        | DType::I8
+        | DType::U8
+        | DType::Bool
+        | DType::F16
+        | DType::BF16 => {
             return Err(unsupported("this kernel only supports f32/f64 tensors"));
         }
     }
@@ -750,7 +852,7 @@ pub fn bmm(a: &BorrowedTensor, b: &BorrowedTensor) -> PyResult<OwnedTensor> {
     }
 
     let _a_contig;
-    let a = if a.strides != contiguous_strides(&a.shape) {
+    let a = if !a.is_contiguous() {
         _a_contig = crate::shape_ops::to_contiguous(a)?;
         BorrowedTensor::from_owned(&_a_contig)
     } else {
@@ -759,7 +861,7 @@ pub fn bmm(a: &BorrowedTensor, b: &BorrowedTensor) -> PyResult<OwnedTensor> {
     let a = &a;
 
     let _b_contig;
-    let b = if b.strides != contiguous_strides(&b.shape) {
+    let b = if !b.is_contiguous() {
         _b_contig = crate::shape_ops::to_contiguous(b)?;
         BorrowedTensor::from_owned(&_b_contig)
     } else {
@@ -1023,8 +1125,8 @@ pub fn addmm(
             for row in 0..m {
                 out_data[row * n..(row + 1) * n].copy_from_slice(bias_data);
             }
-            let a_contig = mat1.strides == contiguous_strides(&mat1.shape);
-            let b_contig = mat2.strides == contiguous_strides(&mat2.shape);
+            let a_contig = mat1.is_contiguous();
+            let b_contig = mat2.is_contiguous();
             if a_contig && b_contig {
                 let a_data = unsafe { typed_slice::<f32>(mat1) };
                 let b_data = unsafe { typed_slice::<f32>(mat2) };
@@ -1058,8 +1160,8 @@ pub fn addmm(
             for row in 0..m {
                 out_data[row * n..(row + 1) * n].copy_from_slice(bias_data);
             }
-            let a_contig = mat1.strides == contiguous_strides(&mat1.shape);
-            let b_contig = mat2.strides == contiguous_strides(&mat2.shape);
+            let a_contig = mat1.is_contiguous();
+            let b_contig = mat2.is_contiguous();
             if a_contig && b_contig {
                 let a_data = unsafe { typed_slice::<f64>(mat1) };
                 let b_data = unsafe { typed_slice::<f64>(mat2) };
@@ -1089,7 +1191,13 @@ pub fn addmm(
             }
         }
 
-        DType::I64 | DType::I32 | DType::Bool => {
+        DType::I64
+        | DType::I32
+        | DType::I8
+        | DType::U8
+        | DType::Bool
+        | DType::F16
+        | DType::BF16 => {
             return Err(unsupported("this kernel only supports f32/f64 tensors"));
         }
     }
@@ -1138,7 +1246,7 @@ pub fn linear(
         .iter()
         .map(|&d| d.max(0) as usize)
         .product();
-    let input_contig = input.strides == contiguous_strides(&input.shape);
+    let input_contig = input.is_contiguous();
 
     // linear(x, w, b) == x @ w^T + b.
     // Instead of transposing weight (O,I) -> (I,O), use transposed-B GEMM
@@ -1222,7 +1330,13 @@ pub fn linear(
             }
         }
 
-        DType::I64 | DType::I32 | DType::Bool => {
+        DType::I64
+        | DType::I32
+        | DType::I8
+        | DType::U8
+        | DType::Bool
+        | DType::F16
+        | DType::BF16 => {
             return Err(unsupported("this kernel only supports f32/f64 tensors"));
         }
     }
@@ -1290,7 +1404,13 @@ pub fn dot(a: &BorrowedTensor, b: &BorrowedTensor) -> PyResult<OwnedTensor> {
             d[0] = sum;
         }
 
-        DType::I64 | DType::I32 | DType::Bool => {
+        DType::I64
+        | DType::I32
+        | DType::I8
+        | DType::U8
+        | DType::Bool
+        | DType::F16
+        | DType::BF16 => {
             return Err(unsupported("this kernel only supports f32/f64 tensors"));
         }
     }
@@ -1334,7 +1454,7 @@ pub fn matmul(a: &BorrowedTensor, b: &BorrowedTensor) -> PyResult<OwnedTensor> {
     }
 
     let _a_contig;
-    let a = if a.strides != contiguous_strides(&a.shape) {
+    let a = if !a.is_contiguous() {
         _a_contig = crate::shape_ops::to_contiguous(a)?;
         BorrowedTensor::from_owned(&_a_contig)
     } else {
@@ -1343,7 +1463,7 @@ pub fn matmul(a: &BorrowedTensor, b: &BorrowedTensor) -> PyResult<OwnedTensor> {
     let a = &a;
 
     let _b_contig;
-    let b = if b.strides != contiguous_strides(&b.shape) {
+    let b = if !b.is_contiguous() {
         _b_contig = crate::shape_ops::to_contiguous(b)?;
         BorrowedTensor::from_owned(&_b_contig)
     } else {

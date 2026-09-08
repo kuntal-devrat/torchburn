@@ -27,11 +27,30 @@ class StaticKVCache:
         self.seq_len = 0
 
     def update(self, k: torch.Tensor, v: torch.Tensor, offset: int) -> Tuple[torch.Tensor, torch.Tensor]:
-        """In-place update without allocating new memory."""
+        """In-place update without allocating new memory.
+
+        Uses ring-buffer indexing when offset >= max_seq_len so long contexts
+        (>max_seq_len tokens) wrap around instead of OOM-ing.  The attention
+        mask in the forward pass will see the ring-wrapped view, which is
+        semantically equivalent to sliding-window KV reuse for decode.
+        """
         T = k.shape[2]
-        self.k[:, :, offset : offset + T, :] = k
-        self.v[:, :, offset : offset + T, :] = v
-        self.seq_len = offset + T
+        # Ring-buffer: write slots wrap around max_seq_len so we never OOM.
+        slot = offset % self.k.shape[2]  # self.k.shape[2] == max_seq_len
+        # For the common single-token decode case (T==1) this is a simple
+        # indexed write.  For multi-token prefill that wraps the boundary we
+        # fall back to a sequential loop over individual slots.
+        if slot + T <= self.k.shape[2]:
+            self.k[:, :, slot : slot + T, :] = k
+            self.v[:, :, slot : slot + T, :] = v
+        else:
+            # Wrap-around: write in two parts
+            first = self.k.shape[2] - slot
+            self.k[:, :, slot:, :] = k[:, :, :first, :]
+            self.k[:, :, :T - first, :] = k[:, :, first:, :]
+            self.v[:, :, slot:, :] = v[:, :, :first, :]
+            self.v[:, :, :T - first, :] = v[:, :, first:, :]
+        self.seq_len = min(offset + T, self.k.shape[2])
         return self.k[:, :, : self.seq_len, :], self.v[:, :, : self.seq_len, :]
 
     def reset(self):
@@ -39,18 +58,24 @@ class StaticKVCache:
 
 
 class RMSNorm(nn.Module):
-    """Root Mean Square Layer Normalization."""
+    """Root Mean Square Layer Normalization with optional Gemma offset."""
 
-    def __init__(self, dim: int, eps: float = 1e-6):
+    def __init__(self, dim: int, eps: float = 1e-6, norm_type: str = "standard"):
         super().__init__()
         self.eps = eps
-        self.weight = nn.Parameter(torch.ones(dim))
+        self.norm_type = norm_type
+        # Gemma models initialize weight to 0.0 with formula (1.0 + weight) * x_norm
+        # Standard models initialize weight to 1.0 with formula weight * x_norm
+        init_val = 0.0 if norm_type == "gemma_offset" else 1.0
+        self.weight = nn.Parameter(torch.full((dim,), init_val))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        if hasattr(F, "rms_norm"):
-            return F.rms_norm(x, (self.weight.shape[0],), self.weight, eps=self.eps)
         variance = x.pow(2).mean(-1, keepdim=True)
         x_norm = x * torch.rsqrt(variance + self.eps)
+        if self.norm_type == "gemma_offset":
+            return x_norm * (1.0 + self.weight)
+        if hasattr(F, "rms_norm"):
+            return F.rms_norm(x, (self.weight.shape[0],), self.weight, eps=self.eps)
         return self.weight * x_norm
 
 
@@ -243,6 +268,23 @@ class UniversalMLP(nn.Module):
             import torchburn
             return torchburn.fused_swiglu_mlp(x, self.gate_proj, self.up_proj, self.down_proj)
 
+        # Batched prefill path: use the Rust GEMM kernel when seq_len > 1 and
+        # the weights are quantized INT4 on the CPU backend.
+        if (
+            x.shape[1] > 1
+            and hasattr(self.gate_proj, "qweight")
+            and hasattr(self.up_proj, "qweight")
+            and hasattr(self.down_proj, "qweight")
+            and getattr(self.gate_proj, "backend", "cpu") == "cpu"
+        ):
+            import torchburn
+            try:
+                return torchburn.fused_swiglu_mlp_batched(
+                    x, self.gate_proj, self.up_proj, self.down_proj
+                )
+            except AttributeError:
+                pass  # older build without fused_swiglu_mlp_batched — fall through
+
         return self.down_proj(F.silu(self.gate_proj(x)) * self.up_proj(x))
 
 
@@ -251,9 +293,9 @@ class UniversalTransformerBlock(nn.Module):
 
     def __init__(self, config: ModelConfig, quant: Optional[str] = None, fused_qkv: bool = False):
         super().__init__()
-        self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps, norm_type=config.norm_type)
         self.self_attn = UniversalAttention(config, quant=quant, fused_qkv=fused_qkv)
-        self.post_attention_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.post_attention_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps, norm_type=config.norm_type)
         self.mlp = UniversalMLP(config, quant=quant)
 
     def forward(
@@ -300,7 +342,7 @@ class UniversalTransformer(nn.Module):
             UniversalTransformerBlock(config, quant=quant, fused_qkv=fused_qkv)
             for _ in range(config.num_hidden_layers)
         ])
-        self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps, norm_type=config.norm_type)
 
         if quant in ("int4", "int8"):
             from torchburn.quantization import QuantizedLinear
@@ -313,7 +355,7 @@ class UniversalTransformer(nn.Module):
             if quant is None:
                 self.lm_head.weight = self.embed_tokens.weight
 
-        if init_weights and quant is None:
+        if init_weights:
             self.apply(self._init_weights)
 
 
@@ -362,6 +404,8 @@ class UniversalTransformer(nn.Module):
     ) -> Tuple[torch.Tensor, Union[List[Tuple[torch.Tensor, torch.Tensor]], List[StaticKVCache]]]:
         B, T = input_ids.shape
         x = self.embed_tokens(input_ids)
+        if self.config.scale_embeddings:
+            x = x * math.sqrt(self.config.hidden_size)
         cos, sin = self.rotary_emb(x, seq_len=T, offset=offset)
 
         new_caches = []

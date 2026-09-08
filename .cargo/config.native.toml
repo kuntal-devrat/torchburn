@@ -1,0 +1,7 @@
+# Native overlay — NEVER used for PyPI wheels.
+# Usage:
+#   cargo bench --profile native --config .cargo/config.native.toml
+#   RUSTFLAGS="-C target-cpu=native -C codegen-units=1" maturin develop --profile native
+# Targets the host CPU (AVX2/AVX-512/AMX, Apple M1+ PMU) for peak local numbers.
+[build]
+rustflags = ["-C", "target-cpu=native", "-C", "overflow-checks=off", "-C", "codegen-units=1"]

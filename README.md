@@ -96,9 +96,9 @@ python -m torchburn.llm benchmark --model models/qwen_0_5b --device cpu --tokens
 
 ---
 
-## 🚀 Key Highlights (v0.5.5)
+## 🚀 Key Highlights (v0.6.1)
 
-
+- 🔥 **Peak-Optimization Release (v0.6.1)**: `fat` LTO + `codegen-units=1` release profile, portable per-target baselines (`x86-64-v2` / `neoverse-n1` / `apple-m1` / `apple-a14`) with runtime AVX2/AVX-512-VNNI/NEON dispatch, cached CPUID (no per-row CPUID), vectorized `m==1` GEMV (`f32x8` FMA), lock-optimized BLAKE3 cache, per-bucket memory pooling, and allocation-free contiguity checks. Prebuilt wheels ship for **Windows AMD64, Linux x86_64+aarch64, macOS arm64+x86_64** (plus CUDA and native variants) — see [CHANGELOG](CHANGELOG.md).
 - ⚡ **Native CPU by Default**: Out-of-the-box zero-copy execution on CPU with zero GPU setup or shader compilation delays. Reaches **98.2% parity with Intel MKL** on $1024^3$ GEMM (12.29 ms vs 12.08 ms), with **-48.5% GEMM improvement** in v0.5.5.
 - 🔄 **Single-Pass Kernel Loop Fusion**: Fuses multi-node unary/binary DAGs into single memory sweeps with stack-allocated `[T; 32]` scratch space, eliminating heap allocations in worker threads.
 - 🏎️ **Chunked SIMD Parallelization**: Rayon L1/L2-aware chunking (`PAR_CHUNK = 16 * 1024`) with `wide f32x8` vectorized polynomials for GELU (7.7× speedup: 9.83 ms → 1.28 ms), sigmoid, tanh, silu, and softmax.
@@ -243,6 +243,25 @@ See [`docs/ops_coverage.md`](docs/ops_coverage.md) for full signatures and test 
 The full phased plan for kernel/backend optimization (CPU int4 GEMV, iGPU latency,
 CUDA backend, GGUF import, speculative decoding) with measured baselines and
 benchmark gates lives in [`docs/OPTIMIZATION_ROADMAP.md`](docs/OPTIMIZATION_ROADMAP.md).
+
+---
+
+## 📦 Wheels (v0.6.1)
+
+Prebuilt portable wheels are published to PyPI on every `v*` tag (see
+[`CHANGELOG.md`](CHANGELOG.md)). Baselines are portable; faster ISA paths
+(AVX2/AVX-512-VNNI/NEON) are selected at runtime:
+
+| Platform | Architectures | Notes |
+| :--- | :--- | :--- |
+| Windows | AMD64 (`x86-64-v2`) | Vulkan/DX12 via `burn-wgpu` |
+| Linux | x86_64 (`x86-64-v2`), aarch64 (`neoverse-n1`) | Vulkan; CUDA wheel from `cuda-build` job |
+| macOS 11+ | arm64 (`apple-m1`), x86_64 (`x86-64-v2`) | Metal / Vulkan |
+| Native (self-hosted) | host (`target-cpu=native`) | Peak bench wheel, not for PyPI |
+
+```bash
+pip install torchburn  # portable optimized wheel
+```
 
 ---
 

@@ -22,6 +22,8 @@ class ModelConfig:
     qkv_bias: bool = True
     tie_word_embeddings: bool = True
     hidden_act: str = "silu"
+    norm_type: str = "standard"  # "standard" or "gemma_offset" (1.0 + weight)
+    scale_embeddings: bool = False  # True for Gemma (scales embeddings by sqrt(hidden_size))
     architectures: List[str] = field(default_factory=lambda: ["Qwen2ForCausalLM"])
 
     def __post_init__(self):
@@ -46,8 +48,13 @@ class ModelConfig:
 
         # Architecture-specific defaults
         arch = data.get("architectures", [""])[0] if data.get("architectures") else ""
-        is_qwen = "qwen" in arch.lower() or "qwen" in str(data.get("model_type", "")).lower()
+        model_type = str(data.get("model_type", "")).lower()
+        arch_lower = arch.lower()
+        is_qwen = "qwen" in arch_lower or "qwen" in model_type
+        is_gemma = "gemma" in arch_lower or "gemma" in model_type
 
+        norm_type = "gemma_offset" if is_gemma else data.get("norm_type", "standard")
+        scale_embeddings = is_gemma or data.get("scale_embeddings", False)
         qkv_bias = data.get("qkv_bias", data.get("attention_bias", is_qwen))
 
         return cls(
@@ -62,8 +69,10 @@ class ModelConfig:
             rms_norm_eps=data.get("rms_norm_eps", 1e-6),
             rope_theta=float(rope_theta),
             qkv_bias=bool(qkv_bias),
-            tie_word_embeddings=data.get("tie_word_embeddings", is_qwen),
-            hidden_act=data.get("hidden_act", "silu"),
+            tie_word_embeddings=data.get("tie_word_embeddings", is_qwen or is_gemma),
+            hidden_act=data.get("hidden_act", "gelu_pytorch_tanh" if is_gemma else "silu"),
+            norm_type=norm_type,
+            scale_embeddings=scale_embeddings,
             architectures=data.get("architectures", []),
         )
 

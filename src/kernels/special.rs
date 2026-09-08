@@ -842,7 +842,7 @@ pub fn nonzero(input: &BorrowedTensor) -> PyResult<OwnedTensor> {
             let d = unsafe { ts::<i32>(input) };
             d.iter().filter(|&&x| x != 0).count()
         }
-        DType::Bool => {
+        DType::I8 | DType::U8 | DType::Bool | DType::F16 | DType::BF16 => {
             let d = unsafe { ts::<u8>(input) };
             d.iter().filter(|&&x| x != 0).count()
         }
@@ -873,7 +873,7 @@ pub fn nonzero(input: &BorrowedTensor) -> PyResult<OwnedTensor> {
                 let d = unsafe { ts::<i32>(input) };
                 d[flat] != 0
             }
-            DType::Bool => {
+            DType::I8 | DType::U8 | DType::Bool | DType::F16 | DType::BF16 => {
                 let d = unsafe { ts::<u8>(input) };
                 d[flat] != 0
             }

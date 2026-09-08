@@ -173,7 +173,7 @@ pub fn masked_select(a: &BorrowedTensor, mask: &BorrowedTensor) -> PyResult<Owne
     let n = elem_count(&a.shape);
     let mut vals = Vec::new();
     match mask.dtype {
-        DType::Bool => {
+        DType::I8 | DType::U8 | DType::Bool | DType::F16 | DType::BF16 => {
             let md = unsafe { typed_slice::<u8>(mask) };
             match a.dtype {
                 DType::F32 => {

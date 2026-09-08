@@ -22,11 +22,14 @@ pub(crate) struct WgpuPipelines {
     pub(crate) residual_bgl: wgpu::BindGroupLayout,
     pub(crate) fused_add_rmsnorm_pipeline: wgpu::ComputePipeline,
     pub(crate) fused_add_rmsnorm_bgl: wgpu::BindGroupLayout,
+    /// Persistent embed-table lookup: avoids 3.5 KB host write_buffer per token.
+    pub(crate) embed_lookup_pipeline: wgpu::ComputePipeline,
+    pub(crate) embed_lookup_bgl: wgpu::BindGroupLayout,
     pub(crate) rows_per_wg: u32,
 }
 
 impl WgpuPipelines {
-    pub(crate) fn new(device: &wgpu::Device, rows_per_wg: u32) -> Self {
+    pub(crate) fn new(device: &wgpu::Device, rows_per_wg: u32, has_subgroups: bool) -> Self {
         let wg_size = rows_per_wg * 16;
         let gemv_shader_raw = include_str!("../shaders/gemv_w4a32.wgsl");
         let gemv_shader_src = gemv_shader_raw
@@ -219,9 +222,16 @@ impl WgpuPipelines {
             });
 
         // 2. RMSNorm pipeline & layout
+        // Select the subgroup-optimised variant when the adapter supports it;
+        // fall back to the barrier-tree variant otherwise.
+        let rmsnorm_src = if has_subgroups {
+            include_str!("../shaders/rmsnorm.wgsl")
+        } else {
+            include_str!("../shaders/rmsnorm_compat.wgsl")
+        };
         let rmsnorm_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("rmsnorm.wgsl"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/rmsnorm.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(rmsnorm_src.into()),
         });
         let rmsnorm_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("rmsnorm_bgl"),
@@ -657,6 +667,73 @@ impl WgpuPipelines {
                 cache: None,
             });
 
+        // ── Embed lookup pipeline ───────────────────────────────────────────────
+        // Binding layout: 0=embed_table(storage,read), 1=token_id(uniform),
+        //                 2=x_buf(storage,rw),          3=params(uniform)
+        let embed_lookup_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("embed_lookup.wgsl"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/embed_lookup.wgsl").into()),
+        });
+        let embed_lookup_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("embed_lookup_bgl"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
+        let embed_lookup_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("embed_lookup_layout"),
+            bind_group_layouts: &[&embed_lookup_bgl],
+            push_constant_ranges: &[],
+        });
+        let embed_lookup_pipeline =
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("embed_lookup_pipeline"),
+                layout: Some(&embed_lookup_layout),
+                module: &embed_lookup_shader,
+                entry_point: Some("main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                cache: None,
+            });
+
         Self {
             gemv_pipeline,
             gemv_bgl,
@@ -674,6 +751,8 @@ impl WgpuPipelines {
             residual_bgl,
             fused_add_rmsnorm_pipeline,
             fused_add_rmsnorm_bgl,
+            embed_lookup_pipeline,
+            embed_lookup_bgl,
             rows_per_wg,
         }
     }

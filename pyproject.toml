@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "torchburn"
-version = "0.5.4"
+version = "0.6.1"
 description = "A hardware-agnostic, Rust-compiled PyTorch compilation backend. Zero-copy DLPack FFI, BLAKE3 structural graph caching, and safe eager fallback for unsupported operators."
 readme = "README.md"
 requires-python = ">=3.9"
@@ -41,6 +41,8 @@ all = ["torchburn[gpu]"]
 [tool.maturin]
 python-source = "python"
 module-name = "torchburn._torchburn"
+bindings = "pyo3"
+strip = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

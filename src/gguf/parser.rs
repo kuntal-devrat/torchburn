@@ -58,12 +58,18 @@ impl GgufParser {
         let mut file = File::open(path)?;
         let mut data = Vec::new();
         file.read_to_end(&mut data)?;
-        Ok(Self { reader: data, pos: 0 })
+        Ok(Self {
+            reader: data,
+            pos: 0,
+        })
     }
 
     /// Create a new parser from a byte buffer.
     pub fn from_bytes(data: Vec<u8>) -> Self {
-        Self { reader: data, pos: 0 }
+        Self {
+            reader: data,
+            pos: 0,
+        }
     }
 
     fn read_bytes(&mut self, n: usize) -> Result<&[u8], GgufError> {
@@ -103,16 +109,14 @@ impl GgufParser {
     fn read_u64(&mut self) -> Result<u64, GgufError> {
         let bytes = self.read_bytes(8)?;
         Ok(u64::from_le_bytes([
-            bytes[0], bytes[1], bytes[2], bytes[3],
-            bytes[4], bytes[5], bytes[6], bytes[7],
+            bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
         ]))
     }
 
     fn read_i64(&mut self) -> Result<i64, GgufError> {
         let bytes = self.read_bytes(8)?;
         Ok(i64::from_le_bytes([
-            bytes[0], bytes[1], bytes[2], bytes[3],
-            bytes[4], bytes[5], bytes[6], bytes[7],
+            bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
         ]))
     }
 
@@ -124,8 +128,7 @@ impl GgufParser {
     fn read_f64(&mut self) -> Result<f64, GgufError> {
         let bytes = self.read_bytes(8)?;
         Ok(f64::from_le_bytes([
-            bytes[0], bytes[1], bytes[2], bytes[3],
-            bytes[4], bytes[5], bytes[6], bytes[7],
+            bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
         ]))
     }
 

@@ -163,7 +163,97 @@ class ModelLoader:
                     tensor_index[k] = wf
 
         def get_tensor(key: str) -> Optional[torch.Tensor]:
-            cands = [key, f"model.{key}", f"{key}.weight", f"model.{key}.weight"]
+            # Universal tensor key resolution: support LLaMA, Mistral, Qwen, Gemma,
+            # DeepSeek, ChatGLM, Falcon, and standard custom HF formats.
+            cands = [
+                key,
+                f"model.{key}",
+                f"{key}.weight",
+                f"model.{key}.weight",
+                f"transformer.{key}",
+                f"transformer.{key}.weight",
+            ]
+            # Key-specific architecture aliases
+            if key == "embed_tokens":
+                cands.extend([
+                    "model.embed_tokens.weight", "transformer.wte.weight",
+                    "transformer.embedding.word_embeddings.weight",
+                    "word_embeddings.weight", "embeddings.word_embeddings.weight",
+                ])
+            elif key == "norm":
+                cands.extend([
+                    "model.norm.weight", "transformer.ln_f.weight",
+                    "transformer.norm.weight", "model.final_layernorm.weight",
+                ])
+            elif "input_layernorm" in key:
+                prefix, idx = key.split(".input_layernorm")[0], key.split(".")[1]
+                cands.extend([
+                    f"model.layers.{idx}.input_layernorm.weight",
+                    f"transformer.h.{idx}.ln_1.weight",
+                    f"transformer.layers.{idx}.input_layernorm.weight",
+                    f"layers.{idx}.operator_norm.weight",
+                ])
+            elif "post_attention_layernorm" in key:
+                prefix, idx = key.split(".post_attention_layernorm")[0], key.split(".")[1]
+                cands.extend([
+                    f"model.layers.{idx}.post_attention_layernorm.weight",
+                    f"transformer.h.{idx}.ln_2.weight",
+                    f"transformer.layers.{idx}.post_attention_layernorm.weight",
+                ])
+            elif "q_proj" in key:
+                idx = key.split(".")[1]
+                cands.extend([
+                    f"model.layers.{idx}.self_attn.q_proj.weight",
+                    f"transformer.h.{idx}.attn.q_proj.weight",
+                    f"transformer.layers.{idx}.self_attn.q_proj.weight",
+                ])
+            elif "k_proj" in key:
+                idx = key.split(".")[1]
+                cands.extend([
+                    f"model.layers.{idx}.self_attn.k_proj.weight",
+                    f"transformer.h.{idx}.attn.k_proj.weight",
+                    f"transformer.layers.{idx}.self_attn.k_proj.weight",
+                ])
+            elif "v_proj" in key:
+                idx = key.split(".")[1]
+                cands.extend([
+                    f"model.layers.{idx}.self_attn.v_proj.weight",
+                    f"transformer.h.{idx}.attn.v_proj.weight",
+                    f"transformer.layers.{idx}.self_attn.v_proj.weight",
+                ])
+            elif "o_proj" in key:
+                idx = key.split(".")[1]
+                cands.extend([
+                    f"model.layers.{idx}.self_attn.o_proj.weight",
+                    f"transformer.h.{idx}.attn.out_proj.weight",
+                    f"transformer.layers.{idx}.self_attn.o_proj.weight",
+                    f"model.layers.{idx}.self_attn.dense.weight",
+                ])
+            elif "gate_proj" in key:
+                idx = key.split(".")[1]
+                cands.extend([
+                    f"model.layers.{idx}.mlp.gate_proj.weight",
+                    f"transformer.h.{idx}.mlp.gate_proj.weight",
+                    f"transformer.layers.{idx}.mlp.gate_proj.weight",
+                    f"model.layers.{idx}.mlp.w1.weight",
+                ])
+            elif "up_proj" in key:
+                idx = key.split(".")[1]
+                cands.extend([
+                    f"model.layers.{idx}.mlp.up_proj.weight",
+                    f"transformer.h.{idx}.mlp.up_proj.weight",
+                    f"transformer.layers.{idx}.mlp.up_proj.weight",
+                    f"model.layers.{idx}.mlp.w3.weight",
+                ])
+            elif "down_proj" in key:
+                idx = key.split(".")[1]
+                cands.extend([
+                    f"model.layers.{idx}.mlp.down_proj.weight",
+                    f"transformer.h.{idx}.mlp.down_proj.weight",
+                    f"transformer.layers.{idx}.mlp.down_proj.weight",
+                    f"model.layers.{idx}.mlp.w2.weight",
+                ])
+
             for c in cands:
                 if c in tensor_index:
                     with safetensors.safe_open(tensor_index[c], framework="pt", device="cpu") as sf:

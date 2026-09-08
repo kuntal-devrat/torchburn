@@ -507,3 +507,64 @@ pub fn fused_transformer_layer_step_w4a32(
         )
     })
 }
+
+/// Batched prefill SwiGLU MLP for INT4 (W4A32) — dispatches to the Rayon-parallel
+/// `gemm_w4a32_grouped` path when seq_len > 1, giving 2-5x prefill speedup over
+/// the per-token GEMV loop. The Python layer calls this for `x.shape[1] > 1`.
+///
+/// Layout: x is (batch, T, K); gate_w/up_w/down_w are (N_out, K/2) packed INT4;
+/// output is (batch, T, N_down) — same shape as F.silu(gate(x)) * up(x) → down(x).
+#[pyfunction]
+#[pyo3(signature = (x, gate_w, gate_s, gate_b, up_w, up_s, up_b, down_w, down_s, down_b, group_size=64))]
+pub fn fused_swiglu_mlp_batched_w4a32(
+    py: Python<'_>,
+    x: &Bound<'_, PyCapsule>,
+    gate_w: &Bound<'_, PyCapsule>,
+    gate_s: &Bound<'_, PyCapsule>,
+    gate_b: Option<&Bound<'_, PyCapsule>>,
+    up_w: &Bound<'_, PyCapsule>,
+    up_s: &Bound<'_, PyCapsule>,
+    up_b: Option<&Bound<'_, PyCapsule>>,
+    down_w: &Bound<'_, PyCapsule>,
+    down_s: &Bound<'_, PyCapsule>,
+    down_b: Option<&Bound<'_, PyCapsule>>,
+    group_size: usize,
+) -> PyResult<Py<PyCapsule>> {
+    let x_view = unsafe { dlpack::BorrowedTensor::from_capsule(x)? };
+    let gw_view = unsafe { dlpack::BorrowedTensor::from_capsule(gate_w)? };
+    let gs_view = unsafe { dlpack::BorrowedTensor::from_capsule(gate_s)? };
+    let gb_view = match gate_b {
+        Some(b) => Some(unsafe { dlpack::BorrowedTensor::from_capsule(b)? }),
+        None => None,
+    };
+    let uw_view = unsafe { dlpack::BorrowedTensor::from_capsule(up_w)? };
+    let us_view = unsafe { dlpack::BorrowedTensor::from_capsule(up_s)? };
+    let ub_view = match up_b {
+        Some(b) => Some(unsafe { dlpack::BorrowedTensor::from_capsule(b)? }),
+        None => None,
+    };
+    let dw_view = unsafe { dlpack::BorrowedTensor::from_capsule(down_w)? };
+    let ds_view = unsafe { dlpack::BorrowedTensor::from_capsule(down_s)? };
+    let db_view = match down_b {
+        Some(b) => Some(unsafe { dlpack::BorrowedTensor::from_capsule(b)? }),
+        None => None,
+    };
+
+    let out = py.allow_threads(|| {
+        crate::quantization::fused_swiglu_mlp_batched_w4a32(
+            &x_view,
+            &gw_view,
+            &gs_view,
+            gb_view.as_ref(),
+            &uw_view,
+            &us_view,
+            ub_view.as_ref(),
+            &dw_view,
+            &ds_view,
+            db_view.as_ref(),
+            group_size,
+        )
+    })?;
+
+    dlpack::owned_to_capsule_owned(py, out)
+}

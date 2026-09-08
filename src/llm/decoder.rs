@@ -12,10 +12,57 @@ use rayon::prelude::*;
 
 use crate::dlpack::{self, unsupported, BorrowedTensor, DType, OwnedTensor};
 use crate::quantization::{
-    dot_f32_f32, fast_rms_norm, fast_vector_add, gemv_w4a32_grouped, gemv_w4a32_grouped_v2,
-    pack_rows_w4a32_group64_v1_to_v2, quantize_activation_to_u8,
+    dot_f32_f32, fast_rms_norm, fast_vector_add, fast_vector_fma, gemv_w4a32_grouped,
+    gemv_w4a32_grouped_v2, pack_rows_w4a32_group64_v1_to_v2, quantize_activation_to_u8,
     swiglu_neuron_w4a32_dot_dispatch,
 };
+
+thread_local! {
+    static THREAD_SCORES: std::cell::RefCell<Vec<f32>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[inline(always)]
+fn rope_apply_head(head: &mut [f32], cos_p: &[f32], sin_p: &[f32], half_dim: usize) {
+    let num_vec = half_dim / 4;
+    for c in 0..num_vec {
+        let i = c * 4;
+        let mut x1_arr = [0.0f32; 4];
+        let mut x2_arr = [0.0f32; 4];
+        let mut c1_arr = [0.0f32; 4];
+        let mut s1_arr = [0.0f32; 4];
+        let mut c2_arr = [0.0f32; 4];
+        let mut s2_arr = [0.0f32; 4];
+        x1_arr.copy_from_slice(&head[i..i + 4]);
+        x2_arr.copy_from_slice(&head[i + half_dim..i + half_dim + 4]);
+        c1_arr.copy_from_slice(&cos_p[i..i + 4]);
+        s1_arr.copy_from_slice(&sin_p[i..i + 4]);
+        c2_arr.copy_from_slice(&cos_p[i + half_dim..i + half_dim + 4]);
+        s2_arr.copy_from_slice(&sin_p[i + half_dim..i + half_dim + 4]);
+
+        let x1 = wide::f32x4::from(x1_arr);
+        let x2 = wide::f32x4::from(x2_arr);
+        let c1 = wide::f32x4::from(c1_arr);
+        let s1 = wide::f32x4::from(s1_arr);
+        let c2 = wide::f32x4::from(c2_arr);
+        let s2 = wide::f32x4::from(s2_arr);
+
+        let out1 = (x1 * c1) - (x2 * s1);
+        let out2 = (x2 * c2) + (x1 * s2);
+
+        head[i..i + 4].copy_from_slice(&out1.to_array());
+        head[i + half_dim..i + half_dim + 4].copy_from_slice(&out2.to_array());
+    }
+    for i in (num_vec * 4)..half_dim {
+        let q1 = head[i];
+        let q2 = head[i + half_dim];
+        let c1 = cos_p[i];
+        let s1 = sin_p[i];
+        let c2 = cos_p[i + half_dim];
+        let s2 = sin_p[i + half_dim];
+        head[i] = q1 * c1 - q2 * s1;
+        head[i + half_dim] = q2 * c2 + q1 * s2;
+    }
+}
 
 pub(crate) unsafe fn typed_slice<T>(t: &BorrowedTensor) -> &[T] {
     std::slice::from_raw_parts(t.data as *const T, t.buffer_len())
@@ -635,33 +682,15 @@ impl RustQwenDecoder {
             let (q, kv_rest) = self.qkv_buf.split_at_mut(q_dim);
             let (k, v) = kv_rest.split_at_mut(kv_dim);
 
-            // C. RoPE
+            // C. RoPE (SIMD vectorised)
             for h in 0..num_heads {
                 let q_head = &mut q[h * head_dim..(h + 1) * head_dim];
-                for i in 0..half_dim {
-                    let q1 = q_head[i];
-                    let q2 = q_head[i + half_dim];
-                    let c1 = cos_p[i];
-                    let s1 = sin_p[i];
-                    let c2 = cos_p[i + half_dim];
-                    let s2 = sin_p[i + half_dim];
-                    q_head[i] = q1 * c1 - q2 * s1;
-                    q_head[i + half_dim] = q2 * c2 + q1 * s2;
-                }
+                rope_apply_head(q_head, cos_p, sin_p, half_dim);
             }
 
             for h in 0..num_kv_heads {
                 let k_head = &mut k[h * head_dim..(h + 1) * head_dim];
-                for i in 0..half_dim {
-                    let k1 = k_head[i];
-                    let k2 = k_head[i + half_dim];
-                    let c1 = cos_p[i];
-                    let s1 = sin_p[i];
-                    let c2 = cos_p[i + half_dim];
-                    let s2 = sin_p[i + half_dim];
-                    k_head[i] = k1 * c1 - k2 * s1;
-                    k_head[i + half_dim] = k2 * c2 + k1 * s2;
-                }
+                rope_apply_head(k_head, cos_p, sin_p, half_dim);
             }
 
             // D. Update KV caches
@@ -675,49 +704,62 @@ impl RustQwenDecoder {
                 v_cache[dst_offset..dst_offset + head_dim].copy_from_slice(v_src);
             }
 
-            // E. GQA Attention
+            // E. GQA Attention (Rayon parallel across heads + SIMD FMA V-accumulation)
             let seq_len = offset + 1;
             let scale = 1.0f32 / (head_dim as f32).sqrt();
             let heads_per_kv = num_heads / num_kv_heads;
 
-            self.attn_out.fill(0.0);
+            let q_ptr_val = q.as_ptr() as usize;
+            let k_cache_ptr_val = k_cache.as_ptr() as usize;
+            let v_cache_ptr_val = v_cache.as_ptr() as usize;
 
-            for h in 0..num_heads {
-                let kv_h = h / heads_per_kv;
-                let q_ptr = unsafe { q.as_ptr().add(h * head_dim) };
-                let k_base_ptr = unsafe { k_cache.as_ptr().add(kv_h * head_stride) };
-                let v_base_ptr = unsafe { v_cache.as_ptr().add(kv_h * head_stride) };
+            self.attn_out
+                .par_chunks_exact_mut(head_dim)
+                .enumerate()
+                .for_each(|(h, out_h)| {
+                    out_h.fill(0.0);
+                    let kv_h = h / heads_per_kv;
+                    let q_head_ptr = unsafe { (q_ptr_val as *const f32).add(h * head_dim) };
+                    let k_base_ptr =
+                        unsafe { (k_cache_ptr_val as *const f32).add(kv_h * head_stride) };
+                    let v_base_ptr =
+                        unsafe { (v_cache_ptr_val as *const f32).add(kv_h * head_stride) };
 
-                let mut max_score = f32::NEG_INFINITY;
-                for t in 0..seq_len {
-                    let k_t_ptr = unsafe { k_base_ptr.add(t * head_dim) };
-                    let dot = unsafe { dot_f32_f32(q_ptr, k_t_ptr, head_dim) };
-                    let sc = dot * scale;
-                    self.scores[t] = sc;
-                    if sc > max_score {
-                        max_score = sc;
-                    }
-                }
-
-                let mut exp_sum = 0.0f32;
-                for t in 0..seq_len {
-                    let ex = (self.scores[t] - max_score).exp();
-                    self.scores[t] = ex;
-                    exp_sum += ex;
-                }
-                let inv_sum = 1.0f32 / exp_sum;
-
-                let out_h_ptr = unsafe { self.attn_out.as_mut_ptr().add(h * head_dim) };
-                for t in 0..seq_len {
-                    let w = self.scores[t] * inv_sum;
-                    let v_t_ptr = unsafe { v_base_ptr.add(t * head_dim) };
-                    for d in 0..head_dim {
-                        unsafe {
-                            *out_h_ptr.add(d) += w * *v_t_ptr.add(d);
+                    THREAD_SCORES.with(|cell| {
+                        let mut scores_buf = cell.borrow_mut();
+                        if scores_buf.len() < seq_len {
+                            scores_buf.resize(seq_len.max(512), 0.0);
                         }
-                    }
-                }
-            }
+                        let scores = &mut scores_buf[..seq_len];
+
+                        let mut max_score = f32::NEG_INFINITY;
+                        for t in 0..seq_len {
+                            let k_t_ptr = unsafe { k_base_ptr.add(t * head_dim) };
+                            let dot = unsafe { dot_f32_f32(q_head_ptr, k_t_ptr, head_dim) };
+                            let sc = dot * scale;
+                            scores[t] = sc;
+                            if sc > max_score {
+                                max_score = sc;
+                            }
+                        }
+
+                        let mut exp_sum = 0.0f32;
+                        for t in 0..seq_len {
+                            let ex = (scores[t] - max_score).exp();
+                            scores[t] = ex;
+                            exp_sum += ex;
+                        }
+                        let inv_sum = 1.0f32 / exp_sum;
+
+                        for t in 0..seq_len {
+                            let w = scores[t] * inv_sum;
+                            let v_t_ptr = unsafe { v_base_ptr.add(t * head_dim) };
+                            unsafe {
+                                fast_vector_fma(out_h.as_mut_ptr(), v_t_ptr, w, head_dim);
+                            }
+                        }
+                    });
+                });
 
             // F. Output projection
             Self::projection_gemv(
@@ -767,9 +809,7 @@ impl RustQwenDecoder {
             let min_chunk = (intermediate_size / (n_threads * 4)).max(8);
 
             #[cfg(target_arch = "x86_64")]
-            let has_vnni = is_x86_feature_detected!("avx512vnni")
-                && is_x86_feature_detected!("avx512f")
-                && is_x86_feature_detected!("avx512bw");
+            let has_vnni = crate::dispatch::cpu_features().avx512vnni;
             #[cfg(not(target_arch = "x86_64"))]
             let has_vnni = false;
 

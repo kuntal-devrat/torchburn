@@ -10,8 +10,8 @@
 //! Run:
 //!   cargo bench --no-default-features --features matrixmultiply --bench bench_decoder_step
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use _torchburn::kernels::{fast_rms_norm, gemv_w4a32_grouped, sample_logits};
+use criterion::{black_box, criterion_group, criterion_main, Criterion};
 
 const GROUP_SIZE: usize = 64;
 const HIDDEN: usize = 896;
@@ -78,7 +78,13 @@ fn bench_decode_step(c: &mut Criterion) {
 
         bb.iter(|| unsafe {
             // 1. input rms_norm
-            fast_rms_norm(x.as_ptr(), norm_w.as_ptr(), norm_out.as_mut_ptr(), HIDDEN, 1e-6);
+            fast_rms_norm(
+                x.as_ptr(),
+                norm_w.as_ptr(),
+                norm_out.as_mut_ptr(),
+                HIDDEN,
+                1e-6,
+            );
             // 2. qkv GEMV
             gemv_w4a32_grouped(
                 norm_out.as_ptr(),

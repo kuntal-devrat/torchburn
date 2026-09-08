@@ -58,28 +58,28 @@ type DispatchFn = fn(&Node, &mut Vec<Slot>, &[CapsuleRef]) -> PyResult<bool>;
 
 /// Module dispatch functions indexed by module constant.
 const MODULE_FNS: &[DispatchFn] = &[
-    d_elementwise::try_dispatch, // 0
-    d_reducers::try_dispatch,    // 1
-    d_norm::try_dispatch,        // 2
-    d_shape::try_dispatch,       // 3
-    d_nn::try_dispatch,          // 4
-    d_scatter::try_dispatch,     // 5
-    d_math_extra::try_dispatch,  // 6
-    d_batch2::try_dispatch,      // 7
+    d_elementwise::try_dispatch,   // 0
+    d_reducers::try_dispatch,      // 1
+    d_norm::try_dispatch,          // 2
+    d_shape::try_dispatch,         // 3
+    d_nn::try_dispatch,            // 4
+    d_scatter::try_dispatch,       // 5
+    d_math_extra::try_dispatch,    // 6
+    d_batch2::try_dispatch,        // 7
     d_float_special::try_dispatch, // 8
-    d_blas_extra::try_dispatch,  // 9
-    d_act_loss::try_dispatch,    // 10
-    d_decomp::try_dispatch,      // 11
-    d_scatter2::try_dispatch,    // 12
-    d_shape2::try_dispatch,      // 13
-    d_nn3d::try_dispatch,        // 14
-    d_random::try_dispatch,      // 15
-    d_rnn::try_dispatch,         // 16
-    d_solve::try_dispatch,       // 17
-    d_fused::try_dispatch,       // 18
-    d_quant::try_dispatch,       // 19
-    d_fft::try_dispatch,         // 20
-    d_batch4::try_dispatch,      // 21
+    d_blas_extra::try_dispatch,    // 9
+    d_act_loss::try_dispatch,      // 10
+    d_decomp::try_dispatch,        // 11
+    d_scatter2::try_dispatch,      // 12
+    d_shape2::try_dispatch,        // 13
+    d_nn3d::try_dispatch,          // 14
+    d_random::try_dispatch,        // 15
+    d_rnn::try_dispatch,           // 16
+    d_solve::try_dispatch,         // 17
+    d_fused::try_dispatch,         // 18
+    d_quant::try_dispatch,         // 19
+    d_fft::try_dispatch,           // 20
+    d_batch4::try_dispatch,        // 21
 ];
 
 /// Static (target, module_index) pairs — one entry per supported target.

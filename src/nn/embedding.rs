@@ -11,7 +11,6 @@ use crate::dlpack::{elem_count, unsupported, BorrowedTensor, DType, OwnedTensor}
 use pyo3::prelude::*;
 use rayon::prelude::*;
 
-
 /// Read a tensor's elements as a typed slice.
 unsafe fn typed_slice<T>(t: &BorrowedTensor) -> &[T] {
     std::slice::from_raw_parts(t.data as *const T, t.buffer_len())
@@ -65,10 +64,8 @@ pub fn embedding(weight: &BorrowedTensor, indices: &BorrowedTensor) -> PyResult<
                         }
                         // Process output in chunks — each chunk writes to disjoint [i*d .. (i+1)*d]
                         let chunk_size = 4096; // elements per chunk
-                        out_data
-                            .par_chunks_mut(chunk_size)
-                            .enumerate()
-                            .for_each(|(chunk_idx, chunk)| {
+                        out_data.par_chunks_mut(chunk_size).enumerate().for_each(
+                            |(chunk_idx, chunk)| {
                                 let offset = chunk_idx * chunk_size;
                                 for (j, out_elem) in chunk.iter_mut().enumerate() {
                                     let flat_idx = offset + j;
@@ -76,7 +73,8 @@ pub fn embedding(weight: &BorrowedTensor, indices: &BorrowedTensor) -> PyResult<
                                     let col_idx = flat_idx % d;
                                     *out_elem = w[idx[row_idx] as usize * d + col_idx];
                                 }
-                            });
+                            },
+                        );
                     } else {
                         for (i, &ix) in idx.iter().enumerate() {
                             let row = ix as usize;
@@ -102,10 +100,8 @@ pub fn embedding(weight: &BorrowedTensor, indices: &BorrowedTensor) -> PyResult<
                             }
                         }
                         let chunk_size = 4096;
-                        out_data
-                            .par_chunks_mut(chunk_size)
-                            .enumerate()
-                            .for_each(|(chunk_idx, chunk)| {
+                        out_data.par_chunks_mut(chunk_size).enumerate().for_each(
+                            |(chunk_idx, chunk)| {
                                 let offset = chunk_idx * chunk_size;
                                 for (j, out_elem) in chunk.iter_mut().enumerate() {
                                     let flat_idx = offset + j;
@@ -113,7 +109,8 @@ pub fn embedding(weight: &BorrowedTensor, indices: &BorrowedTensor) -> PyResult<
                                     let col_idx = flat_idx % d;
                                     *out_elem = w[idx[row_idx] as usize * d + col_idx];
                                 }
-                            });
+                            },
+                        );
                     } else {
                         for (i, &ix) in idx.iter().enumerate() {
                             let row = ix as usize;
@@ -146,10 +143,8 @@ pub fn embedding(weight: &BorrowedTensor, indices: &BorrowedTensor) -> PyResult<
                             }
                         }
                         let chunk_size = 4096;
-                        out_data
-                            .par_chunks_mut(chunk_size)
-                            .enumerate()
-                            .for_each(|(chunk_idx, chunk)| {
+                        out_data.par_chunks_mut(chunk_size).enumerate().for_each(
+                            |(chunk_idx, chunk)| {
                                 let offset = chunk_idx * chunk_size;
                                 for (j, out_elem) in chunk.iter_mut().enumerate() {
                                     let flat_idx = offset + j;
@@ -157,7 +152,8 @@ pub fn embedding(weight: &BorrowedTensor, indices: &BorrowedTensor) -> PyResult<
                                     let col_idx = flat_idx % d;
                                     *out_elem = w[idx[row_idx] as usize * d + col_idx];
                                 }
-                            });
+                            },
+                        );
                     } else {
                         for (i, &ix) in idx.iter().enumerate() {
                             let row = ix as usize;
@@ -183,10 +179,8 @@ pub fn embedding(weight: &BorrowedTensor, indices: &BorrowedTensor) -> PyResult<
                             }
                         }
                         let chunk_size = 4096;
-                        out_data
-                            .par_chunks_mut(chunk_size)
-                            .enumerate()
-                            .for_each(|(chunk_idx, chunk)| {
+                        out_data.par_chunks_mut(chunk_size).enumerate().for_each(
+                            |(chunk_idx, chunk)| {
                                 let offset = chunk_idx * chunk_size;
                                 for (j, out_elem) in chunk.iter_mut().enumerate() {
                                     let flat_idx = offset + j;
@@ -194,7 +188,8 @@ pub fn embedding(weight: &BorrowedTensor, indices: &BorrowedTensor) -> PyResult<
                                     let col_idx = flat_idx % d;
                                     *out_elem = w[idx[row_idx] as usize * d + col_idx];
                                 }
-                            });
+                            },
+                        );
                     } else {
                         for (i, &ix) in idx.iter().enumerate() {
                             let row = ix as usize;

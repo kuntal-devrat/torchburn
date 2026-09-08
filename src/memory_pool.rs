@@ -22,10 +22,12 @@ use std::cell::RefCell;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 
-/// Maximum number of free buffers to retain in the thread pool.
-const MAX_FREE: usize = 64;
+/// Maximum number of free buffers to retain per bucket in the thread pool.
+const MAX_FREE_PER_BUCKET: usize = 8;
 /// Maximum number of free buffers to retain in the global (deleter-fed) list.
-const MAX_GLOBAL_FREE: usize = 32;
+const MAX_GLOBAL_FREE: usize = 48;
+/// Number of size-class buckets (powers of 2 from 128 to 16M words).
+const NUM_BUCKETS: usize = 18;
 
 static GLOBAL_ALLOC_COUNT: AtomicUsize = AtomicUsize::new(0);
 static GLOBAL_HIT_COUNT: AtomicUsize = AtomicUsize::new(0);
@@ -49,10 +51,25 @@ thread_local! {
 /// and drained by `take_buffer` (execution thread).
 static GLOBAL_POOL: Mutex<Vec<(DType, usize, Vec<u64>)>> = Mutex::new(Vec::new());
 
-/// Large buffers (in u64 words, i.e. >64MB of f32) are not pooled to avoid
+/// Large buffers (in u64 words, i.e. >128MB of f32) are not pooled to avoid
 /// unbounded memory retention.
+#[inline(always)]
 fn poolable(words: usize) -> bool {
-    words <= 10_000_000
+    words <= 16_000_000 // ~128MB
+}
+
+/// Map a word count to a size-class bucket index.
+/// Buckets are powers of 2: [128, 256, 512, 1K, 2K, 4K, 8K, 16K, 32K,
+///                           64K, 128K, 256K, 512K, 1M, 2M, 4M, 8M, 16M]
+#[inline(always)]
+fn bucket_index(words: usize) -> usize {
+    if words <= 128 {
+        return 0;
+    }
+    let bits = usize::BITS - (words - 1).leading_zeros();
+    // bucket 0 = 128 words (2^7), bucket 1 = 256 (2^8), ...
+    let idx = (bits as usize).saturating_sub(7);
+    idx.min(NUM_BUCKETS - 1)
 }
 
 /// Borrow a buffer from the pool, or allocate a new one.
@@ -67,18 +84,36 @@ pub fn take_buffer(dtype: DType, words: usize) -> Vec<u64> {
     }
     POOL.with(|pool| {
         let mut pool = pool.borrow_mut();
-        // Best-fit search: smallest buffer that fits to reduce fragmentation
+        // Best-fit search within the same + next size class only: smallest
+        // buffer that fits with <4x waste. Bounded scan keeps the hot path
+        // O(1) (pool is capped at NUM_BUCKETS*8 entries worst case).
+        let want = bucket_index(words);
         let mut best_idx: Option<usize> = None;
         let mut best_cap = usize::MAX;
         for (i, (d, cap, _)) in pool.iter().enumerate() {
-            if *d == dtype && *cap >= words && *cap < best_cap {
+            if *d != dtype || *cap < words {
+                continue;
+            }
+            // Reject buffers more than 4x larger than requested (waste bound).
+            if *cap > words.saturating_mul(4).max(128) {
+                continue;
+            }
+            // Prefer same-bucket hits to preserve size classes.
+            if *cap < best_cap {
                 best_cap = *cap;
                 best_idx = Some(i);
+                if bucket_index(*cap) == want {
+                    // Same-bucket best-fit is good enough; keep scanning only
+                    // for an exact-size hit within a few more slots.
+                    if *cap == words {
+                        break;
+                    }
+                }
             }
         }
         if let Some(idx) = best_idx {
             GLOBAL_HIT_COUNT.fetch_add(1, Ordering::Relaxed);
-            let mut buf = pool.remove(idx).2;
+            let mut buf = pool.swap_remove(idx).2;
             // Reuse allocation without zeroing memory (see module docs).
             unsafe {
                 buf.set_len(words);
@@ -91,21 +126,29 @@ pub fn take_buffer(dtype: DType, words: usize) -> Vec<u64> {
 }
 
 /// Best-fit drain of the global free list (fed by the capsule deleter).
+/// Only hit on thread-local miss, so the `Mutex` is off the fast path.
 fn take_buffer_global(dtype: DType, words: usize) -> Vec<u64> {
-    let mut global = GLOBAL_POOL
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
+    let mut global = GLOBAL_POOL.lock().unwrap_or_else(|e| e.into_inner());
     let mut best_idx: Option<usize> = None;
     let mut best_cap = usize::MAX;
     for (i, (d, cap, _)) in global.iter().enumerate() {
-        if *d == dtype && *cap >= words && *cap < best_cap {
+        if *d != dtype || *cap < words {
+            continue;
+        }
+        if *cap > words.saturating_mul(4).max(128) {
+            continue;
+        }
+        if *cap < best_cap {
             best_cap = *cap;
             best_idx = Some(i);
+            if *cap == words {
+                break;
+            }
         }
     }
     if let Some(idx) = best_idx {
         GLOBAL_HIT_COUNT.fetch_add(1, Ordering::Relaxed);
-        let mut buf = global.remove(idx).2;
+        let mut buf = global.swap_remove(idx).2;
         drop(global);
         unsafe {
             buf.set_len(words);
@@ -117,19 +160,38 @@ fn take_buffer_global(dtype: DType, words: usize) -> Vec<u64> {
 }
 
 /// Return a buffer to the pool for reuse.
+///
+/// Enforces `MAX_FREE_PER_BUCKET` **per size-class bucket** (previously the
+/// cap was global, so one shape could evict all others and steady-state
+/// inference with 2-3 live shapes thrashed the allocator). Buffers whose
+/// capacity exceeds 4x the bucket floor are dropped to bound waste.
 pub fn give_buffer(dtype: DType, capacity: usize, mut buf: Vec<u64>) {
     GLOBAL_RECYCLE_COUNT.fetch_add(1, Ordering::Relaxed);
     // Don't pool huge buffers
     if !poolable(capacity) {
         return;
     }
+    // Bound waste: drop buffers far larger than their nominal bucket.
+    // bucket floor = 128 << idx; allow up to 4x before dropping.
+    let idx = bucket_index(capacity);
+    let floor = 128usize << idx.min(24);
+    if capacity > floor.saturating_mul(4) {
+        return;
+    }
     POOL.with(|pool| {
         let mut pool = pool.borrow_mut();
-        if pool.len() < MAX_FREE {
-            buf.clear();
-            // Ensure capacity is preserved for next reuse; don't shrink
-            pool.push((dtype, capacity, buf));
+        let mut in_bucket = 0usize;
+        for (d, cap, _) in pool.iter() {
+            if *d == dtype && bucket_index(*cap) == idx {
+                in_bucket += 1;
+                if in_bucket >= MAX_FREE_PER_BUCKET {
+                    return;
+                }
+            }
         }
+        buf.clear();
+        // Ensure capacity is preserved for next reuse; don't shrink
+        pool.push((dtype, capacity, buf));
     })
 }
 
@@ -142,9 +204,7 @@ pub fn give_buffer_global(dtype: DType, mut buf: Vec<u64>) {
     if !poolable(capacity) {
         return;
     }
-    let mut global = GLOBAL_POOL
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
+    let mut global = GLOBAL_POOL.lock().unwrap_or_else(|e| e.into_inner());
     if global.len() < MAX_GLOBAL_FREE {
         buf.clear();
         global.push((dtype, capacity, buf));
@@ -173,9 +233,7 @@ pub fn get_pool_stats() -> PoolStats {
         (bufs, words)
     });
     let (g_bufs, g_words) = {
-        let global = GLOBAL_POOL
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let global = GLOBAL_POOL.lock().unwrap_or_else(|e| e.into_inner());
         let bufs = global.len();
         let words: usize = global.iter().map(|(_, cap, _)| *cap).sum();
         (bufs, words)
@@ -201,8 +259,6 @@ pub fn clear_pool() {
     POOL.with(|pool| {
         pool.borrow_mut().clear();
     });
-    let mut global = GLOBAL_POOL
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
+    let mut global = GLOBAL_POOL.lock().unwrap_or_else(|e| e.into_inner());
     global.clear();
 }

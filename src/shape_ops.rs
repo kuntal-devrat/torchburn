@@ -68,7 +68,7 @@ pub fn cat(tensors: &[BorrowedTensor], dim: isize) -> PyResult<OwnedTensor> {
     let mut dim_offset = 0usize; // cumulative offset in the output along dim d
     for t in tensors {
         let t_dim_size = t.shape[d] as usize;
-        let t_contig = t.strides == contiguous_strides(&t.shape);
+        let t_contig = t.is_contiguous();
 
         if t_contig {
             let chunk_bytes = inner * elem_size;
@@ -243,7 +243,7 @@ pub fn reshape(a: &BorrowedTensor, new_shape: &[i64]) -> PyResult<OwnedTensor> {
     let mut out = OwnedTensor::new(a.dtype, resolved);
     let bytes = old_size * a.dtype.elem_size();
     // If contiguous, bitwise copy suffices; otherwise materialize via index walk.
-    if a.strides == contiguous_strides(&a.shape) {
+    if a.is_contiguous() {
         unsafe {
             std::ptr::copy_nonoverlapping(a.data, out.data.as_mut_ptr() as *mut u8, bytes);
         }
@@ -289,7 +289,13 @@ pub fn reshape(a: &BorrowedTensor, new_shape: &[i64]) -> PyResult<OwnedTensor> {
                 }
             }
 
-            DType::I64 | DType::I32 | DType::Bool => {
+            DType::I64
+            | DType::I32
+            | DType::I8
+            | DType::U8
+            | DType::Bool
+            | DType::F16
+            | DType::BF16 => {
                 return Err(unsupported("this kernel only supports f32/f64 tensors"));
             }
         }
@@ -495,7 +501,13 @@ pub fn permute(a: &BorrowedTensor, dims: &[isize]) -> PyResult<OwnedTensor> {
             }
         }
 
-        DType::I64 | DType::I32 | DType::Bool => {
+        DType::I64
+        | DType::I32
+        | DType::I8
+        | DType::U8
+        | DType::Bool
+        | DType::F16
+        | DType::BF16 => {
             return Err(unsupported("this kernel only supports f32/f64 tensors"));
         }
     }
@@ -597,7 +609,7 @@ pub fn expand(a: &BorrowedTensor, target_shape: &[i64]) -> PyResult<OwnedTensor>
         DType::F64 => expand_typed!(f64),
         DType::I64 => expand_typed!(i64),
         DType::I32 => expand_typed!(i32),
-        DType::Bool => expand_typed!(u8),
+        DType::I8 | DType::U8 | DType::Bool | DType::F16 | DType::BF16 => expand_typed!(u8),
     }
     Ok(out)
 }
@@ -659,7 +671,13 @@ pub fn where_op(
             }
         }
 
-        DType::I64 | DType::I32 | DType::Bool => {
+        DType::I64
+        | DType::I32
+        | DType::I8
+        | DType::U8
+        | DType::Bool
+        | DType::F16
+        | DType::BF16 => {
             return Err(unsupported("this kernel only supports f32/f64 tensors"));
         }
     }
@@ -703,7 +721,13 @@ pub fn masked_fill(a: &BorrowedTensor, mask: &BorrowedTensor, value: f64) -> PyR
             }
         }
 
-        DType::I64 | DType::I32 | DType::Bool => {
+        DType::I64
+        | DType::I32
+        | DType::I8
+        | DType::U8
+        | DType::Bool
+        | DType::F16
+        | DType::BF16 => {
             return Err(unsupported("this kernel only supports f32/f64 tensors"));
         }
     }
@@ -716,7 +740,7 @@ pub fn masked_fill(a: &BorrowedTensor, mask: &BorrowedTensor, value: f64) -> PyR
 
 pub fn flip(a: &BorrowedTensor, dims: &[isize]) -> PyResult<OwnedTensor> {
     let a_contig;
-    let a = if a.strides == contiguous_strides(&a.shape) {
+    let a = if a.is_contiguous() {
         a
     } else {
         a_contig = to_contiguous(a)?;
@@ -785,7 +809,7 @@ pub fn narrow(
     length: usize,
 ) -> PyResult<OwnedTensor> {
     let a_contig;
-    let a = if a.strides == contiguous_strides(&a.shape) {
+    let a = if a.is_contiguous() {
         a
     } else {
         a_contig = to_contiguous(a)?;
@@ -835,7 +859,7 @@ pub fn narrow(
 /// Equivalent to ``narrow(dim, index, 1)`` followed by ``squeeze(dim)``.
 pub fn select(a: &BorrowedTensor, dim: isize, index: usize) -> PyResult<OwnedTensor> {
     let a_contig;
-    let a = if a.strides == contiguous_strides(&a.shape) {
+    let a = if a.is_contiguous() {
         a
     } else {
         a_contig = to_contiguous(a)?;
@@ -891,7 +915,7 @@ pub fn index_select(
     index: &BorrowedTensor,
 ) -> PyResult<OwnedTensor> {
     let a_contig;
-    let a = if a.strides == contiguous_strides(&a.shape) {
+    let a = if a.is_contiguous() {
         a
     } else {
         a_contig = to_contiguous(a)?;
@@ -1079,7 +1103,7 @@ pub fn full(shape: &[i64], value: f64, dtype: crate::dlpack::DType) -> PyResult<
             let d = unsafe { std::slice::from_raw_parts_mut(out.data.as_mut_ptr() as *mut i32, n) };
             d.iter_mut().for_each(|x| *x = v);
         }
-        DType::Bool => {
+        DType::I8 | DType::U8 | DType::Bool | DType::F16 | DType::BF16 => {
             let v = if value != 0.0 { 1u8 } else { 0u8 };
             let d = unsafe { std::slice::from_raw_parts_mut(out.data.as_mut_ptr() as *mut u8, n) };
             d.iter_mut().for_each(|x| *x = v);

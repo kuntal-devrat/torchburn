@@ -82,12 +82,29 @@ impl WgpuQwenDecoder {
         let intermediate_size = self.intermediate_size;
         let mut map = std::collections::HashMap::new();
 
-        // 1. Upload token embedding to x_buf
-        let emb_start = token_id * hidden_size;
-        let emb_slice = &self.embed_tokens[emb_start..emb_start + hidden_size];
-        let emb_bytes =
-            unsafe { std::slice::from_raw_parts(emb_slice.as_ptr() as *const u8, hidden_size * 4) };
-        self.queue.write_buffer(&self.x_buf, 0, emb_bytes);
+        // 1. GPU-side embedding lookup (token_id_buf → embed_lookup shader → x_buf).
+        // This mirrors the normal decode path: upload only the 4-byte token id,
+        // dispatch the embed_lookup shader to fill x_buf, then readback for the
+        // debug snapshot.
+        let tid_bytes = (token_id as u32).to_le_bytes();
+        self.queue.write_buffer(&self.token_id_buf, 0, &tid_bytes);
+        {
+            let mut encoder = self
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+            {
+                let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: None,
+                    timestamp_writes: None,
+                });
+                cpass.set_pipeline(&self.pipelines.embed_lookup_pipeline);
+                cpass.set_bind_group(0, &self.bg_embed_lookup, &[]);
+                let embed_wgs = (hidden_size as u32 + 255) / 256;
+                cpass.dispatch_workgroups(embed_wgs, 1, 1);
+            }
+            self.queue.submit(Some(encoder.finish()));
+            let _ = self.device.poll(wgpu::PollType::Wait);
+        }
         map.insert(
             "embed".to_string(),
             self.read_buffer(&self.x_buf, hidden_size)?,

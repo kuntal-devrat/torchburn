@@ -2,7 +2,7 @@
 //!
 //! These are reduction + elementwise operations over the normalized dimensions.
 
-use crate::dlpack::{contiguous_strides, unsupported, BorrowedTensor, DType, OwnedTensor};
+use crate::dlpack::{unsupported, BorrowedTensor, DType, OwnedTensor};
 use pyo3::prelude::*;
 
 unsafe fn typed_slice<T>(t: &BorrowedTensor) -> &[T] {
@@ -30,7 +30,7 @@ pub fn layer_norm(
     }
 
     let _input_contig;
-    let input = if input.strides != contiguous_strides(&input.shape) {
+    let input = if !input.is_contiguous() {
         _input_contig = crate::shape_ops::to_contiguous(input)?;
         BorrowedTensor::from_owned(&_input_contig)
     } else {
@@ -120,7 +120,13 @@ pub fn layer_norm(
                 });
         }
 
-        DType::I64 | DType::I32 | DType::Bool => {
+        DType::I64
+        | DType::I32
+        | DType::I8
+        | DType::U8
+        | DType::Bool
+        | DType::F16
+        | DType::BF16 => {
             return Err(unsupported("this kernel only supports f32/f64 tensors"));
         }
     }
@@ -256,7 +262,13 @@ pub fn batch_norm(
             }
         }
 
-        DType::I64 | DType::I32 | DType::Bool => {
+        DType::I64
+        | DType::I32
+        | DType::I8
+        | DType::U8
+        | DType::Bool
+        | DType::F16
+        | DType::BF16 => {
             return Err(unsupported("this kernel only supports f32/f64 tensors"));
         }
     }
@@ -365,7 +377,13 @@ pub fn group_norm(
             }
         }
 
-        DType::I64 | DType::I32 | DType::Bool => {
+        DType::I64
+        | DType::I32
+        | DType::I8
+        | DType::U8
+        | DType::Bool
+        | DType::F16
+        | DType::BF16 => {
             return Err(unsupported("this kernel only supports f32/f64 tensors"));
         }
     }
@@ -386,7 +404,7 @@ pub fn rms_norm(
     }
 
     let _input_contig;
-    let input = if input.strides != contiguous_strides(&input.shape) {
+    let input = if !input.is_contiguous() {
         _input_contig = crate::shape_ops::to_contiguous(input)?;
         BorrowedTensor::from_owned(&_input_contig)
     } else {
@@ -442,7 +460,13 @@ pub fn rms_norm(
             }
         }
 
-        DType::I64 | DType::I32 | DType::Bool => {
+        DType::I64
+        | DType::I32
+        | DType::I8
+        | DType::U8
+        | DType::Bool
+        | DType::F16
+        | DType::BF16 => {
             return Err(unsupported("this kernel only supports f32/f64 tensors"));
         }
     }

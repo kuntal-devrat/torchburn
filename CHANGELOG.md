@@ -7,6 +7,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-09-08
+
+### Added
+- **Portable per-target baselines** (`.cargo/config.toml`): `x86-64-v2` (Windows/Linux/macOS x64),
+  `neoverse-n1` (aarch64 Linux), `apple-m1` (macOS arm64), `apple-a14` (iOS) — plus a
+  `.cargo/config.native.toml` overlay (`target-cpu=native`) for bench-only builds.
+- **`all-gpu` feature flag** (`Cargo.toml`): enables every GPU path available on the host
+  (WGPU universal + CUDA + Metal) in one switch.
+- **iOS Metal support**: `metal` dependency and native backend now gate on
+  `any(target_os = "macos", target_os = "ios")`.
+- **`rmsnorm_compat.wgsl`**: barrier-tree RMSNorm fallback for adapters without WGSL
+  subgroup support (software/CPU fallbacks, older Vulkan drivers).
+- **`tier_at_least()` helper** (`dispatch.rs`): one-line cached tier check for hot loops.
+- **`is_contiguous_shape_strides()`** (`dlpack.rs`): allocation-free contiguity probe.
+
+### Fixed
+- **WGPU decoder build break**: `WgpuPipelines::new` arity mismatch (missing `has_subgroups`)
+  and missing `rmsnorm_compat.wgsl` include — `burn-wgpu` targets compile again.
+- **Metal `gemm_f32` ignored `alpha`/`beta`**: shader and params buffer now implement
+  the full BLAS contract `C = alpha*A*B + beta*C`.
+- **DLPack dtype mapping**: `(FLOAT,16)→F16`, `(BFLOAT,16)→BF16`, `(INT,8)→I8`,
+  `(UINT,8)→U8` now ingest correctly instead of collapsing to `Bool` / unsupported.
+- **`fused_swiglu_mlp_batched_w4a32` type error**: `OwnedTensor` payload read without
+  a throwing `BorrowedTensor` conversion.
+- **Memory pool caps were global, not per-bucket**: one shape could evict all others;
+  caps are now enforced per size-class bucket with a 4× waste bound and `swap_remove`.
+
+### Changed
+- **Release profile for peak optimization**: `lto = "fat"`, `codegen-units = 1`,
+  `panic = "unwind"` (restores GPU→CPU `catch_unwind` fallback instead of aborting the
+  interpreter), `strip = true`, `debug = 0`, `split-debuginfo = "off"`;
+  new `release-fast` (CI), `native`, `bench`, and `dev` profiles.
+- **CPUID hoisting**: 40+ per-row/per-token `is_x86_feature_detected!` probes in
+  `quantization/gemv.rs`, `fused_ops.rs`, `fused_transformer.rs`, `llm/decoder.rs`
+  replaced with cached `dispatch::cpu_features()` reads.
+- **GEMV `m==1` vectorization** (`linalg.rs`): p-outer/j-inner `f32x8` FMA accumulation
+  with L1 tile buffers instead of strided scalar columns.
+- **Graph cache** (`cache.rs`): pre-serialized payload strings, `ahash`, read-lock fast
+  path with write-only LRU promotion (was `write()` + O(1024) `retain` per lookup).
+- **Contiguity checks**: 10 hot-path files moved from `strides == contiguous_strides()`
+  (one `Vec` alloc per op) to `is_contiguous()`.
+- **CI wheels**: portable config is kept (no more `rm -f .cargo/config.toml`); per-arch
+  `RUSTFLAGS` (`x86-64-v2`, `neoverse-n1`, `apple-m1`); Linux aarch64 + CUDA wheels.
+- Version bump `0.6.0` → `0.6.1`.
+
 ## [0.5.5] - 2026-09-07
 
 ### Added

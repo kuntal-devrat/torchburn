@@ -22,7 +22,9 @@ pub use self::per_tensor::{
 
 pub mod gemv;
 
-pub use self::gemv::{dot_f32_i8, gemv_w4a32_grouped, w4a32_linear, w8a32_linear};
+pub use self::gemv::{
+    dot_f32_i8, gemm_w4a32_grouped, gemv_w4a32_grouped, w4a32_linear, w8a32_linear,
+};
 pub(crate) use self::gemv::{
     dot_f32_u4_group_scalar, gemv_w8a32, hsum256_ps_avx, quantize_activation_to_u8,
     swiglu_neuron_w4a32_group32_avx2, swiglu_neuron_w4a32_group32_avx512,
@@ -41,13 +43,13 @@ pub use self::packed_v2::{
 
 pub mod fused_ops;
 
-pub(crate) use self::fused_ops::{
-    fast_vector_add, swiglu_neuron_w4a32_dot_dispatch,
-};
 pub use self::fused_ops::{
     dot_f32_f32, fast_rms_norm, fused_attention_step_w4a32, fused_attention_step_w8a32,
-    fused_swiglu_mlp_w4a32, fused_swiglu_mlp_w8a32, quantize_linear_weights_int4,
-    quantize_linear_weights_int8,
+    fused_swiglu_mlp_batched_w4a32, fused_swiglu_mlp_w4a32, fused_swiglu_mlp_w8a32,
+    quantize_linear_weights_int4, quantize_linear_weights_int8,
+};
+pub(crate) use self::fused_ops::{
+    fast_vector_add, fast_vector_fma, swiglu_neuron_w4a32_dot_dispatch,
 };
 
 pub mod fused_transformer;

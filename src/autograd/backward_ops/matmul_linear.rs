@@ -97,18 +97,16 @@ fn matmul_2d_same(a: &OwnedTensor, b: &OwnedTensor) -> OwnedTensor {
                 unsafe { std::slice::from_raw_parts_mut(out.data.as_mut_ptr() as *mut f32, m * n) };
             if m >= 8 {
                 use rayon::prelude::*;
-                od.par_chunks_mut(n)
-                    .enumerate()
-                    .for_each(|(i, od_row)| {
-                        let a_row = &ad[i * k..(i + 1) * k];
-                        for j in 0..n {
-                            let mut s = 0.0f32;
-                            for kk in 0..k {
-                                s += a_row[kk] * bd[kk * n + j];
-                            }
-                            od_row[j] = s;
+                od.par_chunks_mut(n).enumerate().for_each(|(i, od_row)| {
+                    let a_row = &ad[i * k..(i + 1) * k];
+                    for j in 0..n {
+                        let mut s = 0.0f32;
+                        for kk in 0..k {
+                            s += a_row[kk] * bd[kk * n + j];
                         }
-                    });
+                        od_row[j] = s;
+                    }
+                });
             } else {
                 for i in 0..m {
                     for j in 0..n {
@@ -128,18 +126,16 @@ fn matmul_2d_same(a: &OwnedTensor, b: &OwnedTensor) -> OwnedTensor {
                 unsafe { std::slice::from_raw_parts_mut(out.data.as_mut_ptr() as *mut f64, m * n) };
             if m >= 8 {
                 use rayon::prelude::*;
-                od.par_chunks_mut(n)
-                    .enumerate()
-                    .for_each(|(i, od_row)| {
-                        let a_row = &ad[i * k..(i + 1) * k];
-                        for j in 0..n {
-                            let mut s = 0.0f64;
-                            for kk in 0..k {
-                                s += a_row[kk] * bd[kk * n + j];
-                            }
-                            od_row[j] = s;
+                od.par_chunks_mut(n).enumerate().for_each(|(i, od_row)| {
+                    let a_row = &ad[i * k..(i + 1) * k];
+                    for j in 0..n {
+                        let mut s = 0.0f64;
+                        for kk in 0..k {
+                            s += a_row[kk] * bd[kk * n + j];
                         }
-                    });
+                        od_row[j] = s;
+                    }
+                });
             } else {
                 for i in 0..m {
                     for j in 0..n {

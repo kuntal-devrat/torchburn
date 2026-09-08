@@ -112,7 +112,11 @@ fn reference_gemv(x: &[f32], packed: &[u8], scales: &[f32], n: usize, k: usize) 
     for row in 0..n {
         for i in 0..k {
             let byte = packed[row * ((k + 1) / 2) + i / 2];
-            let nibble = if i % 2 == 0 { byte & 0x0F } else { (byte >> 4) & 0x0F };
+            let nibble = if i % 2 == 0 {
+                byte & 0x0F
+            } else {
+                (byte >> 4) & 0x0F
+            };
             let q = (nibble as i8) - 8;
             let scale = scales[row * num_groups + i / GROUP_SIZE];
             out[row] += x[i] * (q as f32) * scale;
@@ -125,7 +129,10 @@ fn reference_gemv(x: &[f32], packed: &[u8], scales: &[f32], n: usize, k: usize) 
 /// metrics explode when a dot-product row lands near zero, so the harness
 /// records max-abs budgets (roadmap 0.4) instead.
 fn max_rel_err(actual: &[f32], expected: &[f32]) -> f32 {
-    let denom = expected.iter().fold(0.0f32, |a, &v| a.max(v.abs())).max(1e-6);
+    let denom = expected
+        .iter()
+        .fold(0.0f32, |a, &v| a.max(v.abs()))
+        .max(1e-6);
     actual
         .iter()
         .zip(expected)
@@ -148,7 +155,11 @@ fn emulate_w4a8(x: &[f32], packed: &[u8], scales: &[f32], n: usize, k: usize) ->
             for i in 0..GROUP_SIZE {
                 let idx = g * GROUP_SIZE + i;
                 let byte = packed[row * ((k + 1) / 2) + idx / 2];
-                let nibble = if idx % 2 == 0 { byte & 0x0F } else { (byte >> 4) & 0x0F };
+                let nibble = if idx % 2 == 0 {
+                    byte & 0x0F
+                } else {
+                    (byte >> 4) & 0x0F
+                };
                 let q = (nibble as i8) - 8;
                 acc += x_q[idx] * (q as i32);
             }
@@ -234,7 +245,10 @@ fn quantization_quality_budget_recorded() {
     // Real model weights concentrate near zero and quantize much more tightly
     // than uniform[-2,2]; this bounds the worst case on synthetic data.
     println!("int4-g64 vs f32 max-abs rel err on uniform weights: {err:.2e}");
-    assert!(err < 0.2, "int4 vs f32 synthetic rel err {err:.2e} (documented budget 0.2)");
+    assert!(
+        err < 0.2,
+        "int4 vs f32 synthetic rel err {err:.2e} (documented budget 0.2)"
+    );
 }
 
 /// Phase 1.1: the v2 interleaved layout must produce the same outputs as v1
@@ -277,7 +291,10 @@ fn gemv_v2_matches_v1() {
     // (observed 1.5e-3 on Qwen shapes). 5e-3 is the documented f16-scale
     // budget; a real layout/kernel bug fails at 1e-1+.
     let err = max_rel_err(&out_v2, &out_v1);
-    assert!(err < 5e-3, "v2 vs v1 rel err {err:.2e} (budget 5e-3, f16 scale)");
+    assert!(
+        err < 5e-3,
+        "v2 vs v1 rel err {err:.2e} (budget 5e-3, f16 scale)"
+    );
 }
 
 #[test]

@@ -15,6 +15,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5a15f179cd60c4584b8a8c596927aadc462e27f2ca70c04e0071964a73ba7a75"
 dependencies = [
  "cfg-if",
+ "getrandom 0.3.4",
  "once_cell",
  "version_check",
  "zerocopy",
@@ -3424,11 +3425,13 @@ checksum = "7d56353a2a665ad0f41a421187180aab746c8c325620617ad883a99a1cbe66d2"
 
 [[package]]
 name = "torchburn"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
+ "ahash",
  "blake3",
  "burn",
  "criterion",
+ "crossbeam-utils",
  "cudarc 0.13.9",
  "half",
  "libm",

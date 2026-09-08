@@ -9,7 +9,10 @@ fn naive_dot_i8(x: &[f32], w: &[i8]) -> f32 {
 
 /// Robust relative error: max-abs diff / max-abs expected.
 fn max_rel_err(actual: &[f32], expected: &[f32]) -> f32 {
-    let denom = expected.iter().fold(0.0f32, |a, &v| a.max(v.abs())).max(1e-6);
+    let denom = expected
+        .iter()
+        .fold(0.0f32, |a, &v| a.max(v.abs()))
+        .max(1e-6);
     actual
         .iter()
         .zip(expected)
@@ -26,7 +29,10 @@ fn dot_f32_i8_matches_reference() {
     let got = unsafe { dot_f32_i8(x.as_ptr(), w.as_ptr(), x.len()) };
     let expected = naive_dot_i8(&x, &w);
     let rel = (got - expected).abs() / expected.abs().max(1e-6);
-    assert!(rel < 1e-3, "dot_f32_i8 rel err {rel:.2e} (got {got}, want {expected})");
+    assert!(
+        rel < 1e-3,
+        "dot_f32_i8 rel err {rel:.2e} (got {got}, want {expected})"
+    );
 }
 
 /// Records the int8-vs-f32 quantization budget on synthetic weights (the
@@ -54,5 +60,8 @@ fn quantized_int8_quality_budget_recorded() {
     let err = max_rel_err(&out, &f32_out);
     println!("int8 vs f32 max-abs rel err on uniform weights: {err:.2e}");
     // int8 rounding is ~16x finer than int4; document, don't over-constrain.
-    assert!(err < 0.05, "int8 vs f32 synthetic rel err {err:.2e} (budget 0.05)");
+    assert!(
+        err < 0.05,
+        "int8 vs f32 synthetic rel err {err:.2e} (budget 0.05)"
+    );
 }

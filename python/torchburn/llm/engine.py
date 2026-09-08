@@ -41,17 +41,29 @@ class UniversalEngine:
         """Sets up hardware-accelerated quantization and compiled execution."""
         target_device = self.config.device.lower()
         if target_device == "auto":
-            # Auto-detect: if GPU available, use it; else CPU
+            # Auto-detect: CUDA > iGPU > CPU
             try:
-                gpu_info = torchburn._torchburn.gpu_info()
-                if gpu_info.get("available", False):
-                    target_device = "igpu"
+                from . import _torchburn as _native_check
+                if hasattr(_native_check, "CudaQwenDecoder"):
+                    import cudarc  # noqa: F401 — presence check
+                    target_device = "cuda"
                 else:
-                    target_device = "cpu"
+                    gpu_info = torchburn._torchburn.gpu_info()
+                    if gpu_info.get("available", False):
+                        target_device = "igpu"
+                    else:
+                        target_device = "cpu"
             except Exception:
-                target_device = "cpu"
+                try:
+                    gpu_info = torchburn._torchburn.gpu_info()
+                    if gpu_info.get("available", False):
+                        target_device = "igpu"
+                    else:
+                        target_device = "cpu"
+                except Exception:
+                    target_device = "cpu"
 
-        if target_device in ("igpu", "dgpu"):
+        if target_device in ("igpu", "dgpu", "cuda"):
             os.environ["TORCHBURN_DEVICE"] = target_device
 
         quant = self.config.quantization.lower()
@@ -79,14 +91,24 @@ class UniversalEngine:
                 torchburn.quantize_model(self.raw_model, bits=bits, exclude_modules=[], backend=backend)
 
 
-            if bits == 4 and backend == "cpu":
+            if bits == 4 and target_device in ("cuda",):
+                # Priority 1: NVIDIA CUDA dGPU
+                try:
+                    print("[\033[93mCUDA dGPU\033[0m] Initializing CUDA INT4 Decoder...")
+                    self._rust_decoder = torchburn.create_cuda_qwen_decoder(self.raw_model)
+                    print("[\033[93mCUDA dGPU\033[0m] CUDA decoder active.")
+                except Exception as cuda_err:
+                    print(f"[\033[93mWarning\033[0m] CUDA decoder init failed ({cuda_err}); trying iGPU/CPU.")
+                    target_device = "igpu"
+
+            if self._rust_decoder is None and bits == 4 and backend == "cpu":
                 try:
                     print("[\033[92mTorchBurn\033[0m] Initializing Zero-Python Pure Rust Decoder (AVX-512 VNNI)...")
                     self._rust_decoder = torchburn.create_rust_qwen_decoder(self.raw_model)
                     print("[\033[92mTorchBurn\033[0m] Pure Rust Decoder active (45-50+ tok/s).")
                 except Exception as dec_err:
                     print(f"[\033[93mWarning\033[0m] Pure-Rust decoder init ({dec_err}), using fused layer SIMD.")
-            elif bits == 4 and backend == "igpu":
+            elif self._rust_decoder is None and bits == 4 and backend == "igpu":
                 try:
                     print("[\033[95miGPU Active\033[0m] Initializing End-to-End WGPU GPU Graph Decoder (Vulkan)...")
                     self._wgpu_decoder = torchburn.create_wgpu_qwen_decoder(self.raw_model)

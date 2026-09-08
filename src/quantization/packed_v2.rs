@@ -718,36 +718,18 @@ pub fn w4a32_grouped_linear(
     let bias_slice = bias.map(|b| unsafe { typed_slice::<f32>(b) });
     let b_ptr = bias_slice.map(|b| b.as_ptr());
 
-    if m == 1 {
-        unsafe {
-            gemv_w4a32_grouped(
-                x_slice.as_ptr(),
-                w_slice.as_ptr(),
-                s_slice.as_ptr(),
-                b_ptr,
-                out_slice.as_mut_ptr(),
-                n,
-                k,
-                group_size,
-            );
-        }
-    } else {
-        for i in 0..m {
-            let x_tok = unsafe { x_slice.as_ptr().add(i * k) };
-            let out_tok = unsafe { out_slice.as_mut_ptr().add(i * n) };
-            unsafe {
-                gemv_w4a32_grouped(
-                    x_tok,
-                    w_slice.as_ptr(),
-                    s_slice.as_ptr(),
-                    b_ptr,
-                    out_tok,
-                    n,
-                    k,
-                    group_size,
-                );
-            }
-        }
+    unsafe {
+        gemm_w4a32_grouped(
+            x_slice.as_ptr(),
+            w_slice.as_ptr(),
+            s_slice.as_ptr(),
+            b_ptr,
+            out_slice.as_mut_ptr(),
+            m,
+            n,
+            k,
+            group_size,
+        );
     }
 
     Ok(out)

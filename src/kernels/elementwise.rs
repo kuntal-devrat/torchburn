@@ -3,9 +3,7 @@
 //! This module is intentionally `#[allow(dead_code)]` heavy: many ops are
 //! thin wrappers around `math_ops::unary` but kept separate for clarity.
 
-use crate::dlpack::{
-    contiguous_strides, elem_count, unsupported, BorrowedTensor, DType, OwnedTensor,
-};
+use crate::dlpack::{elem_count, unsupported, BorrowedTensor, DType, OwnedTensor};
 use pyo3::prelude::*;
 
 unsafe fn typed_slice<T>(t: &BorrowedTensor) -> &[T] {
@@ -28,7 +26,7 @@ macro_rules! unary_op {
                     let dst = unsafe { typed_mut_slice::<f32>(&mut out) };
                     // SIMD for simple ops that wide supports (abs, neg) will use scalar fallback for now
                     // but we keep the structure for future wide::exp etc.
-                    if a.strides == contiguous_strides(&a.shape) {
+                    if a.is_contiguous() {
                         use rayon::prelude::*;
                         dst.par_chunks_mut(PAR_CHUNK)
                             .enumerate()
@@ -49,7 +47,7 @@ macro_rules! unary_op {
                 DType::F64 => {
                     let src = unsafe { typed_slice::<f64>(a) };
                     let dst = unsafe { typed_mut_slice::<f64>(&mut out) };
-                    if a.strides == contiguous_strides(&a.shape) {
+                    if a.is_contiguous() {
                         use rayon::prelude::*;
                         dst.par_chunks_mut(PAR_CHUNK)
                             .enumerate()
@@ -66,10 +64,54 @@ macro_rules! unary_op {
                         }
                     }
                 }
+                DType::F16 => {
+                    let src = unsafe { typed_slice::<half::f16>(a) };
+                    let dst = unsafe { typed_mut_slice::<half::f16>(&mut out) };
+                    if a.is_contiguous() {
+                        use rayon::prelude::*;
+                        dst.par_chunks_mut(PAR_CHUNK)
+                            .enumerate()
+                            .for_each(|(ci, chunk)| {
+                                let s = ci * PAR_CHUNK;
+                                for (j, o) in chunk.iter_mut().enumerate() {
+                                    let v = src[s + j].to_f32();
+                                    *o = half::f16::from_f32($f32_expr(v));
+                                }
+                            });
+                    } else {
+                        let n = elem_count(&a.shape);
+                        for i in 0..n {
+                            let v = src[i].to_f32();
+                            dst[i] = half::f16::from_f32($f32_expr(v));
+                        }
+                    }
+                }
+                DType::BF16 => {
+                    let src = unsafe { typed_slice::<half::bf16>(a) };
+                    let dst = unsafe { typed_mut_slice::<half::bf16>(&mut out) };
+                    if a.is_contiguous() {
+                        use rayon::prelude::*;
+                        dst.par_chunks_mut(PAR_CHUNK)
+                            .enumerate()
+                            .for_each(|(ci, chunk)| {
+                                let s = ci * PAR_CHUNK;
+                                for (j, o) in chunk.iter_mut().enumerate() {
+                                    let v = src[s + j].to_f32();
+                                    *o = half::bf16::from_f32($f32_expr(v));
+                                }
+                            });
+                    } else {
+                        let n = elem_count(&a.shape);
+                        for i in 0..n {
+                            let v = src[i].to_f32();
+                            dst[i] = half::bf16::from_f32($f32_expr(v));
+                        }
+                    }
+                }
                 _ => {
                     return Err(unsupported(concat!(
                         stringify!($name),
-                        " only supports f32/f64"
+                        " only supports f16/bf16/f32/f64"
                     )))
                 }
             }
@@ -367,7 +409,7 @@ pub fn all(a: &BorrowedTensor) -> PyResult<OwnedTensor> {
             let n = elem_count(&a.shape);
             od[0] = if (0..n).all(|i| ad[i] != 0.0) { 1 } else { 0 };
         }
-        DType::Bool => {
+        DType::I8 | DType::U8 | DType::Bool | DType::F16 | DType::BF16 => {
             let ad = unsafe { typed_slice::<u8>(a) };
             let n = elem_count(&a.shape);
             od[0] = if (0..n).all(|i| ad[i] != 0) { 1 } else { 0 };
@@ -385,7 +427,7 @@ pub fn any(a: &BorrowedTensor) -> PyResult<OwnedTensor> {
             let n = elem_count(&a.shape);
             od[0] = if (0..n).any(|i| ad[i] != 0.0) { 1 } else { 0 };
         }
-        DType::Bool => {
+        DType::I8 | DType::U8 | DType::Bool | DType::F16 | DType::BF16 => {
             let ad = unsafe { typed_slice::<u8>(a) };
             let n = elem_count(&a.shape);
             od[0] = if (0..n).any(|i| ad[i] != 0) { 1 } else { 0 };
@@ -446,7 +488,7 @@ pub fn count_nonzero(a: &BorrowedTensor) -> PyResult<OwnedTensor> {
             let ad = unsafe { typed_slice::<i64>(a) };
             od[0] = (0..n).filter(|&i| ad[i] != 0).count() as i64;
         }
-        DType::Bool => {
+        DType::I8 | DType::U8 | DType::Bool | DType::F16 | DType::BF16 => {
             let ad = unsafe { typed_slice::<u8>(a) };
             od[0] = (0..n).filter(|&i| ad[i] != 0).count() as i64;
         }

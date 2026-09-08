@@ -8,8 +8,8 @@
 //! Run:
 //!   cargo bench --no-default-features --features matrixmultiply --bench bench_int4_gemv
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use _torchburn::kernels::gemv_w4a32_grouped;
+use criterion::{black_box, criterion_group, criterion_main, Criterion};
 
 const GROUP_SIZE: usize = 64;
 const HIDDEN: usize = 896;

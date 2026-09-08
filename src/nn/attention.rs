@@ -16,10 +16,10 @@
 //!   HuggingFace split-half convention:
 //!   `out[..., :D/2] = x1*cos - x2*sin; out[..., D/2:] = x1*sin + x2*cos`.
 
-use crate::dlpack::{
-    contiguous_strides, elem_count, unsupported, BorrowedTensor, DType, OwnedTensor,
-};
+use crate::dlpack::{elem_count, unsupported, BorrowedTensor, DType, OwnedTensor};
+use crate::quantization::{dot_f32_f32, fast_vector_fma};
 use pyo3::prelude::*;
+use rayon::prelude::*;
 use wide::f32x4;
 
 /// Read a tensor's elements as a typed slice.
@@ -56,7 +56,7 @@ fn mask_value(mask: &BorrowedTensor, b: usize, h: usize, i: usize, j: usize) -> 
     let rank = m.len();
     if rank == 0 {
         match mask.dtype {
-            DType::Bool => {
+            DType::I8 | DType::U8 | DType::Bool | DType::F16 | DType::BF16 => {
                 let bytes = unsafe { typed_slice::<u8>(mask) };
                 return if !bytes.is_empty() && bytes[0] != 0 {
                     0.0
@@ -104,7 +104,7 @@ fn mask_value(mask: &BorrowedTensor, b: usize, h: usize, i: usize, j: usize) -> 
         return 0.0;
     }
     match mask.dtype {
-        DType::Bool => {
+        DType::I8 | DType::U8 | DType::Bool | DType::F16 | DType::BF16 => {
             let bytes = unsafe { typed_slice::<u8>(mask) };
             if bytes[idx] != 0 {
                 0.0
@@ -167,14 +167,10 @@ fn sdpa_block_f32(
     mask: Option<&BorrowedTensor>,
 ) {
     let bh_t = (bi * h + hi) * t;
-    let d4 = d / 4;
-    let drem = d % 4;
-    let vec_tail = d4 * 4;
     let mut scores = vec![0.0f32; t];
-    let mut acc: Vec<f32x4> = vec![f32x4::ZERO; d4];
-    let mut acc_rem = [0.0f32; 3];
     for i in 0..t {
         let q_off = (bh_t + i) * d;
+        let q_ptr = unsafe { qd.as_ptr().add(q_off) };
         // 1) QK^T: scores[j] = scale * <q[i], k[j]> (+ mask).
         //    Pure-causal rows initialise the upper triangle to -inf and only
         //    compute j <= i.
@@ -184,15 +180,9 @@ fn sdpa_block_f32(
                 continue;
             }
             let k_off = (bh_t + j) * d;
-            let mut s = f32x4::ZERO;
-            for a in 0..d4 {
-                // qv.mul_add(kv, s) = qv * kv + s
-                s = load4(qd, q_off + a * 4).mul_add(load4(kd, k_off + a * 4), s);
-            }
-            let mut sv = s.reduce_add() * scale_f;
-            for r in 0..drem {
-                sv += qd[q_off + vec_tail + r] * kd[k_off + vec_tail + r];
-            }
+            let k_ptr = unsafe { kd.as_ptr().add(k_off) };
+            let dot = unsafe { dot_f32_f32(q_ptr, k_ptr, d) };
+            let mut sv = dot * scale_f;
             if is_causal && j > i {
                 sv = f32::NEG_INFINITY;
             }
@@ -210,43 +200,24 @@ fn sdpa_block_f32(
         let z = softmax_row(&mut scores);
         let out_off = i * d;
         if z > 0.0 {
-            // 3) V accumulation: stream each V row once into a per-query
-            //    register accumulator (D lanes).
-            for a in acc.iter_mut() {
-                *a = f32x4::ZERO;
-            }
-            for r in acc_rem.iter_mut() {
-                *r = 0.0;
-            }
+            // 3) V accumulation: direct accumulation with fast_vector_fma
+            let out_slice = &mut od[out_off..out_off + d];
+            out_slice.fill(0.0);
             let inv_z = 1.0 / z;
+            let out_ptr = out_slice.as_mut_ptr();
             for j in 0..t {
-                let w = scores[j];
+                let w = scores[j] * inv_z;
                 if w == 0.0 {
-                    continue; // masked-out key row
+                    continue;
                 }
                 let v_off = (bh_t + j) * d;
-                let wv = f32x4::splat(w);
-                for a in 0..d4 {
-                    // wv.mul_add(vrow, acc) = w * vrow + acc
-                    acc[a] = wv.mul_add(load4(vd, v_off + a * 4), acc[a]);
+                let v_ptr = unsafe { vd.as_ptr().add(v_off) };
+                unsafe {
+                    fast_vector_fma(out_ptr, v_ptr, w, d);
                 }
-                for r in 0..drem {
-                    acc_rem[r] += w * vd[v_off + vec_tail + r];
-                }
-            }
-            for a in 0..d4 {
-                let arr = (acc[a] * f32x4::splat(inv_z)).to_array();
-                for k in 0..4 {
-                    od[out_off + a * 4 + k] = arr[k];
-                }
-            }
-            for r in 0..drem {
-                od[out_off + vec_tail + r] = acc_rem[r] * inv_z;
             }
         } else {
-            for dd in 0..d {
-                od[out_off + dd] = 0.0;
-            }
+            od[out_off..out_off + d].fill(0.0);
         }
     }
 }
@@ -400,19 +371,19 @@ pub fn scaled_dot_product_attention(
     let q_contig;
     let k_contig;
     let v_contig;
-    let q = if q.strides == contiguous_strides(&q.shape) {
+    let q = if q.is_contiguous() {
         q
     } else {
         q_contig = crate::shape_ops::to_contiguous(q)?;
         &q_contig.as_view()
     };
-    let k = if k.strides == contiguous_strides(&k.shape) {
+    let k = if k.is_contiguous() {
         k
     } else {
         k_contig = crate::shape_ops::to_contiguous(k)?;
         &k_contig.as_view()
     };
-    let v = if v.strides == contiguous_strides(&v.shape) {
+    let v = if v.is_contiguous() {
         v
     } else {
         v_contig = crate::shape_ops::to_contiguous(v)?;
@@ -508,7 +479,13 @@ pub fn scaled_dot_product_attention(
                 }
             }
         }
-        DType::I64 | DType::I32 | DType::Bool => {
+        DType::I64
+        | DType::I32
+        | DType::I8
+        | DType::U8
+        | DType::Bool
+        | DType::F16
+        | DType::BF16 => {
             return Err(unsupported("attention requires f32/f64 tensors"));
         }
     }
@@ -561,16 +538,46 @@ pub fn rope(
             // cos/sin are [T, D/2] (or [1, T, D/2]): the row stride within the
             // trailing dims is D/2 regardless of any leading 1-dims.
             let cos_stride = d2;
-            for row in 0..n_rows {
+            let process_row = |row: usize, od_slice: &mut [f32]| {
                 for i in 0..t {
-                    let base = (row * t + i) * stride_t;
+                    let base_in = (row * t + i) * stride_t;
+                    let base_out = i * stride_t;
                     let cb = i * cos_stride;
-                    for k in 0..d2 {
-                        let x1 = xd[base + k];
-                        let x2 = xd[base + d2 + k];
-                        od[base + k] = x1 * cd[cb + k] - x2 * sd[cb + k];
-                        od[base + d2 + k] = x1 * sd[cb + k] + x2 * cd[cb + k];
+                    let num_vec = d2 / 4;
+                    for c in 0..num_vec {
+                        let k = c * 4;
+                        let x1 = load4(xd, base_in + k);
+                        let x2 = load4(xd, base_in + d2 + k);
+                        let c1 = load4(cd, cb + k);
+                        let s1 = load4(sd, cb + k);
+                        let o1 = (x1 * c1) - (x2 * s1);
+                        let o2 = (x1 * s1) + (x2 * c1);
+                        let a1 = o1.to_array();
+                        let a2 = o2.to_array();
+                        for v in 0..4 {
+                            od_slice[base_out + k + v] = a1[v];
+                            od_slice[base_out + d2 + k + v] = a2[v];
+                        }
                     }
+                    for k in (num_vec * 4)..d2 {
+                        let x1 = xd[base_in + k];
+                        let x2 = xd[base_in + d2 + k];
+                        od_slice[base_out + k] = x1 * cd[cb + k] - x2 * sd[cb + k];
+                        od_slice[base_out + d2 + k] = x1 * sd[cb + k] + x2 * cd[cb + k];
+                    }
+                }
+            };
+            let row_len = t * stride_t;
+            if n_rows > 1 && n_rows * row_len >= 32768 {
+                od.par_chunks_mut(row_len)
+                    .enumerate()
+                    .for_each(|(row, od_slice)| {
+                        process_row(row, od_slice);
+                    });
+            } else {
+                for row in 0..n_rows {
+                    let od_slice = &mut od[row * row_len..(row + 1) * row_len];
+                    process_row(row, od_slice);
                 }
             }
         }
@@ -594,7 +601,13 @@ pub fn rope(
                 }
             }
         }
-        DType::I64 | DType::I32 | DType::Bool => {
+        DType::I64
+        | DType::I32
+        | DType::I8
+        | DType::U8
+        | DType::Bool
+        | DType::F16
+        | DType::BF16 => {
             return Err(unsupported("rope requires f32/f64 tensors"));
         }
     }

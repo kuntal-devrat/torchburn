@@ -24,9 +24,7 @@ pub use crate::quantization::{
     gemv_w4a32_grouped_v2, pack_rows_w4a32_group64_v1_to_v2,
 };
 
-use crate::dlpack::{
-    contiguous_strides, elem_count, unsupported, BorrowedTensor, DType, OwnedTensor,
-};
+use crate::dlpack::{elem_count, unsupported, BorrowedTensor, DType, OwnedTensor};
 use pyo3::prelude::*;
 use std::ops::{Add, Div, Mul, Sub};
 
@@ -166,12 +164,7 @@ where
 /// Splits across rayon chunks above `PAR_THRESHOLD`; the per-element closure
 /// is monomorphised per op so the inner loop is branch-free.
 #[inline(always)]
-fn binary_zip_f32(
-    a: &[f32],
-    b: &[f32],
-    out: &mut [f32],
-    f: impl Fn(f32, f32) -> f32 + Sync,
-) {
+fn binary_zip_f32(a: &[f32], b: &[f32], out: &mut [f32], f: impl Fn(f32, f32) -> f32 + Sync) {
     let n = out.len();
     let run = |a: &[f32], b: &[f32], o: &mut [f32]| {
         for ((&av, &bv), ov) in a.iter().zip(b.iter()).zip(o.iter_mut()) {
@@ -192,12 +185,7 @@ fn binary_zip_f32(
 }
 
 #[inline(always)]
-fn binary_zip_f64(
-    a: &[f64],
-    b: &[f64],
-    out: &mut [f64],
-    f: impl Fn(f64, f64) -> f64 + Sync,
-) {
+fn binary_zip_f64(a: &[f64], b: &[f64], out: &mut [f64], f: impl Fn(f64, f64) -> f64 + Sync) {
     let n = out.len();
     let run = |a: &[f64], b: &[f64], o: &mut [f64]| {
         for ((&av, &bv), ov) in a.iter().zip(b.iter()).zip(o.iter_mut()) {
@@ -322,8 +310,8 @@ fn run_binary<T: Scalar>(
     };
     let n = out.elem_count();
 
-    let a_contig = a.strides == contiguous_strides(&a.shape);
-    let b_contig = b.strides == contiguous_strides(&b.shape);
+    let a_contig = a.is_contiguous();
+    let b_contig = b.is_contiguous();
 
     // Fast path 1: identical shapes, both contiguous (the common compiled-graph
     // case; linear indexing is only valid for contiguous layouts).
@@ -383,8 +371,26 @@ pub fn binary(op: BinaryOp, a: &BorrowedTensor, b: &BorrowedTensor) -> PyResult<
     let (a_dtype, b_dtype) = (a.dtype, b.dtype);
     if a_dtype != b_dtype {
         // Promotion: integer scalar + float tensor -> float
-        let is_a_int = matches!(a_dtype, DType::I64 | DType::I32 | DType::Bool);
-        let is_b_int = matches!(b_dtype, DType::I64 | DType::I32 | DType::Bool);
+        let is_a_int = matches!(
+            a_dtype,
+            DType::I64
+                | DType::I32
+                | DType::I8
+                | DType::U8
+                | DType::Bool
+                | DType::F16
+                | DType::BF16
+        );
+        let is_b_int = matches!(
+            b_dtype,
+            DType::I64
+                | DType::I32
+                | DType::I8
+                | DType::U8
+                | DType::Bool
+                | DType::F16
+                | DType::BF16
+        );
         let target = if is_a_int && !is_b_int {
             b_dtype
         } else if !is_a_int && is_b_int {
@@ -460,8 +466,8 @@ pub fn binary(op: BinaryOp, a: &BorrowedTensor, b: &BorrowedTensor) -> PyResult<
     let out_shape = broadcast_shape(&a.shape, &b.shape)?;
     let mut out = OwnedTensor::new(a.dtype, out_shape.clone());
     // ── Super-fast SIMD fast-path for identical contiguous shapes ──
-    let a_contig = a.strides == contiguous_strides(&a.shape);
-    let b_contig = b.strides == contiguous_strides(&b.shape);
+    let a_contig = a.is_contiguous();
+    let b_contig = b.is_contiguous();
     if a.shape == b.shape && a_contig && b_contig && a.shape == out_shape {
         match a.dtype {
             DType::F32 => {
@@ -554,7 +560,13 @@ pub fn binary(op: BinaryOp, a: &BorrowedTensor, b: &BorrowedTensor) -> PyResult<
         DType::F32 => run_binary::<f32>(op, a, b, &mut out),
         DType::F64 => run_binary::<f64>(op, a, b, &mut out),
 
-        DType::I64 | DType::I32 | DType::Bool => {
+        DType::I64
+        | DType::I32
+        | DType::I8
+        | DType::U8
+        | DType::Bool
+        | DType::F16
+        | DType::BF16 => {
             return Err(unsupported("this kernel only supports f32/f64 tensors"));
         }
     }
@@ -572,7 +584,7 @@ fn run_relu<T: Scalar>(a: &BorrowedTensor, out: &mut OwnedTensor) {
 
     // Fast path: contiguous input -> linear loop (serial below the threshold,
     // parallel above; autovectorizes in both cases).
-    if a.strides == contiguous_strides(&a.shape) {
+    if a.is_contiguous() {
         map_in_place(
             n,
             out_data,
@@ -606,7 +618,7 @@ pub fn relu(a: &BorrowedTensor) -> PyResult<OwnedTensor> {
     let mut out = OwnedTensor::new(a.dtype, a.shape.clone());
     match a.dtype {
         DType::F32 => {
-            if a.strides == contiguous_strides(&a.shape) {
+            if a.is_contiguous() {
                 let a_data = unsafe { typed_slice::<f32>(a) };
                 let out_data = unsafe {
                     std::slice::from_raw_parts_mut(
@@ -621,7 +633,13 @@ pub fn relu(a: &BorrowedTensor) -> PyResult<OwnedTensor> {
         }
         DType::F64 => run_relu::<f64>(a, &mut out),
 
-        DType::I64 | DType::I32 | DType::Bool => {
+        DType::I64
+        | DType::I32
+        | DType::I8
+        | DType::U8
+        | DType::Bool
+        | DType::F16
+        | DType::BF16 => {
             return Err(unsupported("this kernel only supports f32/f64 tensors"));
         }
     }

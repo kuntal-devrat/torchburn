@@ -12,8 +12,8 @@
 
 #![cfg(feature = "dispatch-test")]
 
-use std::sync::Mutex;
 use _torchburn::dispatch::{clear_override, cpu_features, force_tier, CpuTier};
+use std::sync::Mutex;
 #[cfg(all(target_arch = "x86_64", not(debug_assertions)))]
 use std::time::Instant;
 
@@ -49,10 +49,14 @@ fn host_supports(tier: CpuTier) -> bool {
     {
         match tier {
             CpuTier::Scalar => true,
-            CpuTier::Avx2 => std::arch::is_x86_feature_detected!("avx2")
-                && std::arch::is_x86_feature_detected!("fma"),
-            CpuTier::Avx512 => std::arch::is_x86_feature_detected!("avx512f")
-                && std::arch::is_x86_feature_detected!("avx512bw"),
+            CpuTier::Avx2 => {
+                std::arch::is_x86_feature_detected!("avx2")
+                    && std::arch::is_x86_feature_detected!("fma")
+            }
+            CpuTier::Avx512 => {
+                std::arch::is_x86_feature_detected!("avx512f")
+                    && std::arch::is_x86_feature_detected!("avx512bw")
+            }
             CpuTier::Avx512Vnni => {
                 std::arch::is_x86_feature_detected!("avx512f")
                     && std::arch::is_x86_feature_detected!("avx512bw")
@@ -79,7 +83,10 @@ fn all_tiers() -> [CpuTier; 4] {
 /// Robust relative error: max-abs diff / max-abs expected. Immune to
 /// near-zero rows that a per-row relative metric would amplify.
 fn rel_err(actual: &[f32], expected: &[f32]) -> f32 {
-    let denom = expected.iter().fold(0.0f32, |a, &v| a.max(v.abs())).max(1e-6);
+    let denom = expected
+        .iter()
+        .fold(0.0f32, |a, &v| a.max(v.abs()))
+        .max(1e-6);
     actual
         .iter()
         .zip(expected)
@@ -123,7 +130,10 @@ fn exact_tiers_are_allclose_vnni_within_w4a8_budget() {
         }
     }
 
-    assert!(exact_tiers_ok, "exact-dequant tiers diverged from scalar (budget 1e-3)");
+    assert!(
+        exact_tiers_ok,
+        "exact-dequant tiers diverged from scalar (budget 1e-3)"
+    );
     // The VNNI tier runs W4A8 (activation quantization), a documented
     // approximation — assert it stays within a sane bound relative to W4A32.
     assert!(

@@ -318,7 +318,13 @@ pub fn conv2d(
         DType::F32 => conv2d_f32(input, weight, bias, stride, padding, dilation, groups),
         DType::F64 => conv2d_f64(input, weight, bias, stride, padding, dilation, groups),
 
-        DType::I64 | DType::I32 | DType::Bool => {
+        DType::I64
+        | DType::I32
+        | DType::I8
+        | DType::U8
+        | DType::Bool
+        | DType::F16
+        | DType::BF16 => {
             return Err(unsupported("this kernel only supports f32/f64 tensors"));
         }
     }
@@ -516,7 +522,13 @@ pub fn conv1d(
         DType::F32 => conv1d_f32(input, weight, bias, stride, padding, dilation, groups),
         DType::F64 => conv1d_f64(input, weight, bias, stride, padding, dilation, groups),
 
-        DType::I64 | DType::I32 | DType::Bool => {
+        DType::I64
+        | DType::I32
+        | DType::I8
+        | DType::U8
+        | DType::Bool
+        | DType::F16
+        | DType::BF16 => {
             return Err(unsupported("this kernel only supports f32/f64 tensors"));
         }
     }
@@ -903,7 +915,13 @@ pub fn conv_transpose2d(
             groups,
         ),
 
-        DType::I64 | DType::I32 | DType::Bool => {
+        DType::I64
+        | DType::I32
+        | DType::I8
+        | DType::U8
+        | DType::Bool
+        | DType::F16
+        | DType::BF16 => {
             return Err(unsupported("this kernel only supports f32/f64 tensors"));
         }
     }

@@ -8,8 +8,8 @@
 //! Run:
 //!   cargo bench --no-default-features --features matrixmultiply --bench bench_gemm
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use _torchburn::kernels::{gemm_f32_trans_b_into_accum, gemm_f64_trans_b_into_accum};
+use criterion::{black_box, criterion_group, criterion_main, Criterion};
 
 fn shapes() -> Vec<(usize, usize, usize)> {
     // (m, k, n): squares plus skinny-M (the decode GEMV regime)

@@ -5,6 +5,29 @@
 //! links the optimized Skylake kernels directly into the .pyd.
 
 fn main() {
+    // Target probes for peak-per-platform codegen (Windows/Linux/macOS/iOS).
+    // Emits cfg(has_avx512) / cfg(has_metal) and links the right system
+    // frameworks without disturbing the portable baseline in .cargo/config.toml.
+    println!("cargo:rustc-check-cfg=cfg(has_avx512)");
+    println!("cargo:rustc-check-cfg=cfg(has_metal)");
+    println!("cargo:rerun-if-changed=build.rs");
+    let arch = std::env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
+    let os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    if arch == "x86_64" {
+        println!("cargo:rustc-cfg=has_avx512");
+    }
+    if os == "macos" || os == "ios" {
+        println!("cargo:rustc-cfg=has_metal");
+        if os == "macos" {
+            println!("cargo:rustc-link-arg=-framework=Metal");
+            println!("cargo:rustc-link-arg=-framework=Foundation");
+        } else {
+            println!("cargo:rustc-link-arg=-framework=Metal");
+        }
+    }
+    // Vulkan / DX12 / WGPU are runtime-selected via TORCHBURN_WGPU_BACKEND;
+    // no link args needed (wgpu handles loader discovery per-OS).
+
     #[cfg(feature = "openblas")]
     {
         let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set");

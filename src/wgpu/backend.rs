@@ -284,6 +284,11 @@ pub struct WgpuInt4Context {
     pub pipeline: wgpu::ComputePipeline,
     pub bind_group_layout: wgpu::BindGroupLayout,
     pub rows_per_wg: u32,
+    /// Whether this device supports WGSL subgroup operations.
+    /// True on Vulkan/Metal/DX12 adapters with `SUBGROUP` feature; false on
+    /// software/CPU adapters. Shaders that use `subgroupAdd` etc. are only
+    /// compiled and dispatched when this is true.
+    pub has_subgroups: bool,
 }
 
 #[cfg(feature = "burn-wgpu")]
@@ -331,8 +336,8 @@ pub fn get_wgpu_int4_context() -> Option<&'static WgpuInt4Context> {
         let info = adapter.get_info();
         let default_rows = match info.device_type {
             wgpu::DeviceType::DiscreteGpu => 8u32,
-            wgpu::DeviceType::IntegratedGpu => 2u32,
-            _ => 2u32,
+            wgpu::DeviceType::IntegratedGpu => 4u32,
+            _ => 4u32,
         };
         let rows_per_wg = std::env::var("TORCHBURN_ROWS_PER_WG")
             .ok()
@@ -356,10 +361,21 @@ pub fn get_wgpu_int4_context() -> Option<&'static WgpuInt4Context> {
             ..Default::default()
         };
 
+        // Probe for subgroup support — available on Vulkan/Metal/DX12 GPU
+        // adapters but not on software/CPU fallbacks.
+        let has_subgroups = adapter
+            .features()
+            .contains(wgpu::Features::SUBGROUP);
+        let optional_features = if has_subgroups {
+            wgpu::Features::SUBGROUP
+        } else {
+            wgpu::Features::empty()
+        };
+
         let (device, queue) = block_on(adapter.request_device(
             &wgpu::DeviceDescriptor {
                 label: Some("TorchBurn INT4 Vulkan Device"),
-                required_features: wgpu::Features::empty(),
+                required_features: optional_features,
                 required_limits,
                 memory_hints: wgpu::MemoryHints::Performance,
                 ..Default::default()
@@ -454,6 +470,7 @@ pub fn get_wgpu_int4_context() -> Option<&'static WgpuInt4Context> {
             pipeline,
             bind_group_layout,
             rows_per_wg,
+            has_subgroups,
         })
     }).as_ref()
 }

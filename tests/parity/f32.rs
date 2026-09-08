@@ -53,7 +53,10 @@ fn dot_f32_matches_reference() {
     let got = unsafe { dot_f32_f32(a.as_ptr(), b.as_ptr(), a.len()) };
     let expected = naive_dot(&a, &b);
     let rel = (got - expected).abs() / expected.abs().max(1e-6);
-    assert!(rel < 1e-3, "dot_f32_f32 rel err {rel:.2e} (got {got}, want {expected})");
+    assert!(
+        rel < 1e-3,
+        "dot_f32_f32 rel err {rel:.2e} (got {got}, want {expected})"
+    );
 }
 
 #[test]
@@ -62,9 +65,7 @@ fn gemm_f32_matches_reference() {
     let a: Vec<f32> = (0..m * k).map(|i| (i as f32 * 0.07).sin() * 2.0).collect();
     let b: Vec<f32> = (0..n * k).map(|i| (i as f32 * 0.11).cos() * 2.0).collect();
     let mut out = vec![0.0f32; m * n];
-    unsafe {
-        gemm_f32_trans_b_into_accum(a.as_ptr(), m, k, b.as_ptr(), k, out.as_mut_ptr(), n);
-    }
+    gemm_f32_trans_b_into_accum(a.as_ptr(), m, k, b.as_ptr(), k, out.as_mut_ptr(), n);
     let expected = naive_gemm_f32(&a, &b, m, k, n);
     let err = max_rel_err(&out, &expected);
     assert!(err < 1e-3, "gemm_f32 rel err {err:.2e}");
@@ -76,9 +77,7 @@ fn gemm_f32_square_matches_reference() {
     let a: Vec<f32> = (0..m * k).map(|i| (i as f32 * 0.017).sin()).collect();
     let b: Vec<f32> = (0..n * k).map(|i| (i as f32 * 0.019).cos()).collect();
     let mut out = vec![0.0f32; m * n];
-    unsafe {
-        gemm_f32_trans_b_into_accum(a.as_ptr(), m, k, b.as_ptr(), k, out.as_mut_ptr(), n);
-    }
+    gemm_f32_trans_b_into_accum(a.as_ptr(), m, k, b.as_ptr(), k, out.as_mut_ptr(), n);
     let expected = naive_gemm_f32(&a, &b, m, k, n);
     let err = max_rel_err(&out, &expected);
     assert!(err < 1e-3, "gemm_f32 square rel err {err:.2e}");
@@ -90,9 +89,7 @@ fn gemm_f64_matches_reference() {
     let a: Vec<f64> = (0..m * k).map(|i| (i as f64 * 0.07).sin() * 2.0).collect();
     let b: Vec<f64> = (0..n * k).map(|i| (i as f64 * 0.11).cos() * 2.0).collect();
     let mut out = vec![0.0f64; m * n];
-    unsafe {
-        gemm_f64_trans_b_into_accum(a.as_ptr(), m, k, b.as_ptr(), k, out.as_mut_ptr(), n);
-    }
+    gemm_f64_trans_b_into_accum(a.as_ptr(), m, k, b.as_ptr(), k, out.as_mut_ptr(), n);
     let expected = naive_gemm_f64(&a, &b, m, k, n);
     let err = expected
         .iter()

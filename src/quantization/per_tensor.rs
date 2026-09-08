@@ -77,7 +77,7 @@ pub fn dequantize_per_tensor(
     let mut out = OwnedTensor::new(DType::F32, q.shape.clone());
 
     match q.dtype {
-        DType::Bool => {
+        DType::I8 | DType::U8 | DType::Bool | DType::F16 | DType::BF16 => {
             let src = unsafe { typed_slice::<i8>(q) };
             let dst = unsafe { typed_mut_slice::<f32>(&mut out) };
             let s = scale as f32;

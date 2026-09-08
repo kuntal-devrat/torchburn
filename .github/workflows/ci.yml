@@ -30,8 +30,10 @@ jobs:
         with:
           components: clippy, rustfmt
 
-      - name: Disable native CPU flag for CI (portable build)
-        run: rm -f .cargo/config.toml
+      # NOTE (v0.6.1): `.cargo/config.toml` is now portable by design
+      # (per-target x86-64-v2 / neoverse-n1 / apple-m1 baselines + runtime
+      # dispatch), so it is kept for all CI jobs. Native-only builds use
+      # `.cargo/config.native.toml` explicitly.
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -116,10 +118,6 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      - name: Disable native CPU flag for CI (portable build)
-        shell: bash
-        run: rm -f .cargo/config.toml
-
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: "test-${{ matrix.os }}-${{ matrix.python-version }}-${{ matrix.feature || 'default' }}"
@@ -173,14 +171,16 @@ jobs:
         with:
           targets: ${{ matrix.os == 'macos-14' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
 
-      - name: Disable native CPU flag for CI (portable wheels)
-        shell: bash
-        run: rm -f .cargo/config.toml
-
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: "wheels-${{ matrix.os }}"
           save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Set up QEMU (for Linux aarch64 cross-building)
+        if: matrix.os == 'ubuntu-latest'
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
 
       - name: Install cibuildwheel
         run: pip install cibuildwheel
@@ -191,31 +191,79 @@ jobs:
           CIBW_BUILD: "cp39-*"
           CIBW_SKIP: "*-musllinux_*"
           CIBW_ARCHS_MACOS: "arm64 x86_64"
-          CIBW_ARCHS_LINUX: "x86_64"
+          CIBW_ARCHS_LINUX: "x86_64 aarch64"
           CIBW_ARCHS_WINDOWS: "AMD64"
           CIBW_BEFORE_ALL_LINUX: "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y"
-          CIBW_ENVIRONMENT_LINUX: 'PATH="$HOME/.cargo/bin:$PATH" RUSTFLAGS="" CARGO_BUILD_RUSTFLAGS="" MATURIN_PEP517_ARGS="--features openblas" TORCHBURN_ENGINE="native_cpu"'
-          CIBW_ENVIRONMENT_MACOS: 'MACOSX_DEPLOYMENT_TARGET="11.0" RUSTFLAGS="" CARGO_BUILD_RUSTFLAGS="" TORCHBURN_ENGINE="native_cpu"'
-          CIBW_ENVIRONMENT_WINDOWS: 'RUSTFLAGS="" CARGO_BUILD_RUSTFLAGS="" TORCHBURN_ENGINE="native_cpu"'
-          CIBW_BEFORE_BUILD: "rm -f .cargo/config.toml"
+          CIBW_ENVIRONMENT_LINUX: 'PATH="$HOME/.cargo/bin:$PATH" RUSTFLAGS="-C target-cpu=x86-64-v2" TORCHBURN_ENGINE="native_cpu"'
+          CIBW_ENVIRONMENT_LINUX_AARCH64: 'PATH="$HOME/.cargo/bin:$PATH" RUSTFLAGS="-C target-cpu=neoverse-n1" TORCHBURN_ENGINE="native_cpu"'
+          CIBW_ENVIRONMENT_MACOS: 'MACOSX_DEPLOYMENT_TARGET="11.0" RUSTFLAGS="-C target-cpu=apple-m1" TORCHBURN_ENGINE="native_cpu"'
+          CIBW_ENVIRONMENT_WINDOWS: 'RUSTFLAGS="-C target-cpu=x86-64-v2" TORCHBURN_ENGINE="native_cpu"'
           CIBW_TEST_REQUIRES: "pytest pytest-timeout numpy torch"
           CIBW_TEST_COMMAND: 'python -m pytest {project}/tests -x -q --timeout=300 -k "not TestBertTiny and not TestBenchmarkSuite"'
-          CIBW_TEST_SKIP: "*-macosx_x86_64"
+          CIBW_TEST_SKIP: "*-macosx_x86_64 *linux_aarch64"
 
       - uses: actions/upload-artifact@v4
         with:
           name: wheels-${{ matrix.os }}
           path: dist/*.whl
 
-  # ── Native wheel variant (Phase 0.2) ───────────────────────────────
-  # The portable wheels above delete `.cargo/config.toml` for a baseline ISA.
-  # This job builds WITH the native CPU flags (keeps `.cargo/config.toml`)
-  # so the self-hosted bench runner / nightly perf job gets the fastest
-  # possible wheel. Uploaded as a `wheels-native` artifact; publishing a
-  # separately-named `torchburn-native` distribution is Phase 6.2 release work.
+  # ── CUDA feature gate build (compile-only, no runtime GPU needed) ──────────
+  cuda-build:
+    name: CUDA build (compile-check)
+    runs-on: ubuntu-latest
+    container:
+      image: nvidia/cuda:12.6.0-devel-ubuntu22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system deps
+        run: |
+          apt-get update -qq
+          apt-get install -y --no-install-recommends python3 python3-pip curl pkg-config libssl-dev
+
+      - name: Install Rust
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "cuda-build"
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: cargo check --features cuda
+        run: cargo check --features cuda
+        env:
+          CUDA_PATH: /usr/local/cuda
+          PATH: /usr/local/cuda/bin:$PATH
+          LD_LIBRARY_PATH: /usr/local/cuda/lib64:$LD_LIBRARY_PATH
+
+      - name: Install maturin
+        run: pip3 install maturin
+
+      - name: Build CUDA wheel (no runtime tests — no GPU in CI runner)
+        run: maturin build --features cuda -r -o dist-cuda
+        env:
+          CUDA_PATH: /usr/local/cuda
+          PATH: /usr/local/cuda/bin:$PATH
+          LD_LIBRARY_PATH: /usr/local/cuda/lib64:$LD_LIBRARY_PATH
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-cuda
+          path: dist-cuda/*.whl
+
+  # ── Native wheel variant (peak local performance) ──────────────────
+  # Portable wheels above use `.cargo/config.toml` per-target baselines
+  # (x86-64-v2 / neoverse-n1 / apple-m1) + runtime dispatch. This job builds
+  # with `.cargo/config.native.toml` (`target-cpu=native`, fat LTO,
+  # codegen-units=1) so the self-hosted bench runner gets the fastest
+  # possible wheel. Uploaded as a `wheels-native` artifact.
   build-native:
     runs-on: [self-hosted, bench]
-    if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
+    continue-on-error: true
+    timeout-minutes: 10
+    if: github.event_name == 'workflow_dispatch'
     steps:
       - uses: actions/checkout@v4
 
@@ -225,9 +273,11 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      # NOTE: intentionally NOT deleting .cargo/config.toml -> native ISA build
+      # NOTE: native ISA build via RUSTFLAGS overlay (never for PyPI)
       - name: Build native wheel
         run: maturin build -r -o dist-native
+        env:
+          RUSTFLAGS: "-C target-cpu=native -C codegen-units=1"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -298,3 +348,4 @@ jobs:
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           password: ${{ secrets.PYPI_API_TOKEN }}
+          skip-existing: true

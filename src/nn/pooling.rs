@@ -286,7 +286,13 @@ pub fn max_pool2d(
         DType::F32 => max_pool2d_f32(input, (kh, kw), (sh, sw), padding, (dh, dw), ceil_mode),
         DType::F64 => max_pool2d_f64(input, (kh, kw), (sh, sw), padding, (dh, dw), ceil_mode),
 
-        DType::I64 | DType::I32 | DType::Bool => {
+        DType::I64
+        | DType::I32
+        | DType::I8
+        | DType::U8
+        | DType::Bool
+        | DType::F16
+        | DType::BF16 => {
             return Err(unsupported("this kernel only supports f32/f64 tensors"));
         }
     }
@@ -511,7 +517,13 @@ pub fn avg_pool2d(
             count_include_pad,
         ),
 
-        DType::I64 | DType::I32 | DType::Bool => {
+        DType::I64
+        | DType::I32
+        | DType::I8
+        | DType::U8
+        | DType::Bool
+        | DType::F16
+        | DType::BF16 => {
             return Err(unsupported("this kernel only supports f32/f64 tensors"));
         }
     }
@@ -667,7 +679,13 @@ pub fn adaptive_avg_pool2d(
         DType::F32 => adaptive_avg_pool2d_f32(input, out_h as usize, out_w as usize),
         DType::F64 => adaptive_avg_pool2d_f64(input, out_h as usize, out_w as usize),
 
-        DType::I64 | DType::I32 | DType::Bool => {
+        DType::I64
+        | DType::I32
+        | DType::I8
+        | DType::U8
+        | DType::Bool
+        | DType::F16
+        | DType::BF16 => {
             return Err(unsupported("this kernel only supports f32/f64 tensors"));
         }
     }
@@ -816,7 +834,13 @@ pub fn adaptive_max_pool2d(
         DType::F32 => adaptive_max_pool2d_f32(input, out_h as usize, out_w as usize),
         DType::F64 => adaptive_max_pool2d_f64(input, out_h as usize, out_w as usize),
 
-        DType::I64 | DType::I32 | DType::Bool => {
+        DType::I64
+        | DType::I32
+        | DType::I8
+        | DType::U8
+        | DType::Bool
+        | DType::F16
+        | DType::BF16 => {
             return Err(unsupported("this kernel only supports f32/f64 tensors"));
         }
     }
@@ -953,7 +977,13 @@ pub fn max_pool1d(
         DType::F32 => max_pool1d_f32(input, kernel as usize, stride as usize, padding, ceil_mode),
         DType::F64 => max_pool1d_f64(input, kernel as usize, stride as usize, padding, ceil_mode),
 
-        DType::I64 | DType::I32 | DType::Bool => {
+        DType::I64
+        | DType::I32
+        | DType::I8
+        | DType::U8
+        | DType::Bool
+        | DType::F16
+        | DType::BF16 => {
             return Err(unsupported("this kernel only supports f32/f64 tensors"));
         }
     }
@@ -1111,7 +1141,13 @@ pub fn avg_pool1d(
             count_include_pad,
         ),
 
-        DType::I64 | DType::I32 | DType::Bool => {
+        DType::I64
+        | DType::I32
+        | DType::I8
+        | DType::U8
+        | DType::Bool
+        | DType::F16
+        | DType::BF16 => {
             return Err(unsupported("this kernel only supports f32/f64 tensors"));
         }
     }
