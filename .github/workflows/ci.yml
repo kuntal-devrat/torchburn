@@ -194,10 +194,14 @@ jobs:
           CIBW_ARCHS_LINUX: "x86_64 aarch64"
           CIBW_ARCHS_WINDOWS: "AMD64"
           CIBW_BEFORE_ALL_LINUX: "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y"
-          CIBW_ENVIRONMENT_LINUX: 'PATH="$HOME/.cargo/bin:$PATH" RUSTFLAGS="-C target-cpu=x86-64-v2" TORCHBURN_ENGINE="native_cpu"'
-          CIBW_ENVIRONMENT_LINUX_AARCH64: 'PATH="$HOME/.cargo/bin:$PATH" RUSTFLAGS="-C target-cpu=neoverse-n1" TORCHBURN_ENGINE="native_cpu"'
-          CIBW_ENVIRONMENT_MACOS: 'MACOSX_DEPLOYMENT_TARGET="11.0" RUSTFLAGS="-C target-cpu=apple-m1" TORCHBURN_ENGINE="native_cpu"'
-          CIBW_ENVIRONMENT_WINDOWS: 'RUSTFLAGS="-C target-cpu=x86-64-v2" TORCHBURN_ENGINE="native_cpu"'
+          # NOTE: no RUSTFLAGS here — `.cargo/config.toml` already sets the
+          # optimal portable baseline per target triple (x86-64-v2 /
+          # neoverse-n1 / apple-m1). A global RUSTFLAGS would poison
+          # cross-arch builds (e.g. apple-m1 breaks x86_64-apple-darwin with
+          # "64-bit code requested on a subtarget that doesn't support it").
+          CIBW_ENVIRONMENT_LINUX: 'PATH="$HOME/.cargo/bin:$PATH" TORCHBURN_ENGINE="native_cpu"'
+          CIBW_ENVIRONMENT_MACOS: 'MACOSX_DEPLOYMENT_TARGET="11.0" TORCHBURN_ENGINE="native_cpu"'
+          CIBW_ENVIRONMENT_WINDOWS: 'TORCHBURN_ENGINE="native_cpu"'
           CIBW_TEST_REQUIRES: "pytest pytest-timeout numpy torch"
           CIBW_TEST_COMMAND: 'python -m pytest {project}/tests -x -q --timeout=300 -k "not TestBertTiny and not TestBenchmarkSuite"'
           CIBW_TEST_SKIP: "*-macosx_x86_64 *linux_aarch64"

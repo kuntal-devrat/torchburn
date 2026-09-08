@@ -48,8 +48,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   path with write-only LRU promotion (was `write()` + O(1024) `retain` per lookup).
 - **Contiguity checks**: 10 hot-path files moved from `strides == contiguous_strides()`
   (one `Vec` alloc per op) to `is_contiguous()`.
-- **CI wheels**: portable config is kept (no more `rm -f .cargo/config.toml`); per-arch
-  `RUSTFLAGS` (`x86-64-v2`, `neoverse-n1`, `apple-m1`); Linux aarch64 + CUDA wheels.
+- **CI wheels**: portable config is kept (no more `rm -f .cargo/config.toml`); per-target
+  baselines come from `.cargo/config.toml` (a global `RUSTFLAGS` would poison the
+  macOS x86_64 cross-build); Linux aarch64 + CUDA wheels.
+- **Apple Silicon build**: x86-only kernel re-exports are `cfg(target_arch)`-gated;
+  NEON INT4 nibble kernels rewritten with consistent 64-bit intrinsics (plus `widen`
+  half fix and group64 byte-stride fix); `_has_neon`/`has_neon` param mismatch fixed.
 - Version bump `0.6.0` → `0.6.1`.
 
 ## [0.5.5] - 2026-09-07

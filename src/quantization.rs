@@ -25,9 +25,13 @@ pub mod gemv;
 pub use self::gemv::{
     dot_f32_i8, gemm_w4a32_grouped, gemv_w4a32_grouped, w4a32_linear, w8a32_linear,
 };
+pub(crate) use self::gemv::{dot_f32_u4_group_scalar, gemv_w8a32, quantize_activation_to_u8};
+// x86-only kernels: AVX/AVX-512 intrinsics gated behind `target_arch = "x86_64"`
+// at their definitions. Importing them unconditionally breaks aarch64
+// (Apple Silicon / Linux ARM / iOS) builds.
+#[cfg(target_arch = "x86_64")]
 pub(crate) use self::gemv::{
-    dot_f32_u4_group_scalar, gemv_w8a32, hsum256_ps_avx, quantize_activation_to_u8,
-    swiglu_neuron_w4a32_group32_avx2, swiglu_neuron_w4a32_group32_avx512,
+    hsum256_ps_avx, swiglu_neuron_w4a32_group32_avx2, swiglu_neuron_w4a32_group32_avx512,
     swiglu_neuron_w4a32_group64_avx2, swiglu_neuron_w4a32_group64_avx512,
     swiglu_neuron_w4a8_group64_vnni_avx512, unpack_and_fma_32_avx2, unpack_and_fma_32_avx512,
 };

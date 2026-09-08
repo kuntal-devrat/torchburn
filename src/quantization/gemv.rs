@@ -472,8 +472,11 @@ unsafe fn dot_f32_i8_neon(x: *const f32, w: *const i8, len: usize) -> f32 {
 #[target_feature(enable = "neon")]
 unsafe fn dot_f32_u4_neon(x: *const f32, w_packed: *const u8, len: usize) -> f32 {
     use std::arch::aarch64::*;
-    let mask_low = vdupq_n_u8(0x0F);
-    let sub8 = vdupq_n_s8(8);
+    // 64-bit (uint8x8_t) nibble pipeline: 8 packed bytes = 16 int4 values.
+    // (`vld1_u8` loads 8 lanes, so all ops below are the non-`q` 64-bit
+    // variants: `vand_u8`, `vshr_n_u8`, `vzip_u8`, `vdup_n_*`.)
+    let mask_low = vdup_n_u8(0x0F);
+    let sub8 = vdup_n_s8(8);
     let zero_f32 = vdupq_n_f32(0.0);
     let mut sum_f32x4 = zero_f32;
     let mut offset = 0;
@@ -483,25 +486,28 @@ unsafe fn dot_f32_u4_neon(x: *const f32, w_packed: *const u8, len: usize) -> f32
         let byte_offset = offset / 2;
         // Load 8 packed bytes (16 int4 values)
         let raw_u8 = vld1_u8(w_packed.add(byte_offset));
-        let raw_i8 = vreinterpret_s8_u8(raw_u8);
 
         // Extract low and high nibbles
-        let lo = vand_u8(vreinterpret_u8_s8(raw_i8), mask_low);
-        let hi = vshrq_n_u8(vreinterpret_u8_s8(raw_i8), 4);
+        let lo = vand_u8(raw_u8, mask_low);
+        let hi = vshr_n_u8::<4>(raw_u8);
 
-        // Unpack to i8: interleaving lo,hi gives the correct order
-        let inter_lo = vreinterpret_s8_u8(vzip1_u8(lo, hi));
-        let inter_hi = vreinterpret_s8_u8(vzip2_u8(lo, hi));
+        // Unpack to i8: interleaving lo,hi gives element order
+        // [l0,h0,l1,h1,...]: zip.0 = elements 0..8, zip.1 = elements 8..16.
+        let zipped = vzip_u8(lo, hi);
+        let inter_lo = vreinterpret_s8_u8(zipped.0);
+        let inter_hi = vreinterpret_s8_u8(zipped.1);
 
         // Subtract 8 to get signed int4
-        let s_lo = vsub_s8(vget_low_s8(vcombine_s8(inter_lo, inter_lo)), sub8);
-        let s_hi = vsub_s8(vget_low_s8(vcombine_s8(inter_hi, inter_hi)), sub8);
+        let s_lo = vsub_s8(inter_lo, sub8);
+        let s_hi = vsub_s8(inter_hi, sub8);
 
-        // Widen i8 → i16 → i32 → f32
-        let w_i32_0 = vmovl_s16(vmovl_s8(s_lo));
-        let w_i32_1 = vmovl_s16(vget_high_s16(vmovl_s8(s_lo)));
-        let w_i32_2 = vmovl_s16(vmovl_s8(s_hi));
-        let w_i32_3 = vmovl_s16(vget_high_s16(vmovl_s8(s_hi)));
+        // Widen i8 → i16 → i32 → f32 (vmovl_s16 takes int16x4_t halves)
+        let w16_lo = vmovl_s8(s_lo);
+        let w16_hi = vmovl_s8(s_hi);
+        let w_i32_0 = vmovl_s16(vget_low_s16(w16_lo));
+        let w_i32_1 = vmovl_s16(vget_high_s16(w16_lo));
+        let w_i32_2 = vmovl_s16(vget_low_s16(w16_hi));
+        let w_i32_3 = vmovl_s16(vget_high_s16(w16_hi));
 
         let x0 = vld1q_f32(x.add(offset));
         let x1 = vld1q_f32(x.add(offset + 4));
@@ -537,28 +543,29 @@ unsafe fn dot_f32_u4_neon(x: *const f32, w_packed: *const u8, len: usize) -> f32
 #[target_feature(enable = "neon")]
 unsafe fn dot_f32_u4_group64_neon(x: *const f32, w_packed: *const u8) -> f32 {
     use std::arch::aarch64::*;
-    let mask_low = vdupq_n_u8(0x0F);
-    let sub8 = vdupq_n_s8(8);
+    // 64-bit (uint8x8_t) nibble pipeline — see `dot_f32_u4_neon`.
+    let mask_low = vdup_n_u8(0x0F);
+    let sub8 = vdup_n_s8(8);
     let mut sum = vdupq_n_f32(0.0);
 
-    // Process 64 elements = 32 bytes = 2 chunks of 16
+    // Process 64 elements = 32 bytes = 2 chunks of 16 elements (8 bytes each).
     for chunk in 0..2 {
-        let w_off = chunk * 16;
+        let w_off = chunk * 8;
         let x_off = chunk * 16;
 
         let raw_u8 = vld1_u8(w_packed.add(w_off));
-        let raw_i8 = vreinterpret_s8_u8(raw_u8);
-        let lo = vand_u8(vreinterpret_u8_s8(raw_i8), mask_low);
-        let hi = vshrq_n_u8(vreinterpret_u8_s8(raw_i8), 4);
-        let inter_lo = vreinterpret_s8_u8(vzip1_u8(lo, hi));
-        let inter_hi = vreinterpret_s8_u8(vzip2_u8(lo, hi));
-        let s_lo = vsub_s8(vget_low_s8(vcombine_s8(inter_lo, inter_lo)), sub8);
-        let s_hi = vsub_s8(vget_low_s8(vcombine_s8(inter_hi, inter_hi)), sub8);
+        let lo = vand_u8(raw_u8, mask_low);
+        let hi = vshr_n_u8::<4>(raw_u8);
+        let zipped = vzip_u8(lo, hi);
+        let s_lo = vsub_s8(vreinterpret_s8_u8(zipped.0), sub8);
+        let s_hi = vsub_s8(vreinterpret_s8_u8(zipped.1), sub8);
 
-        let w_i32_0 = vmovl_s16(vmovl_s8(s_lo));
-        let w_i32_1 = vmovl_s16(vget_high_s16(vmovl_s8(s_lo)));
-        let w_i32_2 = vmovl_s16(vmovl_s8(s_hi));
-        let w_i32_3 = vmovl_s16(vget_high_s16(vmovl_s8(s_hi)));
+        let w16_lo = vmovl_s8(s_lo);
+        let w16_hi = vmovl_s8(s_hi);
+        let w_i32_0 = vmovl_s16(vget_low_s16(w16_lo));
+        let w_i32_1 = vmovl_s16(vget_high_s16(w16_lo));
+        let w_i32_2 = vmovl_s16(vget_low_s16(w16_hi));
+        let w_i32_3 = vmovl_s16(vget_high_s16(w16_hi));
 
         let x0 = vld1q_f32(x.add(x_off));
         let x1 = vld1q_f32(x.add(x_off + 4));
@@ -1500,6 +1507,10 @@ unsafe fn gemv_row_w4a8_group64_vnni_avx512(
 }
 pub mod swiglu;
 
+// x86-only kernels (AVX2/AVX-512/VNNI intrinsics; scalar ARM fallbacks for
+// the group64 entry points live in `swiglu.rs` but have no in-tree callers on
+// non-x86, so the whole re-export is x86-gated to keep aarch64 warning-free).
+#[cfg(target_arch = "x86_64")]
 pub(crate) use self::swiglu::{
     swiglu_neuron_w4a32_group32_avx2, swiglu_neuron_w4a32_group32_avx512,
     swiglu_neuron_w4a32_group64_avx2, swiglu_neuron_w4a32_group64_avx512,
@@ -1530,10 +1541,11 @@ unsafe fn dot_f32_u4_group64_fast(
     w_packed: *const u8,
     has_avx512: bool,
     has_avx2: bool,
-    _has_neon: bool,
+    has_neon: bool,
 ) -> f32 {
     #[cfg(target_arch = "x86_64")]
     {
+        let _ = has_neon;
         if has_avx512 {
             return dot_f32_u4_group64_avx512(x, w_packed);
         }
@@ -1547,6 +1559,8 @@ unsafe fn dot_f32_u4_group64_fast(
             return dot_f32_u4_group64_neon(x, w_packed);
         }
     }
+    #[cfg(target_arch = "aarch64")]
+    let _ = (has_avx512, has_avx2);
     dot_f32_u4_group_scalar(x, w_packed, 64)
 }
 
@@ -1556,10 +1570,11 @@ unsafe fn dot_f32_u4_group32_fast(
     w_packed: *const u8,
     has_avx512: bool,
     has_avx2: bool,
-    _has_neon: bool,
+    has_neon: bool,
 ) -> f32 {
     #[cfg(target_arch = "x86_64")]
     {
+        let _ = has_neon;
         if has_avx512 {
             return dot_f32_u4_group32_avx512(x, w_packed);
         }
@@ -1574,6 +1589,8 @@ unsafe fn dot_f32_u4_group32_fast(
             return dot_f32_u4_group64_neon(x, w_packed);
         }
     }
+    #[cfg(target_arch = "aarch64")]
+    let _ = (has_avx512, has_avx2);
     dot_f32_u4_group_scalar(x, w_packed, 32)
 }
 
