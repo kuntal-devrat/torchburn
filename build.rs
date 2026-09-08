@@ -18,12 +18,9 @@ fn main() {
     }
     if os == "macos" || os == "ios" {
         println!("cargo:rustc-cfg=has_metal");
-        if os == "macos" {
-            println!("cargo:rustc-link-arg=-framework=Metal");
-            println!("cargo:rustc-link-arg=-framework=Foundation");
-        } else {
-            println!("cargo:rustc-link-arg=-framework=Metal");
-        }
+        // NOTE: no `rustc-link-arg` frameworks here. The `metal` crate links
+        // its own frameworks, and `-framework=X` (single-arg `=` form) is
+        // rejected by clang ("unknown argument"), breaking every macOS link.
     }
     // Vulkan / DX12 / WGPU are runtime-selected via TORCHBURN_WGPU_BACKEND;
     // no link args needed (wgpu handles loader discovery per-OS).

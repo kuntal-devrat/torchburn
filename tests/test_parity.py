@@ -34,6 +34,20 @@ def _resolved_tier() -> str:
     return torchburn._torchburn.cpu_features_report()["tier"]
 
 
+def _uses_w4a8_fast_path() -> bool:
+    """True when `w4a32_grouped_linear` routes group_size=64 through the W4A8
+    VNNI kernel (`quantize_activation_to_u8` + `vpdpbusd`).
+
+    The Rust gate is `avx512vnni && avx512f && avx512bw`, which holds on the
+    `avx512_vnni`, `avx512_bf16`, `avx512_fp16` and `amx` tiers (BF16/FP16/AMX
+    CPUs all carry VNNI), so keying off the *flags* in `cpu_features_report`
+    instead of the tier string keeps the emulation branch correct on every
+    machine class, including Sapphire Rapids / Zen 4+ runners.
+    """
+    report = torchburn._torchburn.cpu_features_report()
+    return bool(report.get("avx512vnni"))
+
+
 def _dequant_int4_grouped(packed: torch.Tensor, scales: torch.Tensor, group_size: int) -> torch.Tensor:
     """Reference dequantization: nibble unpack -> signed (-8..7) -> *scale."""
     n, packed_cols = packed.shape
@@ -77,9 +91,9 @@ def test_int4_grouped_gemv_matches_torch_reference():
 
     w_deq = _dequant_int4_grouped(packed, scales, group_size)
     tier = _resolved_tier()
-    if tier == "avx512_vnni":
-        # VNNI tier runs the W4A8 fast path (activations quantized to u8):
-        # compare against an exact emulation of that path, tight budget.
+    if _uses_w4a8_fast_path():
+        # VNNI-class tier runs the W4A8 fast path (activations quantized to
+        # u8): compare against an exact emulation of that path, tight budget.
         expected = _emulate_w4a8_gemv(x, w_deq)
         budget = 1e-3
     else:
@@ -126,7 +140,7 @@ def test_int4_bias_and_batched_x():
 
     w_deq = _dequant_int4_grouped(packed, scales, group_size)
     tier = _resolved_tier()
-    if tier == "avx512_vnni":
+    if _uses_w4a8_fast_path():
         expected = _emulate_w4a8_gemv(x, w_deq) + bias
         budget = 1e-3
     else:
@@ -240,7 +254,18 @@ def test_dispatch_report_present():
     """Phase 0.3 observability: cpu_features_report returns the resolved tier."""
     report = torchburn._torchburn.cpu_features_report()
     assert isinstance(report, dict)
-    assert "tier" in report and report["tier"] in ("scalar", "avx2", "avx512", "avx512_vnni")
+    # All 8 CpuTier names must be accepted — GitHub-hosted Windows runners can
+    # resolve to avx512_bf16/avx512_fp16-class tiers, and ARM runners to neon.
+    assert "tier" in report and report["tier"] in (
+        "scalar",
+        "neon",
+        "avx2",
+        "avx512",
+        "avx512_vnni",
+        "avx512_bf16",
+        "avx512_fp16",
+        "amx",
+    )
     # On x86-64 at least one SIMD flag must be coherent with the tier.
     tier = report["tier"]
     if tier == "avx512_vnni":

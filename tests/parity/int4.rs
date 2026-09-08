@@ -190,13 +190,16 @@ fn gemv_matches_exact_dequant_reference() {
     }
     // The resolved SIMD tier decides which semantics the entry point actually
     // executes: exact W4A32 dequant-dot on scalar/AVX2/AVX-512, or the W4A8
-    // approximation on AVX-512 VNNI. Assert tight parity against the reference
-    // for whichever semantics are in effect (see tests/parity.py for the
-    // same tier-aware gate on the Python side).
-    let tier = _torchburn::dispatch::cpu_features().tier();
+    // approximation on any tier with the VNNI flags (avx512_vnni, but also
+    // avx512_bf16 / avx512_fp16 / amx — BF16/FP16/AMX CPUs all carry VNNI).
+    // Key off the same flags the kernel gates on, then assert tight parity
+    // against the reference for whichever semantics are in effect (see
+    // tests/parity.py for the same tier-aware gate on the Python side).
+    let feats = _torchburn::dispatch::cpu_features();
+    let uses_w4a8 = feats.avx512vnni && feats.avx512f && feats.avx512bw;
     let budget: f32;
     let expected: Vec<f32>;
-    if tier == _torchburn::dispatch::CpuTier::Avx512Vnni {
+    if uses_w4a8 {
         expected = emulate_w4a8(&x, &packed, &scales, n, k);
         budget = 1e-3;
     } else {
@@ -207,7 +210,7 @@ fn gemv_matches_exact_dequant_reference() {
     assert!(
         err < budget,
         "int4 GEMV vs reference (tier {:?}) rel err {err:.2e} (budget {budget})",
-        tier
+        feats.tier()
     );
 }
 

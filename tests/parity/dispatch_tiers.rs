@@ -44,6 +44,17 @@ fn run_gemv(x: &[f32], w: &[u8], scales: &[f32], n: usize, k: usize) -> Vec<f32>
     out
 }
 
+/// Tiers whose feature sets include AVX-512 VNNI, i.e. those that run the
+/// W4A8 fast path (activations quantized to u8) instead of the exact W4A32
+/// dequant-dot — the kernel gate is `avx512vnni && avx512f && avx512bw`,
+/// which also holds on BF16/FP16/AMX-class CPUs.
+fn is_w4a8_tier(tier: CpuTier) -> bool {
+    matches!(
+        tier,
+        CpuTier::Avx512Vnni | CpuTier::Avx512Bf16 | CpuTier::Avx512Fp16 | CpuTier::Amx
+    )
+}
+
 fn host_supports(tier: CpuTier) -> bool {
     #[cfg(target_arch = "x86_64")]
     {
@@ -62,6 +73,22 @@ fn host_supports(tier: CpuTier) -> bool {
                     && std::arch::is_x86_feature_detected!("avx512bw")
                     && std::arch::is_x86_feature_detected!("avx512vnni")
             }
+            CpuTier::Avx512Bf16 => {
+                std::arch::is_x86_feature_detected!("avx512f")
+                    && std::arch::is_x86_feature_detected!("avx512bw")
+                    && std::arch::is_x86_feature_detected!("avx512vnni")
+                    && std::arch::is_x86_feature_detected!("avx512bf16")
+            }
+            CpuTier::Avx512Fp16 => {
+                std::arch::is_x86_feature_detected!("avx512f")
+                    && std::arch::is_x86_feature_detected!("avx512bw")
+                    && std::arch::is_x86_feature_detected!("avx512vnni")
+                    && std::arch::is_x86_feature_detected!("avx512bf16")
+                    && std::arch::is_x86_feature_detected!("avx512fp16")
+            }
+            // NEON is ARM-only; AMX needs nightly intrinsics (not detected on
+            // stable), so neither can be exercised on an x86-64 host.
+            CpuTier::Neon | CpuTier::Amx => false,
         }
     }
     #[cfg(not(target_arch = "x86_64"))]
@@ -71,12 +98,16 @@ fn host_supports(tier: CpuTier) -> bool {
     }
 }
 
-fn all_tiers() -> [CpuTier; 4] {
+fn all_tiers() -> [CpuTier; 8] {
     [
         CpuTier::Scalar,
+        CpuTier::Neon,
         CpuTier::Avx2,
         CpuTier::Avx512,
         CpuTier::Avx512Vnni,
+        CpuTier::Avx512Bf16,
+        CpuTier::Avx512Fp16,
+        CpuTier::Amx,
     ]
 }
 
@@ -123,8 +154,8 @@ fn exact_tiers_are_allclose_vnni_within_w4a8_budget() {
         let out = run_gemv(&x, &w, &scales, n, k);
         let err = rel_err(&out, &scalar);
         println!("tier {tier:?} vs scalar: rel err {err:.2e}");
-        if tier == CpuTier::Avx512Vnni {
-            vnni_err = err;
+        if is_w4a8_tier(tier) {
+            vnni_err = vnni_err.max(err);
         } else if err > 1e-3 {
             exact_tiers_ok = false;
         }
@@ -134,7 +165,7 @@ fn exact_tiers_are_allclose_vnni_within_w4a8_budget() {
         exact_tiers_ok,
         "exact-dequant tiers diverged from scalar (budget 1e-3)"
     );
-    // The VNNI tier runs W4A8 (activation quantization), a documented
+    // VNNI-class tiers run W4A8 (activation quantization), a documented
     // approximation — assert it stays within a sane bound relative to W4A32.
     assert!(
         vnni_err < 0.1,

@@ -23,9 +23,9 @@
 //!    single-slot KV write now run on device via dedicated CUDA kernels,
 //!    eliminating the CPU ↔ GPU data transfer for these operations entirely.
 //!
-//! 5. **Gate + Up GEMV on two streams** — gate and up projections are
-//!    independent, so they are launched on separate CUDA streams and
-//!    synchronized together, halving the serial latency for this sub-step.
+//! 5. **Serial GEMV launches on the default stream** — gate and up projections
+//!    are independent but run back-to-back (cudarc keeps stream management
+//!    internal); true overlap via `fork_default_stream` is future work.
 //!
 //! Feature-gated: only compiled when `--features cuda` is passed.
 
@@ -35,10 +35,28 @@ use pyo3::prelude::*;
 use pyo3::types::PyCapsule;
 
 use cudarc::driver::*;
+use cudarc::nvrtc::compile_ptx;
 
 use crate::dlpack;
 use crate::llm::sample_logits;
 use crate::quantization::typed_slice;
+
+/// Module name under which the decoder kernels are registered on the device.
+const DECODER_MODULE: &str = "tb_decoder";
+const DECODER_FUNCS: &[&'static str] = &["gemv_w4a32_tiled", "kv_slot_write", "decode_attention"];
+
+/// Compile (once) and register the decoder kernels on the device.
+fn ensure_decoder_kernels(dev: &Arc<CudaDevice>) -> Result<(), String> {
+    if DECODER_FUNCS
+        .iter()
+        .all(|&f| dev.has_func(DECODER_MODULE, f))
+    {
+        return Ok(());
+    }
+    let ptx = compile_ptx(CUDA_KERNELS_SRC).map_err(|e| e.to_string())?;
+    dev.load_ptx(ptx, DECODER_MODULE, DECODER_FUNCS)
+        .map_err(|e| e.to_string())
+}
 
 // ---------------------------------------------------------------------------
 // Upload / alloc helpers
@@ -238,18 +256,24 @@ impl CudaQwenDecoder {
             GemvKind::Up => (&self.layers[l].up_w, &self.layers[l].up_s),
             GemvKind::Down => (&self.layers[l].down_w, &self.layers[l].down_s),
         };
-        self.launch_gemv_on_stream(x, w, s, n, k, self.device.stream)
+        self.launch_gemv(x, w, s, n, k)
     }
 
-    /// Launch GEMV on an explicit stream (enables gate+up parallelism).
-    fn launch_gemv_on_stream(
+    /// Launch GEMV on the device default stream.
+    ///
+    /// (An earlier draft threaded an explicit `CudaStream` for gate+up
+    /// parallelism, but cudarc keeps stream management internal — the
+    /// field is private — so all launches serialize on the default
+    /// stream. The doc comment claiming two-stream overlap was aspirational;
+    /// true overlap needs `fork_default_stream` + event fencing, tracked
+    /// as future work.)
+    fn launch_gemv(
         &self,
         x: &[f32],
         w: &CudaSlice<u8>,
         s: &CudaSlice<f32>,
         n: usize,
         k: usize,
-        stream: CudaStream,
     ) -> PyResult<Vec<f32>> {
         let dev = &self.device;
         let gs = self.group_size;
@@ -262,30 +286,26 @@ impl CudaQwenDecoder {
             .alloc_zeros::<f32>(n)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
 
-        unsafe {
-            let module = dev
-                .get_or_load_module(CUDA_KERNELS_SRC)
-                .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
-            let func = module.get_function("gemv_w4a32_tiled").ok_or_else(|| {
+        ensure_decoder_kernels(dev).map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+        let func = dev
+            .get_func(DECODER_MODULE, "gemv_w4a32_tiled")
+            .ok_or_else(|| {
                 pyo3::exceptions::PyRuntimeError::new_err("gemv_w4a32_tiled not found")
             })?;
-            let grid = LaunchAsync::with_grid_and_stream((n as u32, 1, 1), (256, 1, 1), stream);
-            grid.launch(
-                &func,
+        let cfg = LaunchConfig {
+            grid_dim: (n as u32, 1, 1),
+            block_dim: (256, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        unsafe {
+            func.launch(
+                cfg,
                 (
-                    &d_x,
-                    w,
-                    s,
-                    d_out.clone(),
-                    n as u32,
-                    k as u32,
-                    gs as u32,
-                    ng as u32,
+                    &d_x, w, s, &mut d_out, n as u32, k as u32, gs as u32, ng as u32,
                 ),
             )
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
         }
-        // Synchronize *this* stream before reading back
         dev.synchronize()
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
 
@@ -296,13 +316,12 @@ impl CudaQwenDecoder {
     }
 
     fn gemv_lm_head(&self, x: &[f32]) -> PyResult<Vec<f32>> {
-        self.launch_gemv_on_stream(
+        self.launch_gemv(
             x,
             &self.lm_head_w,
             &self.lm_head_s,
             self.vocab_size,
             self.hidden_size,
-            self.device.stream,
         )
     }
 
@@ -378,25 +397,26 @@ impl CudaQwenDecoder {
                 .htod_sync_copy(&v_vec)
                 .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
             unsafe {
-                let module = self
+                ensure_decoder_kernels(&self.device)
+                    .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+                let func = self
                     .device
-                    .get_or_load_module(CUDA_KERNELS_SRC)
-                    .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
-                let func = module.get_function("kv_slot_write").ok_or_else(|| {
-                    pyo3::exceptions::PyRuntimeError::new_err("kv_slot_write not found")
-                })?;
-                let grid = LaunchAsync::with_grid_and_stream(
-                    (self.num_kv_heads as u32, 1, 1),
-                    (self.head_dim.min(256) as u32, 1, 1),
-                    self.device.stream,
-                );
-                grid.launch(
-                    &func,
+                    .get_func(DECODER_MODULE, "kv_slot_write")
+                    .ok_or_else(|| {
+                        pyo3::exceptions::PyRuntimeError::new_err("kv_slot_write not found")
+                    })?;
+                let cfg = LaunchConfig {
+                    grid_dim: (self.num_kv_heads as u32, 1, 1),
+                    block_dim: (self.head_dim.min(256) as u32, 1, 1),
+                    shared_mem_bytes: 0,
+                };
+                func.launch(
+                    cfg,
                     (
                         &d_k_new,
                         &d_v_new,
-                        self.layers[l].k_cache.clone(),
-                        self.layers[l].v_cache.clone(),
+                        &self.layers[l].k_cache,
+                        &self.layers[l].v_cache,
                         self.head_dim as u32,
                         max_seq as u32,
                         slot as u32,
@@ -435,23 +455,21 @@ impl CudaQwenDecoder {
             }
             let normed2 = rms_norm_cpu(&x, &self.layers[l].post_norm_cpu, eps);
 
-            // ── 2g. Gate + Up GEMV (independent, same stream) ───────────────────
+            // ── 2g. Gate + Up GEMV (independent GEMVs, same default stream) ───
             let normed2_ref = normed2.as_slice();
-            let gate = self.launch_gemv_on_stream(
+            let gate = self.launch_gemv(
                 normed2_ref,
                 &self.layers[l].gate_w,
                 &self.layers[l].gate_s,
                 int_sz,
                 h,
-                self.device.stream,
             )?;
-            let up = self.launch_gemv_on_stream(
+            let up = self.launch_gemv(
                 normed2_ref,
                 &self.layers[l].up_w,
                 &self.layers[l].up_s,
                 int_sz,
                 h,
-                self.device.stream,
             )?;
 
             // SwiGLU activation (CPU)
@@ -518,10 +536,9 @@ impl CudaQwenDecoder {
         rope_theta: f64,
     ) -> PyResult<Self> {
         let _ = py;
-        let dev = Arc::new(
-            CudaDevice::new(0)
-                .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?,
-        );
+        // `CudaDevice::new` already returns `Arc<CudaDevice>`.
+        let dev = CudaDevice::new(0)
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
 
         // Embed table — upload full table AND keep CPU mirror for row fetches
         let emb_view = unsafe { dlpack::BorrowedTensor::from_capsule(embed_tokens)? };

@@ -8,20 +8,37 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 
+use cudarc::cublas::sys::cublasOperation_t;
 use cudarc::cublas::*;
 use cudarc::driver::*;
+use cudarc::nvrtc::compile_ptx;
 
-static CUDA_DEVICE: OnceLock<Arc<CudaDevice>> = OnceLock::new();
-static CUBLAS_HANDLE: OnceLock<Mutex<CudaBlas>> = OnceLock::new();
+// cudarc 0.13 API notes (see docs.rs/cudarc/0.13):
+// - `htod_sync_copy` / `dtoh_sync_copy` / `alloc_zeros` / `synchronize` are
+//   `CudaDevice` methods (receiver `&Arc<Self>`), not `CudaSlice` methods.
+// - Kernels: `compile_ptx` (nvrtc) -> `dev.load_ptx(ptx, name, &[fns])` ->
+//   `dev.get_func(name, func)` -> `func.launch(LaunchConfig{..}, params)` via
+//   the `LaunchAsync` trait. Slices are passed by reference (`&CudaSlice`);
+//   `CudaSlice::clone()` is a device-to-device deep copy, never an alias.
+// - GEMM: `Gemm` trait method `handle.gemm(GemmConfig{..}, a, b, c)` with
+//   `cublasOperation_t::CUBLAS_OP_N/P`.
+
+/// Module name under which the INT4 kernels are registered on the device.
+const GEMV_MODULE: &str = "tb_gemv_w4a32";
+
+static CUDA_DEVICE: OnceLock<Result<Arc<CudaDevice>, String>> = OnceLock::new();
+static CUBLAS_HANDLE: OnceLock<Result<Mutex<CudaBlas>, String>> = OnceLock::new();
 
 /// Persistent GPU buffer cache: weights are uploaded once and cached by a
 /// content hash. Repeated inference calls skip the H2D transfer entirely.
 static BUFFER_CACHE: OnceLock<Mutex<GpuBufferCache>> = OnceLock::new();
 
 struct GpuBufferCache {
-    /// Map from content hash -> GPU buffer.
-    f32_buffers: HashMap<u64, CudaSlice<f32>>,
-    u8_buffers: HashMap<u64, CudaSlice<u8>>,
+    /// Map from content hash -> GPU buffer, reference-counted so callers
+    /// hold an owned `Arc` instead of a borrow into the pool (which would
+    /// conflict with later `&mut` pool calls in the same function).
+    f32_buffers: HashMap<u64, Arc<CudaSlice<f32>>>,
+    u8_buffers: HashMap<u64, Arc<CudaSlice<u8>>>,
     /// Reusable scratch buffers keyed by size (in elements).
     scratch_f32: Vec<(usize, CudaSlice<f32>)>,
 }
@@ -36,11 +53,12 @@ impl GpuBufferCache {
     }
 
     /// Get or upload a f32 buffer. Uses a simple FNV-1a hash of the data.
+    /// Returns an owned `Arc` clone so no borrow into `self` escapes.
     fn get_or_upload_f32(
         &mut self,
         data: &[f32],
         dev: &Arc<CudaDevice>,
-    ) -> Result<&CudaSlice<f32>, CudaError> {
+    ) -> Result<Arc<CudaSlice<f32>>, CudaError> {
         let hash = fnv_hash(unsafe {
             std::slice::from_raw_parts(data.as_ptr() as *const u8, data.len() * 4)
         });
@@ -48,25 +66,26 @@ impl GpuBufferCache {
             let buf = dev
                 .htod_sync_copy(data)
                 .map_err(|e| CudaError::MemoryError(e.to_string()))?;
-            self.f32_buffers.insert(hash, buf);
+            self.f32_buffers.insert(hash, Arc::new(buf));
         }
-        Ok(&self.f32_buffers[&hash])
+        Ok(self.f32_buffers[&hash].clone())
     }
 
     /// Get or upload a u8 buffer (for packed weights).
+    /// Returns an owned `Arc` clone so no borrow into `self` escapes.
     fn get_or_upload_u8(
         &mut self,
         data: &[u8],
         dev: &Arc<CudaDevice>,
-    ) -> Result<&CudaSlice<u8>, CudaError> {
+    ) -> Result<Arc<CudaSlice<u8>>, CudaError> {
         let hash = fnv_hash(data);
         if !self.u8_buffers.contains_key(&hash) {
             let buf = dev
                 .htod_sync_copy(data)
                 .map_err(|e| CudaError::MemoryError(e.to_string()))?;
-            self.u8_buffers.insert(hash, buf);
+            self.u8_buffers.insert(hash, Arc::new(buf));
         }
-        Ok(&self.u8_buffers[&hash])
+        Ok(self.u8_buffers[&hash].clone())
     }
 
     /// Get a scratch buffer of at least `n` f32 elements (reused across calls).
@@ -147,20 +166,40 @@ impl CudaBackend {
     }
 
     /// Get or initialize the CUDA device singleton.
+    ///
+    /// `OnceLock::get_or_try_init` is avoided (unstable on some toolchains);
+    /// the `Result` is stored in the cell so init failure is sticky and
+    /// reported on every call without re-probing.
     fn get_device() -> Result<&'static Arc<CudaDevice>, CudaError> {
-        CUDA_DEVICE.get_or_try_init(|| {
-            CudaDevice::new(0).map_err(|e| CudaError::InitFailed(e.to_string()))
-        })
+        CUDA_DEVICE
+            .get_or_init(|| CudaDevice::new(0).map_err(|e| e.to_string()))
+            .as_ref()
+            .map_err(|e| CudaError::InitFailed(e.clone()))
     }
 
     /// Get or create cuBLAS handle.
     fn cublas() -> Result<&'static Mutex<CudaBlas>, CudaError> {
-        CUBLAS_HANDLE.get_or_try_init(|| {
-            let dev = Self::get_device()?;
-            let blas =
-                CudaBlas::new(dev.clone()).map_err(|e| CudaError::CublasError(e.to_string()))?;
-            Ok(Mutex::new(blas))
-        })
+        CUBLAS_HANDLE
+            .get_or_init(|| {
+                (|| {
+                    let dev = Self::get_device().map_err(|e| e.to_string())?;
+                    let blas = CudaBlas::new(dev.clone()).map_err(|e| e.to_string())?;
+                    Ok::<_, String>(Mutex::new(blas))
+                })()
+            })
+            .as_ref()
+            .map_err(|e| CudaError::CublasError(e.clone()))
+    }
+
+    /// Compile (once) and register the INT4 kernels on the device.
+    fn ensure_kernels(dev: &Arc<CudaDevice>) -> Result<(), CudaError> {
+        if dev.has_func(GEMV_MODULE, "gemv_w4a32_tiled") {
+            return Ok(());
+        }
+        let ptx = compile_ptx(CUDA_GEMV_W4A32_OPTIMIZED)
+            .map_err(|e| CudaError::KernelLaunchFailed(e.to_string()))?;
+        dev.load_ptx(ptx, GEMV_MODULE, &["gemv_w4a32_tiled"])
+            .map_err(|e| CudaError::KernelLaunchFailed(e.to_string()))
     }
 
     /// Get or create the buffer cache.
@@ -190,45 +229,47 @@ impl CudaBackend {
             .htod_sync_copy(a)
             .map_err(|e| CudaError::MemoryError(e.to_string()))?;
 
-        // Upload B (weights — cache for reuse)
+        // The pool guard stays alive across the launch: cached buffers are
+        // borrowed from it, so it must outlive the kernel + readback.
         let mut cache = Self::cache().lock().unwrap_or_else(|e| e.into_inner());
+        // Upload B (weights — cache for reuse)
         let d_b = cache.get_or_upload_f32(b, dev)?;
 
         // Get scratch buffer for output
         let mut d_c = cache.scratch_f32(m * n, dev)?;
-        drop(cache);
 
         {
-            let handle = Self::cublas()?.lock().unwrap();
+            let handle = Self::cublas()?.lock().unwrap_or_else(|e| e.into_inner());
+            // Row-major C = A @ B via column-major C^T = B^T @ A^T:
+            // swap A/B and m/n, keep leading dims of the row-major layouts.
+            let cfg = GemmConfig {
+                transa: cublasOperation_t::CUBLAS_OP_N,
+                transb: cublasOperation_t::CUBLAS_OP_N,
+                m: n as i32,
+                n: m as i32,
+                k: k as i32,
+                alpha,
+                lda: n as i32,
+                ldb: k as i32,
+                beta,
+                ldc: n as i32,
+            };
             unsafe {
-                gemm(
-                    &handle,
-                    CudaBlasOperation::N,
-                    CudaBlasOperation::N,
-                    n as i32,
-                    m as i32,
-                    k as i32,
-                    &[alpha],
-                    d_b,
-                    n as i32,
-                    &d_a,
-                    k as i32,
-                    &[beta],
-                    &mut d_c,
-                    n as i32,
-                )
-                .map_err(|e| CudaError::CublasError(e.to_string()))?;
+                // `Arc` does not implement the device traits: deref to the
+                // `&CudaSlice` the generic params require.
+                handle
+                    .gemm(cfg, &*d_b, &d_a, &mut d_c)
+                    .map_err(|e| CudaError::CublasError(e.to_string()))?;
             }
         }
 
         // Read back result
-        let result = d_c
-            .dtoh_sync_copy()
+        let result: Vec<f32> = dev
+            .dtoh_sync_copy(&d_c)
             .map_err(|e| CudaError::MemoryError(e.to_string()))?;
         c.copy_from_slice(&result);
 
         // Return scratch buffer to cache
-        let mut cache = Self::cache().lock().unwrap_or_else(|e| e.into_inner());
         cache.return_scratch_f32(d_c, m * n);
         Ok(())
     }
@@ -257,41 +298,42 @@ impl CudaBackend {
             .htod_sync_copy(x)
             .map_err(|e| CudaError::MemoryError(e.to_string()))?;
 
-        // Cache weights and scales (persistent)
+        // Cache weights and scales (persistent). The pool guard stays alive
+        // across the launch: cached buffers are borrowed from it.
         let mut cache = Self::cache().lock().unwrap_or_else(|e| e.into_inner());
         let d_w = cache.get_or_upload_u8(w_packed, dev)?;
         let d_scales = cache.get_or_upload_f32(scales, dev)?;
         let mut d_out = cache.scratch_f32(n, dev)?;
-        drop(cache);
+
+        Self::ensure_kernels(dev)?;
 
         let num_groups = (k + group_size - 1) / group_size;
 
-        // Launch optimized kernel: 1 block per row, 256 threads per block
+        // Launch optimized kernel: 1 block per row, 256 threads per block,
+        // on the device default stream.
         let threads_per_block = 256u32;
         let blocks = n as u32;
 
+        let func = dev
+            .get_func(GEMV_MODULE, "gemv_w4a32_tiled")
+            .ok_or_else(|| CudaError::KernelLaunchFailed("gemv_w4a32_tiled not found".into()))?;
+        let cfg = LaunchConfig {
+            grid_dim: (blocks, 1, 1),
+            block_dim: (threads_per_block, 1, 1),
+            shared_mem_bytes: 0,
+        };
         unsafe {
-            let module = dev
-                .get_or_load_module(CUDA_GEMV_W4A32_OPTIMIZED)
-                .map_err(|e| CudaError::KernelLaunchFailed(e.to_string()))?;
-
-            let func = module.get_function("gemv_w4a32_tiled").ok_or_else(|| {
-                CudaError::KernelLaunchFailed("gemv_w4a32_tiled not found".into())
-            })?;
-
-            let grid = LaunchAsync::with_grid_and_stream(
-                (blocks, 1, 1),
-                (threads_per_block, 1, 1),
-                dev.stream,
-            );
-
-            grid.launch(
-                &func,
+            // NOTE: slices pass by reference (`&CudaSlice` is `DeviceRepr`;
+            // `&&CudaSlice` is not, so already-borrowed cache buffers pass
+            // through unchanged). `CudaSlice::clone()` is a device-to-device
+            // deep copy and must NOT be used for the out param.
+            func.launch(
+                cfg,
                 (
                     &d_x,
-                    d_w,
-                    d_scales,
-                    d_out.clone(),
+                    &*d_w,
+                    &*d_scales,
+                    &mut d_out,
                     n as u32,
                     k as u32,
                     group_size as u32,
@@ -304,8 +346,8 @@ impl CudaBackend {
                 .map_err(|e| CudaError::KernelLaunchFailed(e.to_string()))?;
         }
 
-        let result = d_out
-            .dtoh_sync_copy()
+        let result: Vec<f32> = dev
+            .dtoh_sync_copy(&d_out)
             .map_err(|e| CudaError::MemoryError(e.to_string()))?;
         out.copy_from_slice(&result);
 
@@ -316,8 +358,7 @@ impl CudaBackend {
             }
         }
 
-        // Return scratch buffer
-        let mut cache = Self::cache().lock().unwrap_or_else(|e| e.into_inner());
+        // Return scratch buffer (the existing pool guard is still alive).
         cache.return_scratch_f32(d_out, n);
         Ok(())
     }
