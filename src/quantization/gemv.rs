@@ -1735,7 +1735,7 @@ pub unsafe fn gemv_w4a32_grouped(
         (None, 1.0f32)
     };
     #[cfg(not(target_arch = "x86_64"))]
-    let x_u8_opt = None;
+    let x_u8_opt: Option<Vec<u8>> = None;
     let x_u8_ptr = x_u8_opt.as_ref().map(|v| v.as_ptr() as usize);
 
     (0..n)
