@@ -133,8 +133,11 @@ impl GgufParser {
     }
 
     fn read_string(&mut self) -> Result<String, GgufError> {
-        let len = self.read_u64()? as usize;
-        let bytes = self.read_bytes(len)?;
+        let len = self.read_u64()?;
+        if len > 256 * 1024 * 1024 {
+            return Err(GgufError::TruncatedData);
+        }
+        let bytes = self.read_bytes(len as usize)?;
         String::from_utf8(bytes.to_vec()).map_err(|_| GgufError::TruncatedData)
     }
 
@@ -151,8 +154,11 @@ impl GgufParser {
             7 => Ok(GgufMetadataValue::Bool(self.read_u8()? != 0)),
             8 => Ok(GgufMetadataValue::String(self.read_string()?)),
             9 => {
-                let len = self.read_u64()? as usize;
-                let mut arr = Vec::with_capacity(len);
+                let len = self.read_u64()?;
+                if len > 1_000_000 {
+                    return Err(GgufError::TruncatedData);
+                }
+                let mut arr = Vec::with_capacity((len as usize).min(1024));
                 for _ in 0..len {
                     arr.push(self.read_metadata_value()?);
                 }
@@ -174,26 +180,26 @@ impl GgufParser {
             return Err(GgufError::InvalidMagic(magic));
         }
 
-        // Read version
+        // Read version (accept v2 + v3; Python loader supports both)
         let version = self.read_u32()?;
-        if version != super::GGUF_VERSION {
+        if version != super::GGUF_VERSION && version != 2 {
             return Err(GgufError::UnsupportedVersion(version));
         }
 
-        // Read tensor count and metadata KV count
-        let _tensor_count = self.read_u64()?;
+        // Read tensor count and metadata KV count (GGUFv3: magic, version, n_tensors, n_kv)
+        let tensor_count = self.read_u64()?;
         let kv_count = self.read_u64()?;
 
         // Read metadata KV pairs
-        let mut metadata = Vec::with_capacity(kv_count as usize);
+        let mut metadata = Vec::with_capacity(kv_count.min(1_000_000) as usize);
         for _ in 0..kv_count {
             let key = self.read_string()?;
             let value = self.read_metadata_value()?;
             metadata.push((key, value));
         }
 
-        // Read tensor infos
-        let n_tensors = self.read_u64()? as usize;
+        // Read tensor infos (use header count; do NOT read an extra u64)
+        let n_tensors = tensor_count as usize;
         let mut tensors = Vec::with_capacity(n_tensors);
         for _ in 0..n_tensors {
             let name = self.read_string()?;
@@ -265,11 +271,24 @@ impl GgufMmap {
         &self.model
     }
 
-    /// Get raw tensor data by reference.
+    /// Get raw tensor data by reference (checked; empty on corrupt offsets).
     pub fn tensor_bytes(&self, tensor: &GgufTensorInfo) -> &[u8] {
-        let start = (self.model.data_offset + tensor.offset) as usize;
-        let end = start + tensor.n_bytes();
+        let start = self.model.data_offset.saturating_add(tensor.offset) as usize;
+        let end = start.saturating_add(tensor.n_bytes());
+        if end > self.data.len() || start > end {
+            return &[];
+        }
         &self.data[start..end]
+    }
+
+    /// Checked variant returning an error instead of empty slice.
+    pub fn try_tensor_bytes(&self, tensor: &GgufTensorInfo) -> Result<&[u8], GgufError> {
+        let start = self.model.data_offset.saturating_add(tensor.offset) as usize;
+        let end = start.saturating_add(tensor.n_bytes());
+        if end > self.data.len() || start > end {
+            return Err(GgufError::TruncatedData);
+        }
+        Ok(&self.data[start..end])
     }
 
     /// Get the underlying data buffer.

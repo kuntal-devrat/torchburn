@@ -1386,10 +1386,8 @@ pub fn dot(a: &BorrowedTensor, b: &BorrowedTensor) -> PyResult<OwnedTensor> {
         DType::F32 => {
             let a_data = unsafe { typed_slice::<f32>(a) };
             let b_data = unsafe { typed_slice::<f32>(b) };
-            let mut sum = 0.0f32;
-            for i in 0..n {
-                sum += a_data[i] * b_data[i];
-            }
+            // SIMD 4x f32x8 accumulators (was scalar loop, 8x slower)
+            let sum = unsafe { dot_f32(a_data.as_ptr(), b_data.as_ptr(), n) };
             let d = unsafe { typed_mut_slice::<f32>(&mut out) };
             d[0] = sum;
         }

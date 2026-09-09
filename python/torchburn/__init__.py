@@ -86,7 +86,7 @@ from .profiler import (
 )
 from . import ops
 from . import quantization
-from .llm import LLM, GenerationConfig, EngineConfig, ModelConfig
+from .llm import LLM, GenerationConfig, EngineConfig, ModelConfig, SpeculativeDecoder, BatchedDecoder
 from .quantization import (
     QuantizedLinear,
     quantize_model,
@@ -192,6 +192,8 @@ __all__ = [
     "GenerationConfig",
     "EngineConfig",
     "ModelConfig",
+    "SpeculativeDecoder",
+    "BatchedDecoder",
     "export",
     "ops",
     "visualize",

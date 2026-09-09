@@ -185,14 +185,29 @@ pub(crate) fn kw_usize(node: &Node, key: &str, default: usize) -> usize {
         .get(key)
         .and_then(|v| {
             if let Some(n) = v.as_i64() {
-                Some(n)
+                if n < 0 {
+                    None
+                } else {
+                    Some(n as usize)
+                }
             } else if let Some(arr) = v.as_array() {
-                arr.first().and_then(|x| x.as_i64())
+                arr.first().and_then(|x| x.as_i64()).and_then(|n| {
+                    if n < 0 {
+                        None
+                    } else {
+                        Some(n as usize)
+                    }
+                })
+            } else if let Some(n) = v.as_u64() {
+                if n <= (isize::MAX as u64) {
+                    Some(n as usize)
+                } else {
+                    None
+                }
             } else {
                 None
             }
         })
-        .map(|v| v as usize)
         .unwrap_or(default)
 }
 

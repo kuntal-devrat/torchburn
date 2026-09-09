@@ -126,11 +126,17 @@ pub(crate) fn try_dispatch(
         "chunk" => {
             let a = slot_view(slots, capsules, arg_index(node, 0)?)?;
             let num_chunks = kw_usize(node, "chunks", 1);
+            if num_chunks == 0 {
+                return Err(unsupported("chunk: chunks must be > 0"));
+            }
             let dim = kw_isize(node, "dim", 0);
             let ndim = a.shape.len() as isize;
             let normalized_dim = if dim < 0 { dim + ndim } else { dim };
-            let dim_size = a.shape[normalized_dim as usize] as usize;
-            let chunk_size = dim_size / num_chunks;
+            if normalized_dim < 0 || normalized_dim >= ndim {
+                return Err(unsupported("chunk: dim out of range"));
+            }
+            let dim_size = a.shape[normalized_dim as usize].max(0) as usize;
+            let chunk_size = dim_size / num_chunks.max(1);
             let mut parts = Vec::with_capacity(num_chunks);
             for i in 0..num_chunks {
                 let start = i * chunk_size;
@@ -245,10 +251,19 @@ pub(crate) fn try_dispatch(
             let dim = kw_isize(node, "dim", 0);
             let chunk_index = kw_usize(node, "chunk_index", 0);
             let num_chunks = kw_usize(node, "num_chunks", 1);
+            if num_chunks == 0 {
+                return Err(unsupported("chunk_narrow: num_chunks must be > 0"));
+            }
+            if chunk_index >= num_chunks {
+                return Err(unsupported("chunk_narrow: chunk_index out of range"));
+            }
             let ndim = a.shape.len() as isize;
             let normalized_dim = if dim < 0 { dim + ndim } else { dim };
-            let dim_size = a.shape[normalized_dim as usize] as usize;
-            let chunk_size = dim_size / num_chunks;
+            if normalized_dim < 0 || normalized_dim >= ndim {
+                return Err(unsupported("chunk_narrow: dim out of range"));
+            }
+            let dim_size = a.shape[normalized_dim as usize].max(0) as usize;
+            let chunk_size = dim_size / num_chunks.max(1);
             let start = chunk_index * chunk_size;
             let length = if chunk_index == num_chunks - 1 {
                 dim_size - start // last chunk gets remainder

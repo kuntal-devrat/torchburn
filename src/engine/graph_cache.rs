@@ -80,22 +80,28 @@ pub fn prepare_graph(dict: &Bound<'_, pyo3::types::PyDict>) -> PyResult<i64> {
         }
     }
     let preplanned = if !unsafe_output {
+        fn is_slot_list_target(t: &str) -> bool {
+            matches!(t, "cat" | "stack" | "concat" | "unbind" | "split_with_sizes")
+        }
         let mut remap = Vec::with_capacity(base + nodes.len());
         remap.extend(0..base);
         remap.extend((0..nodes.len()).map(|i| base + fp.node_step[i]));
         for node in nodes.iter_mut() {
+            let remap_arr = is_slot_list_target(node.target.as_str());
             for arg in node.args.iter_mut() {
                 if let Some(s) = arg.index {
                     if s < remap.len() {
                         arg.index = Some(remap[s]);
                     }
                 }
-                if let Some(Value::Array(arr)) = arg.value.as_mut() {
-                    for v in arr.iter_mut() {
-                        if let Some(u) = v.as_u64() {
-                            let s = u as usize;
-                            if s < remap.len() {
-                                *v = Value::from(remap[s] as u64);
+                if remap_arr {
+                    if let Some(Value::Array(arr)) = arg.value.as_mut() {
+                        for v in arr.iter_mut() {
+                            if let Some(u) = v.as_u64() {
+                                let s = u as usize;
+                                if s < remap.len() {
+                                    *v = Value::from(remap[s] as u64);
+                                }
                             }
                         }
                     }

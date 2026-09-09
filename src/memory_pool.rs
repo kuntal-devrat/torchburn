@@ -114,10 +114,13 @@ pub fn take_buffer(dtype: DType, words: usize) -> Vec<u64> {
         if let Some(idx) = best_idx {
             GLOBAL_HIT_COUNT.fetch_add(1, Ordering::Relaxed);
             let mut buf = pool.swap_remove(idx).2;
-            // Reuse allocation without zeroing memory (see module docs).
+            // Reuse allocation without zeroing in release (kernels must fully
+            // overwrite). In debug, zero to expose partial-write info-leaks.
             unsafe {
                 buf.set_len(words);
             }
+            #[cfg(debug_assertions)]
+            buf.fill(0);
             return buf;
         }
         drop(pool);
@@ -167,6 +170,8 @@ fn take_buffer_global(dtype: DType, words: usize) -> Vec<u64> {
 /// capacity exceeds 4x the bucket floor are dropped to bound waste.
 pub fn give_buffer(dtype: DType, capacity: usize, mut buf: Vec<u64>) {
     GLOBAL_RECYCLE_COUNT.fetch_add(1, Ordering::Relaxed);
+    // Use actual Vec capacity (caller may pass stale capacity after set_len).
+    let capacity = buf.capacity().max(capacity);
     // Don't pool huge buffers
     if !poolable(capacity) {
         return;

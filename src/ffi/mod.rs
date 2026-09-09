@@ -16,43 +16,40 @@ pub mod quantization_ffi;
 
 use crate::dlpack;
 
-/// Copy data from a `BorrowedTensor` (DLPack capsule view) into an owned
-/// Rust allocation.  Used by the autograd and dropout FFI wrappers.
+/// Copy data from a `BorrowedTensor` into an owned allocation.
+/// Handles non-contiguous (strided) views via gather; contiguous fast-path memcpys.
 pub(crate) unsafe fn capsule_to_owned(view: &dlpack::BorrowedTensor) -> dlpack::OwnedTensor {
     let n = dlpack::elem_count(&view.shape);
-    let mut owned = dlpack::OwnedTensor::new(view.dtype, view.shape.clone());
-    match view.dtype {
-        dlpack::DType::F32 => {
-            let src = std::slice::from_raw_parts(view.data as *const f32, n);
-            let dst = std::slice::from_raw_parts_mut(owned.data.as_mut_ptr() as *mut f32, n);
-            dst.copy_from_slice(src);
+    let mut owned = dlpack::OwnedTensor::new(view.dtype, view.shape.to_vec());
+    if n == 0 {
+        return owned;
+    }
+    if view.is_contiguous() {
+        let bytes = n * view.dtype.elem_size();
+        std::ptr::copy_nonoverlapping(
+            view.data,
+            owned.data.as_mut_ptr() as *mut u8,
+            bytes,
+        );
+        return owned;
+    }
+    let ndim = view.shape.len();
+    let elem = view.dtype.elem_size();
+    let mut idx = vec![0i64; ndim];
+    for out_off in 0..n {
+        let mut rem = out_off;
+        for d in (0..ndim).rev() {
+            let dim = view.shape[d].max(1) as usize;
+            idx[d] = (rem % dim) as i64;
+            rem /= dim;
         }
-        dlpack::DType::F64 => {
-            let src = std::slice::from_raw_parts(view.data as *const f64, n);
-            let dst = std::slice::from_raw_parts_mut(owned.data.as_mut_ptr() as *mut f64, n);
-            dst.copy_from_slice(src);
+        let mut phys: i64 = 0;
+        for d in 0..ndim {
+            phys += idx[d] * view.strides[d];
         }
-        dlpack::DType::I64 => {
-            let src = std::slice::from_raw_parts(view.data as *const i64, n);
-            let dst = std::slice::from_raw_parts_mut(owned.data.as_mut_ptr() as *mut i64, n);
-            dst.copy_from_slice(src);
-        }
-        dlpack::DType::I32 => {
-            let src = std::slice::from_raw_parts(view.data as *const i32, n);
-            let dst = std::slice::from_raw_parts_mut(owned.data.as_mut_ptr() as *mut i32, n);
-            dst.copy_from_slice(src);
-        }
-        dlpack::DType::F16 | dlpack::DType::BF16 => {
-            // F16/BF16 are 2-byte types — copy as raw u16
-            let src = std::slice::from_raw_parts(view.data as *const u16, n);
-            let dst = std::slice::from_raw_parts_mut(owned.data.as_mut_ptr() as *mut u16, n);
-            dst.copy_from_slice(src);
-        }
-        dlpack::DType::I8 | dlpack::DType::U8 | dlpack::DType::Bool => {
-            let src = std::slice::from_raw_parts(view.data as *const u8, n);
-            let dst = std::slice::from_raw_parts_mut(owned.data.as_mut_ptr() as *mut u8, n);
-            dst.copy_from_slice(src);
-        }
+        let src = view.data.add((phys.max(0) as usize) * elem);
+        let dst = (owned.data.as_mut_ptr() as *mut u8).add(out_off * elem);
+        std::ptr::copy_nonoverlapping(src, dst, elem);
     }
     owned
 }

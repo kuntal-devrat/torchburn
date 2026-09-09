@@ -194,10 +194,6 @@ pub fn backward_batch(
         for (i, tid) in entry.input_ids.iter().enumerate() {
             if i < per_input.len() {
                 let mut pg = per_input[i].clone();
-                // Skip zero-valued gradients (common for unsupported ops)
-                if pg.data.iter().all(|&b| b == 0) {
-                    continue;
-                }
 
                 // Broadcast shape reduction: if the saved input had a
                 // different shape than the upstream (e.g. b=(4,) was
@@ -211,8 +207,13 @@ pub fn backward_batch(
                 }
 
                 if let Some(existing) = grads.get_mut(tid) {
-                    // In-place addition: existing += pg
+                    // Require exact element match after reduction — never
+                    // silently truncate partial grads (was n.min(p.len())).
                     let n = elem_count(&existing.shape);
+                    let m = elem_count(&pg.shape);
+                    if n != m || existing.dtype != pg.dtype {
+                        continue;
+                    }
                     match existing.dtype {
                         DType::F32 => {
                             let e = unsafe {
@@ -222,13 +223,15 @@ pub fn backward_batch(
                                 )
                             };
                             let p = unsafe {
-                                std::slice::from_raw_parts(
-                                    pg.data.as_ptr() as *const f32,
-                                    n.min(elem_count(&pg.shape)),
-                                )
+                                std::slice::from_raw_parts(pg.data.as_ptr() as *const f32, m)
                             };
-                            for j in 0..n.min(p.len()) {
-                                e[j] += p[j];
+                            if n >= 16_384 {
+                                use rayon::prelude::*;
+                                e.par_iter_mut().zip(p.par_iter()).for_each(|(x, y)| *x += *y);
+                            } else {
+                                for j in 0..n {
+                                    e[j] += p[j];
+                                }
                             }
                         }
                         DType::F64 => {
@@ -239,13 +242,15 @@ pub fn backward_batch(
                                 )
                             };
                             let p = unsafe {
-                                std::slice::from_raw_parts(
-                                    pg.data.as_ptr() as *const f64,
-                                    n.min(elem_count(&pg.shape)),
-                                )
+                                std::slice::from_raw_parts(pg.data.as_ptr() as *const f64, m)
                             };
-                            for j in 0..n.min(p.len()) {
-                                e[j] += p[j];
+                            if n >= 16_384 {
+                                use rayon::prelude::*;
+                                e.par_iter_mut().zip(p.par_iter()).for_each(|(x, y)| *x += *y);
+                            } else {
+                                for j in 0..n {
+                                    e[j] += p[j];
+                                }
                             }
                         }
                         _ => {}

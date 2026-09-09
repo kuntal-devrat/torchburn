@@ -73,42 +73,83 @@ pub fn unfold(a: &BorrowedTensor, dim: isize, size: i64, step: i64) -> PyResult<
     Ok(out)
 }
 pub fn fold(a: &BorrowedTensor, output_size: &[i64]) -> PyResult<OwnedTensor> {
-    // inverse of unfold for 1D: just reshape-like
+    // Overlap-add inverse of 1D unfold (step=1): out[i..i+size] += window[i].
+    // Falls back to prefix copy when shapes are inconsistent.
     let mut out = OwnedTensor::new(a.dtype, output_size.to_vec());
-    let ad = unsafe { typed_slice::<f32>(a) };
     let od = unsafe { typed_mut_slice::<f32>(&mut out) };
-    let n = elem_count(output_size).min(ad.len());
-    od[..n].copy_from_slice(&ad[..n]);
+    od.fill(0.0);
+    if a.shape.len() != 2 || output_size.is_empty() {
+        let ad = unsafe { typed_slice::<f32>(a) };
+        let n = elem_count(output_size).min(ad.len());
+        od[..n].copy_from_slice(&ad[..n]);
+        return Ok(out);
+    }
+    let ad = unsafe { typed_slice::<f32>(a) };
+    let n_out = a.shape[0].max(0) as usize;
+    let size = a.shape[1].max(0) as usize;
+    let l = elem_count(output_size);
+    if n_out + size - 1 == l && size > 0 {
+        for i in 0..n_out {
+            for j in 0..size {
+                od[i + j] += ad[i * size + j];
+            }
+        }
+    } else {
+        let n = l.min(ad.len());
+        od[..n].copy_from_slice(&ad[..n]);
+    }
     Ok(out)
 }
 
-// ── 4/5. grid_sample / affine_grid (nearest stub) ──
+// ── 4/5. grid_sample / affine_grid (bilinear, align_corners=False) ──
 pub fn grid_sample(input: &BorrowedTensor, grid: &BorrowedTensor) -> PyResult<OwnedTensor> {
-    // input: (N,C,H,W), grid: (N,Ho,Wo,2) -> output (N,C,Ho,Wo) nearest
+    // input: (N,C,H,W), grid: (N,Ho,Wo,2) -> output (N,C,Ho,Wo) bilinear,
+    // zeros padding, align_corners=False to match torch defaults.
     if input.shape.len() != 4 || grid.shape.len() != 4 {
         return Err(unsupported("grid_sample needs 4D"));
     }
-    let n = grid.shape[0];
-    let ho = grid.shape[1];
-    let wo = grid.shape[2];
-    let c = input.shape[1];
-    let h = input.shape[2];
-    let w = input.shape[3];
-    let mut out = OwnedTensor::new(input.dtype, vec![n, c, ho, wo]);
+    let n = grid.shape[0].max(0) as usize;
+    let ho = grid.shape[1].max(0) as usize;
+    let wo = grid.shape[2].max(0) as usize;
+    let c = input.shape[1].max(0) as usize;
+    let h = input.shape[2].max(0) as usize;
+    let w = input.shape[3].max(0) as usize;
+    if grid.shape[3] != 2 {
+        return Err(unsupported("grid last dim must be 2"));
+    }
+    let mut out = OwnedTensor::new(input.dtype, vec![n as i64, c as i64, ho as i64, wo as i64]);
     let id = unsafe { typed_slice::<f32>(input) };
     let gd = unsafe { typed_slice::<f32>(grid) };
     let od = unsafe { typed_mut_slice::<f32>(&mut out) };
-    for ni in 0..n as usize {
-        for hoi in 0..ho as usize {
-            for woi in 0..wo as usize {
-                let gx = gd[((ni * ho as usize + hoi) * wo as usize + woi) * 2];
-                let gy = gd[((ni * ho as usize + hoi) * wo as usize + woi) * 2 + 1];
-                let ix = ((gx + 1.0) / 2.0 * (w as f32 - 1.0)).clamp(0.0, w as f32 - 1.0) as usize;
-                let iy = ((gy + 1.0) / 2.0 * (h as f32 - 1.0)).clamp(0.0, h as f32 - 1.0) as usize;
-                for ci in 0..c as usize {
-                    let src = ((ni * c as usize + ci) * h as usize + iy) * w as usize + ix;
-                    let dst = ((ni * c as usize + ci) * ho as usize + hoi) * wo as usize + woi;
-                    od[dst] = id[src];
+    let at = |ni: usize, ci: usize, y: isize, x: isize| -> f32 {
+        if y < 0 || x < 0 || y >= h as isize || x >= w as isize {
+            0.0
+        } else {
+            id[((ni * c + ci) * h + y as usize) * w + x as usize]
+        }
+    };
+    for ni in 0..n {
+        for hoi in 0..ho {
+            for woi in 0..wo {
+                let gx = gd[((ni * ho + hoi) * wo + woi) * 2];
+                let gy = gd[((ni * ho + hoi) * wo + woi) * 2 + 1];
+                // align_corners=False: [-1,1] -> pixel centers
+                let xs = ((gx as f64 + 1.0) * w as f64 - 1.0) / 2.0;
+                let ys = ((gy as f64 + 1.0) * h as f64 - 1.0) / 2.0;
+                let x0 = xs.floor() as isize;
+                let y0 = ys.floor() as isize;
+                let dx = (xs - x0 as f64) as f32;
+                let dy = (ys - y0 as f64) as f32;
+                for ci in 0..c {
+                    let v00 = at(ni, ci, y0, x0);
+                    let v01 = at(ni, ci, y0, x0 + 1);
+                    let v10 = at(ni, ci, y0 + 1, x0);
+                    let v11 = at(ni, ci, y0 + 1, x0 + 1);
+                    od[((ni * c + ci) * ho + hoi) * wo + woi] =
+                        v00 * (1.0 - dx) * (1.0 - dy)
+                            + v01 * dx * (1.0 - dy)
+                            + v10 * (1.0 - dx) * dy
+                            + v11 * dx * dy;
                 }
             }
         }
@@ -116,18 +157,34 @@ pub fn grid_sample(input: &BorrowedTensor, grid: &BorrowedTensor) -> PyResult<Ow
     Ok(out)
 }
 pub fn affine_grid(theta: &BorrowedTensor, size: &[i64]) -> PyResult<OwnedTensor> {
-    // theta: (N,2,3) -> grid (N,H,W,2) stub identity
-    let n = theta.shape[0];
-    let h = size[2];
-    let w = size[3];
-    let mut out = OwnedTensor::new(DType::F32, vec![n, h, w, 2]);
+    // theta: (N,2,3) applied to base grid (align_corners=False):
+    // x = -1 + (2*wi+1)/W, y = -1 + (2*hi+1)/H; out = theta @ [x,y,1].
+    if theta.shape.len() != 3 || theta.shape[1] != 2 || theta.shape[2] != 3 {
+        return Err(unsupported("affine_grid theta must be (N,2,3)"));
+    }
+    if size.len() != 4 {
+        return Err(unsupported("affine_grid size must be [N,C,H,W]"));
+    }
+    let n = theta.shape[0].max(0) as usize;
+    let h = size[2].max(1) as usize;
+    let w = size[3].max(1) as usize;
+    let td = unsafe { typed_slice::<f32>(theta) };
+    let mut out = OwnedTensor::new(DType::F32, vec![n as i64, h as i64, w as i64, 2]);
     let od = unsafe { typed_mut_slice::<f32>(&mut out) };
-    for ni in 0..n as usize {
-        for hi in 0..h as usize {
-            for wi in 0..w as usize {
-                let base = ((ni * h as usize + hi) * w as usize + wi) * 2;
-                od[base] = (wi as f32 / w as f32) * 2.0 - 1.0;
-                od[base + 1] = (hi as f32 / h as f32) * 2.0 - 1.0;
+    for ni in 0..n {
+        let t00 = td[(ni * 2) * 3];
+        let t01 = td[(ni * 2) * 3 + 1];
+        let t02 = td[(ni * 2) * 3 + 2];
+        let t10 = td[(ni * 2 + 1) * 3];
+        let t11 = td[(ni * 2 + 1) * 3 + 1];
+        let t12 = td[(ni * 2 + 1) * 3 + 2];
+        for hi in 0..h {
+            let y = -1.0 + (2.0 * hi as f32 + 1.0) / h as f32;
+            for wi in 0..w {
+                let x = -1.0 + (2.0 * wi as f32 + 1.0) / w as f32;
+                let base = ((ni * h + hi) * w + wi) * 2;
+                od[base] = t00 * x + t01 * y + t02;
+                od[base + 1] = t10 * x + t11 * y + t12;
             }
         }
     }
@@ -442,22 +499,50 @@ pub fn index_fill(a: &BorrowedTensor, dim: isize, index: i64, value: f64) -> PyR
 // ── 19-26. bincount/unique/kthvalue/median/histogram/searchsorted/meshgrid ──
 pub fn bincount(a: &BorrowedTensor, weights: Option<&BorrowedTensor>) -> PyResult<OwnedTensor> {
     let ad = unsafe { typed_slice::<i64>(a) };
+    if ad.iter().any(|&v| v < 0) {
+        return Err(unsupported("bincount: negative values"));
+    }
     let maxv = ad.iter().max().copied().unwrap_or(0).max(0) as usize;
+    if maxv > 10_000_000 {
+        return Err(unsupported("bincount: max value too large"));
+    }
     let mut out = OwnedTensor::new(DType::I64, vec![(maxv + 1) as i64]);
     let od = unsafe { typed_mut_slice::<i64>(&mut out) };
     od.fill(0);
     if let Some(w) = weights {
-        let wd = unsafe { typed_slice::<f32>(w) };
-        for (i, &v) in ad.iter().enumerate() {
-            if v >= 0 {
-                od[v as usize] += wd[i % wd.len()] as i64;
+        let wn = elem_count(&w.shape);
+        if wn != ad.len() {
+            return Err(unsupported("bincount: weights must match input length"));
+        }
+        // Float weights accumulate then round (was truncating per-element)
+        let mut acc = vec![0.0f64; maxv + 1];
+        match w.dtype {
+            DType::F32 => {
+                let wd = unsafe { typed_slice::<f32>(w) };
+                for (i, &v) in ad.iter().enumerate() {
+                    acc[v as usize] += wd[i] as f64;
+                }
             }
+            DType::F64 => {
+                let wd = unsafe { typed_slice::<f64>(w) };
+                for (i, &v) in ad.iter().enumerate() {
+                    acc[v as usize] += wd[i];
+                }
+            }
+            DType::I64 => {
+                let wd = unsafe { typed_slice::<i64>(w) };
+                for (i, &v) in ad.iter().enumerate() {
+                    acc[v as usize] += wd[i] as f64;
+                }
+            }
+            _ => return Err(unsupported("bincount: unsupported weights dtype")),
+        }
+        for (o, &v) in od.iter_mut().zip(acc.iter()) {
+            *o = v.round() as i64;
         }
     } else {
         for &v in ad {
-            if v >= 0 {
-                od[v as usize] += 1;
-            }
+            od[v as usize] += 1;
         }
     }
     Ok(out)
@@ -465,8 +550,9 @@ pub fn bincount(a: &BorrowedTensor, weights: Option<&BorrowedTensor>) -> PyResul
 pub fn unique(a: &BorrowedTensor) -> PyResult<OwnedTensor> {
     let ad = unsafe { typed_slice::<f32>(a) };
     let mut vals = ad.to_vec();
-    vals.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    vals.dedup_by(|a, b| (*a - *b).abs() < 1e-6);
+    // Exact semantics (was abs<1e-6 fuzzy dedup, diverged from torch)
+    vals.sort_unstable_by(|x, y| x.total_cmp(y));
+    vals.dedup_by(|x, y| x.to_bits() == y.to_bits());
     let mut out = OwnedTensor::new(DType::F32, vec![vals.len() as i64]);
     let od = unsafe { typed_mut_slice::<f32>(&mut out) };
     od.copy_from_slice(&vals);
@@ -475,10 +561,17 @@ pub fn unique(a: &BorrowedTensor) -> PyResult<OwnedTensor> {
 pub fn kthvalue(a: &BorrowedTensor, k: usize) -> PyResult<OwnedTensor> {
     let mut out = OwnedTensor::new(a.dtype, vec![1]);
     let ad = unsafe { typed_slice::<f32>(a) };
-    let mut sorted = ad.to_vec();
-    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    if ad.is_empty() {
+        return Err(unsupported("kthvalue: empty input"));
+    }
+    if k >= ad.len() {
+        return Err(unsupported("kthvalue: k out of range"));
+    }
+    // O(n) select (was full O(n log n) sort)
+    let mut vals = ad.to_vec();
+    vals.select_nth_unstable_by(k, |x, y| x.total_cmp(y));
     let od = unsafe { typed_mut_slice::<f32>(&mut out) };
-    od[0] = sorted[k.min(sorted.len() - 1)];
+    od[0] = vals[k];
     Ok(out)
 }
 pub fn median(a: &BorrowedTensor) -> PyResult<OwnedTensor> {

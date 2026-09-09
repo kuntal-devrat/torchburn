@@ -170,59 +170,121 @@ pub fn isfinite(a: &BorrowedTensor) -> PyResult<OwnedTensor> {
     Ok(out)
 }
 pub fn masked_select(a: &BorrowedTensor, mask: &BorrowedTensor) -> PyResult<OwnedTensor> {
-    let n = elem_count(&a.shape);
-    let mut vals = Vec::new();
-    match mask.dtype {
-        DType::I8 | DType::U8 | DType::Bool | DType::F16 | DType::BF16 => {
-            let md = unsafe { typed_slice::<u8>(mask) };
-            match a.dtype {
-                DType::F32 => {
-                    let ad = unsafe { typed_slice::<f32>(a) };
-                    for i in 0..n.max(md.len()).min(ad.len()) {
-                        if md[i % md.len()] != 0 {
-                            vals.push(ad[i % md.len()]);
-                        }
-                    }
-                }
-                DType::F64 => {
-                    let ad = unsafe { typed_slice::<f64>(a) };
-                    let mut vals_f: Vec<f64> = Vec::new();
-                    for i in 0..n.max(md.len()).min(ad.len()) {
-                        if md[i % md.len()] != 0 {
-                            vals_f.push(ad[i % md.len()]);
-                        }
-                    }
-                    let mut out = OwnedTensor::new(DType::F64, vec![vals_f.len() as i64]);
-                    let od = unsafe { typed_mut_slice::<f64>(&mut out) };
-                    od.copy_from_slice(&vals_f);
-                    return Ok(out);
-                }
-                _ => return Err(unsupported("masked_select only f32/f64")),
-            }
-        }
-        _ => return Err(unsupported("masked_select mask must be bool")),
+    // torch.masked_select requires same numel (broadcastable mask is flattened).
+    let na = elem_count(&a.shape);
+    let nm = elem_count(&mask.shape);
+    if na != nm {
+        return Err(unsupported(&format!(
+            "masked_select shape mismatch: input {na} vs mask {nm}"
+        )));
     }
-    let mut out = OwnedTensor::new(DType::F32, vec![vals.len() as i64]);
-    let od = unsafe { typed_mut_slice::<f32>(&mut out) };
-    od.copy_from_slice(&vals);
-    Ok(out)
-}
-pub fn istft(a: &BorrowedTensor) -> PyResult<OwnedTensor> {
-    // placeholder inverse STFT: return copy
-    let mut out = OwnedTensor::new(a.dtype, a.shape.clone());
-    let n = elem_count(&a.shape);
+    let md: Vec<bool> = match mask.dtype {
+        DType::Bool | DType::U8 | DType::I8 => unsafe {
+            typed_slice::<u8>(mask).iter().map(|&x| x != 0).collect()
+        },
+        DType::F32 => unsafe {
+            typed_slice::<f32>(mask)
+                .iter()
+                .map(|&x| x != 0.0)
+                .collect()
+        },
+        DType::F64 => unsafe {
+            typed_slice::<f64>(mask)
+                .iter()
+                .map(|&x| x != 0.0)
+                .collect()
+        },
+        DType::I64 => unsafe {
+            typed_slice::<i64>(mask)
+                .iter()
+                .map(|&x| x != 0)
+                .collect()
+        },
+        DType::I32 => unsafe {
+            typed_slice::<i32>(mask)
+                .iter()
+                .map(|&x| x != 0)
+                .collect()
+        },
+        _ => return Err(unsupported("masked_select mask must be bool/int/float")),
+    };
     match a.dtype {
         DType::F32 => {
             let ad = unsafe { typed_slice::<f32>(a) };
-            let od = unsafe { typed_mut_slice::<f32>(&mut out) };
-            od.copy_from_slice(&ad[..n.min(od.len())]);
+            let vals: Vec<f32> = ad
+                .iter()
+                .zip(md.iter())
+                .filter(|(_, &m)| m)
+                .map(|(&x, _)| x)
+                .collect();
+            let mut out = OwnedTensor::new(DType::F32, vec![vals.len() as i64]);
+            unsafe { typed_mut_slice::<f32>(&mut out).copy_from_slice(&vals) };
+            Ok(out)
         }
         DType::F64 => {
             let ad = unsafe { typed_slice::<f64>(a) };
-            let od = unsafe { typed_mut_slice::<f64>(&mut out) };
-            od.copy_from_slice(&ad[..n.min(od.len())]);
+            let vals: Vec<f64> = ad
+                .iter()
+                .zip(md.iter())
+                .filter(|(_, &m)| m)
+                .map(|(&x, _)| x)
+                .collect();
+            let mut out = OwnedTensor::new(DType::F64, vec![vals.len() as i64]);
+            unsafe { typed_mut_slice::<f64>(&mut out).copy_from_slice(&vals) };
+            Ok(out)
         }
-        _ => return Err(unsupported("istft only f32/f64")),
+        _ => Err(unsupported("masked_select only f32/f64")),
+    }
+}
+pub fn istft(a: &BorrowedTensor) -> PyResult<OwnedTensor> {
+    // Real overlap-add inverse DFT matching `stft` above:
+    // input [F,T,2] complex with F = n_fft/2+1 -> output length
+    // (T-1)*hop + n_fft with hop = n_fft/4 (torch default).
+    if a.shape.len() != 3 || a.shape[2] != 2 {
+        return Err(unsupported("istft expects [F,T,2] complex"));
+    }
+    if a.dtype != DType::F32 {
+        return Err(unsupported("istft only f32"));
+    }
+    let n_freqs = a.shape[0].max(0) as usize;
+    let n_frames = a.shape[1].max(0) as usize;
+    if n_freqs == 0 || n_frames == 0 {
+        return Err(unsupported("istft: empty"));
+    }
+    let n_fft = (n_freqs - 1) * 2;
+    let hop = (n_fft / 4).max(1);
+    let len = (n_frames - 1) * hop + n_fft;
+    let ad = unsafe { typed_slice::<f32>(a) };
+    let mut out = OwnedTensor::new(DType::F32, vec![len as i64]);
+    let od = unsafe { typed_mut_slice::<f32>(&mut out) };
+    od.fill(0.0);
+    let mut wsum = vec![0.0f32; len];
+    for f in 0..n_frames {
+        // IDFT of frame f into temp buffer
+        for t in 0..n_fft {
+            let mut s = 0.0f32;
+            for k in 0..n_freqs {
+                let idx = (k * n_frames + f) * 2;
+                let re = ad[idx];
+                let im = ad[idx + 1];
+                // Reconstruct full spectrum symmetry: k and N-k conjugate.
+                // For k=0 and k=n_fft/2 the bin is real-only in RFFT.
+                let angle =
+                    2.0 * std::f64::consts::PI * (k * t) as f64 / n_fft as f64;
+                let (c, sn) = (angle.cos() as f32, angle.sin() as f32);
+                let w = if k == 0 || k == n_freqs - 1 { 1.0 } else { 2.0 };
+                s += w * (re * c - im * sn);
+            }
+            s /= n_fft as f32;
+            let pos = f * hop + t;
+            od[pos] += s;
+            wsum[pos] += 1.0;
+        }
+    }
+    for i in 0..len {
+        if wsum[i] > 0.0 {
+            od[i] /= wsum[i];
+        }
     }
     Ok(out)
 }

@@ -289,6 +289,9 @@ pub struct WgpuInt4Context {
     /// software/CPU adapters. Shaders that use `subgroupAdd` etc. are only
     /// compiled and dispatched when this is true.
     pub has_subgroups: bool,
+    /// Whether PIPELINE_CACHE was granted at device creation. Pipeline cache
+    /// creation panics without it, so decoder pipelines must check this flag.
+    pub has_pipeline_cache: bool,
 }
 
 #[cfg(feature = "burn-wgpu")]
@@ -361,16 +364,27 @@ pub fn get_wgpu_int4_context() -> Option<&'static WgpuInt4Context> {
             ..Default::default()
         };
 
-        // Probe for subgroup support — available on Vulkan/Metal/DX12 GPU
-        // adapters but not on software/CPU fallbacks.
+        // Probe for subgroup + pipeline-cache support — available on
+        // Vulkan/Metal/DX12 GPU adapters but not on software/CPU fallbacks.
+        // PIPELINE_CACHE must be requested at device creation or every
+        // create_pipeline_cache call panics with Validation Error.
         let has_subgroups = adapter
             .features()
             .contains(wgpu::Features::SUBGROUP);
-        let optional_features = if has_subgroups {
-            wgpu::Features::SUBGROUP
-        } else {
-            wgpu::Features::empty()
-        };
+        let has_pipeline_cache = adapter.features().contains(
+            wgpu::Features::from_bits_retain(
+                wgpu::Features::PIPELINE_CACHE.bits(),
+            ),
+        );
+        let mut optional_features = wgpu::Features::empty();
+        if has_subgroups {
+            optional_features |= wgpu::Features::SUBGROUP;
+        }
+        if has_pipeline_cache {
+            optional_features |= wgpu::Features::from_bits_retain(
+                wgpu::Features::PIPELINE_CACHE.bits(),
+            );
+        }
 
         let (device, queue) = block_on(adapter.request_device(
             &wgpu::DeviceDescriptor {
@@ -471,6 +485,7 @@ pub fn get_wgpu_int4_context() -> Option<&'static WgpuInt4Context> {
             bind_group_layout,
             rows_per_wg,
             has_subgroups,
+            has_pipeline_cache,
         })
     }).as_ref()
 }

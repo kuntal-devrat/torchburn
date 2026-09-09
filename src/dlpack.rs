@@ -267,6 +267,12 @@ impl BorrowedTensor {
                     dl.device.device_type
                 )));
             }
+            if dl.dtype.lanes != 1 {
+                return Err(unsupported(&format!(
+                    "vector lanes != 1 (lanes={})",
+                    dl.dtype.lanes
+                )));
+            }
             let dtype = match (dl.dtype.code, dl.dtype.bits) {
                 (DL_DTYPE_FLOAT, 16) => DType::F16,
                 (DL_DTYPE_BFLOAT, 16) => DType::BF16,
@@ -306,7 +312,11 @@ impl BorrowedTensor {
             let strides: Vec<i64> = if dl.strides.is_null() {
                 contiguous_strides(&shape)
             } else {
-                std::slice::from_raw_parts(dl.strides, ndim).to_vec()
+                let s = std::slice::from_raw_parts(dl.strides, ndim).to_vec();
+                if s.iter().any(|&x| x < 0) {
+                    return Err(unsupported("negative strides not supported"));
+                }
+                s
             };
             let is_empty = elem_count(&shape) == 0;
             let data = if is_empty {

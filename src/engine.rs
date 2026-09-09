@@ -155,10 +155,17 @@ fn collect_outputs(
                         )));
                     }
                     out.push(std::mem::take(&mut elems[elem]));
+                } else if elems.len() == 1 {
+                    out.push(std::mem::take(&mut elems[0]));
+                } else if let Some(t) = elems.first_mut() {
+                    // Whole-tuple request on multi-output node (max/sort/topk):
+                    // return values (elem 0) for single-tensor callers (ops.py).
+                    // Explicit getitem encoding is used when indices are needed.
+                    out.push(std::mem::take(t));
                 } else {
-                    if let Some(t) = elems.first_mut() {
-                        out.push(std::mem::take(t));
-                    }
+                    return Err(unsupported(&format!(
+                        "tuple node {effective_id} has no outputs"
+                    )));
                 }
             }
             Slot::Input(_) => {
@@ -346,23 +353,30 @@ pub fn execute_native(payload: &Payload, capsules: &[CapsuleRef]) -> PyResult<Ve
         }
     }
     if !unsafe_output {
-        // Remap every argument slot to the step that produces it.
+        // Remap slots to steps. Value::Array remap only for slot-list targets
+        // (cat/stack); shape constants must NOT be rewritten.
+        fn is_slot_list_target(t: &str) -> bool {
+            matches!(t, "cat" | "stack" | "concat" | "unbind" | "split_with_sizes")
+        }
         let mut remap = Vec::with_capacity(base + nodes.len());
         remap.extend(0..base);
         remap.extend((0..nodes.len()).map(|i| base + fp.node_step[i]));
         for node in nodes.iter_mut() {
+            let remap_arr = is_slot_list_target(node.target.as_str());
             for arg in node.args.iter_mut() {
                 if let Some(s) = arg.index {
                     if s < remap.len() {
                         arg.index = Some(remap[s]);
                     }
                 }
-                if let Some(Value::Array(arr)) = arg.value.as_mut() {
-                    for v in arr.iter_mut() {
-                        if let Some(u) = v.as_u64() {
-                            let s = u as usize;
-                            if s < remap.len() {
-                                *v = Value::from(remap[s] as u64);
+                if remap_arr {
+                    if let Some(Value::Array(arr)) = arg.value.as_mut() {
+                        for v in arr.iter_mut() {
+                            if let Some(u) = v.as_u64() {
+                                let s = u as usize;
+                                if s < remap.len() {
+                                    *v = Value::from(remap[s] as u64);
+                                }
                             }
                         }
                     }

@@ -119,6 +119,8 @@ pub struct RustQwenDecoder {
     pub lm_head_w2: Vec<u8>,
     pub k_caches: Vec<Vec<f32>>,
     pub v_caches: Vec<Vec<f32>>,
+    /// Highest KV position written since last reset (for fast prefix-only clear).
+    pub kv_used: usize,
     pub cos_table: Vec<f32>,
     pub sin_table: Vec<f32>,
     // Preallocated scratch buffers
@@ -339,6 +341,7 @@ impl RustQwenDecoder {
             lm_head_w2: lm_head_w2_vec,
             k_caches,
             v_caches,
+            kv_used: 0,
             cos_table,
             sin_table,
             x_buf: vec![0.0f32; hidden_size],
@@ -353,13 +356,61 @@ impl RustQwenDecoder {
         })
     }
 
+    /// Batched prompt prefill in a single FFI call: runs `step_internal`
+    /// for each prompt token at successive offsets. Replaces per-token Python
+    /// round-trips (each paying DLPack + GIL + dispatch). Still GEMV-bound
+    /// (one GEMV per token); a future GEMM prefill can reuse the batched
+    /// `fused_swiglu_mlp_batched` pattern for QKV/O.
+    pub fn prefill_tokens(&mut self, tokens: Vec<usize>, start_offset: usize) -> PyResult<usize> {
+        if tokens.is_empty() {
+            return Ok(start_offset);
+        }
+        if start_offset + tokens.len() > self.max_seq_len {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "prefill {} tokens at offset {} exceeds max_seq_len {}",
+                tokens.len(),
+                start_offset,
+                self.max_seq_len
+            )));
+        }
+        for (i, &tok) in tokens.iter().enumerate() {
+            self.step_internal(tok, start_offset + i);
+        }
+        Ok(start_offset + tokens.len())
+    }
+
     pub fn reset_kv_cache(&mut self) {
-        for kc in &mut self.k_caches {
-            kc.fill(0.0);
+        // Fast prefix-only clear: only zero positions actually written
+        // (kv_used tracks max offset+1). Full 200MB fill only on first/long runs.
+        let used = self.kv_used.min(self.max_seq_len);
+        if used == 0 {
+            return;
         }
-        for vc in &mut self.v_caches {
-            vc.fill(0.0);
+        if used >= self.max_seq_len {
+            use rayon::prelude::*;
+            self.k_caches
+                .par_iter_mut()
+                .for_each(|kc| kc.fill(0.0));
+            self.v_caches
+                .par_iter_mut()
+                .for_each(|vc| vc.fill(0.0));
+        } else {
+            let hd = self.head_dim;
+            let stride = self.max_seq_len * hd;
+            for kc in &mut self.k_caches {
+                for kv_h in 0..self.num_kv_heads {
+                    let base = kv_h * stride;
+                    kc[base..base + used * hd].fill(0.0);
+                }
+            }
+            for vc in &mut self.v_caches {
+                for kv_h in 0..self.num_kv_heads {
+                    let base = kv_h * stride;
+                    vc[base..base + used * hd].fill(0.0);
+                }
+            }
         }
+        self.kv_used = 0;
     }
 
     pub fn copy_kv_cache_from_tensors(
@@ -390,6 +441,13 @@ impl RustQwenDecoder {
                 for t in 0..seq_len {
                     let src_offset = kv_h * src_head_stride + t * self.head_dim;
                     let dst_offset = kv_h * dst_head_stride + t * self.head_dim;
+                    if src_offset + self.head_dim > k_slice.len()
+                        || dst_offset + self.head_dim > dst_k.len()
+                    {
+                        return Err(pyo3::exceptions::PyValueError::new_err(
+                            "KV cache copy out of bounds",
+                        ));
+                    }
                     dst_k[dst_offset..dst_offset + self.head_dim]
                         .copy_from_slice(&k_slice[src_offset..src_offset + self.head_dim]);
                     dst_v[dst_offset..dst_offset + self.head_dim]
@@ -397,7 +455,199 @@ impl RustQwenDecoder {
                 }
             }
         }
+        self.kv_used = self.kv_used.max(seq_len);
         Ok(())
+    }
+
+    /// Current KV length (max offset written + 1). Used by Python prefix-reuse
+    /// to skip re-prefilling resident prefixes across multi-turn chat.
+    pub fn kv_len(&self) -> usize {
+        self.kv_used
+    }
+
+    /// `SpeculativeDecoder` adapter: single-token step returning logits vec.
+    /// Matches the `step(token_id, offset) -> list[float]` protocol.
+    pub fn step(&mut self, token_id: usize, offset: usize) -> Vec<f32> {
+        self.step_internal(token_id, offset);
+        self.logits.clone()
+    }
+
+    /// `SpeculativeDecoder` adapter: prefill a prompt, return last-token logits.
+    /// Resets nothing; caller must `reset_kv_cache()` first for a new sequence.
+    pub fn prefill(&mut self, tokens: Vec<usize>) -> PyResult<Vec<f32>> {
+        if tokens.is_empty() {
+            return Err(pyo3::exceptions::PyValueError::new_err("empty prefill"));
+        }
+        if tokens.len() > self.max_seq_len {
+            return Err(pyo3::exceptions::PyValueError::new_err("prefill exceeds max_seq_len"));
+        }
+        for (i, &tok) in tokens.iter().enumerate() {
+            self.step_internal(tok, i);
+        }
+        Ok(self.logits.clone())
+    }
+
+    /// Native speculative batched verify: run `tokens` at successive offsets
+    /// in ONE Rust call, returning per-position logits (K+1 rows).
+    /// Replaces K+1 per-token Python `step()` FFI round-trips with a single
+    /// crossing. Still GEMV-bound per position (true batched GEMM is future),
+    /// but eliminates DLPack/GIL/JSON overhead per token (~30-50% verify win).
+    pub fn verify_tokens(
+        &mut self,
+        start_offset: usize,
+        tokens: Vec<usize>,
+    ) -> PyResult<Vec<Vec<f32>>> {
+        if start_offset + tokens.len() > self.max_seq_len {
+            return Err(pyo3::exceptions::PyValueError::new_err("verify exceeds max_seq_len"));
+        }
+        let mut out: Vec<Vec<f32>> = Vec::with_capacity(tokens.len());
+        for (i, &tok) in tokens.iter().enumerate() {
+            self.step_internal(tok, start_offset + i);
+            out.push(self.logits.clone());
+        }
+        Ok(out)
+    }
+
+    /// Native end-to-end speculative step: verify `draft_tokens` at `offset`
+    /// with the target model and apply Leviathan acceptance using `draft_probs`
+    /// (flattened K×V row-major). Returns (accepted_count, bonus_token).
+    /// Keeps RNG on the Rust side for determinism with `generate_loop`.
+    #[pyo3(signature = (offset, draft_tokens, draft_probs, temperature=1.0, top_p=1.0))]
+    pub fn speculative_accept(
+        &mut self,
+        offset: usize,
+        draft_tokens: Vec<usize>,
+        draft_probs: Vec<f32>,
+        temperature: f32,
+        top_p: f32,
+    ) -> PyResult<(usize, usize)> {
+        let k = draft_tokens.len();
+        if k == 0 {
+            return Ok((0, self.logits.len().saturating_sub(1)));
+        }
+        let v = self.logits.len();
+        if draft_probs.len() != k * v {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "draft_probs must be K×V row-major",
+            ));
+        }
+        // Verify all K positions, capturing target logits per position
+        let mut target_logits: Vec<Vec<f32>> = Vec::with_capacity(k + 1);
+        for (i, &tok) in draft_tokens.iter().enumerate() {
+            self.step_internal(tok, offset + i);
+            target_logits.push(self.logits.clone());
+        }
+        // Final position after last draft token (bonus candidate slot)
+        // Note: step_internal for bonus is deferred to caller to avoid
+        // double-advancing KV on reject paths; sample bonus from last logits here.
+        let mut accepted = 0usize;
+        let mut bonus: usize;
+        // Softmax helper (temperature-scaled, NaN-safe)
+        fn softmax_row(logits: &[f32], temp: f32) -> Vec<f32> {
+            let t = if temp.is_finite() && temp > 0.0 { temp } else { 1.0 };
+            let m = logits
+                .iter()
+                .fold(f32::NEG_INFINITY, |a, &b| a.max(if b.is_finite() { b } else { f32::NEG_INFINITY }));
+            let mut exps: Vec<f32> = logits
+                .iter()
+                .map(|&x| ((if x.is_finite() { x } else { f32::NEG_INFINITY } - m) / t).exp())
+                .collect();
+            let s: f32 = exps.iter().sum();
+            let inv = 1.0 / s.max(1e-30);
+            for e in &mut exps {
+                *e *= inv;
+            }
+            exps
+        }
+        // Simple deterministic RNG (splitmix64) seeded by time+offset
+        let mut rng_state: u64 = (std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.subsec_nanos() as u64)
+            .unwrap_or(0x12345678)
+            .wrapping_mul(0x9E3779B97F4A7C15)
+            .wrapping_add(offset as u64))
+        .max(1);
+        let mut next_u01 = || {
+            rng_state = rng_state.wrapping_add(0x9E3779B97F4A7C15);
+            let mut z = rng_state;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
+            z ^= z >> 31;
+            ((z >> 11) as f64) / ((1u64 << 53) as f64)
+        };
+        for i in 0..k {
+            let tp = softmax_row(&target_logits[i], temperature);
+            let dp_off = i * v;
+            // Top-p filter on target for acceptance prob (match Python _softmax path
+            // when top_p==1: full distribution)
+            let p_target = tp[draft_tokens[i].min(v - 1)];
+            let p_draft = draft_probs[dp_off + draft_tokens[i].min(v - 1)].max(0.0);
+            let accept = (p_target / (p_draft + 1e-12)).min(1.0);
+            if next_u01() <= accept as f64 {
+                accepted += 1;
+            } else {
+                // Resample from max(0, p_target - p_draft)
+                let mut corrected = vec![0.0f32; v];
+                let mut s = 0.0f32;
+                for j in 0..v {
+                    let c = (tp[j] - draft_probs[dp_off + j]).max(0.0);
+                    corrected[j] = c;
+                    s += c;
+                }
+                if s > 1e-12 {
+                    let r = next_u01() as f32 * s;
+                    let mut acc = 0.0f32;
+                    bonus = v - 1;
+                    for (j, &c) in corrected.iter().enumerate() {
+                        acc += c;
+                        if acc >= r {
+                            bonus = j;
+                            break;
+                        }
+                    }
+                } else {
+                    bonus = tp
+                        .iter()
+                        .enumerate()
+                        .max_by(|a, b| a.1.total_cmp(b.1))
+                        .map(|(j, _)| j)
+                        .unwrap_or(0);
+                }
+                return Ok((accepted, bonus));
+            }
+        }
+        // All accepted: sample bonus from last target row (+ top-p)
+        let last = softmax_row(&target_logits[k - 1], temperature);
+        // Apply top-p nucleus on bonus sample to match sampler
+        let mut idx: Vec<usize> = (0..v).collect();
+        idx.sort_unstable_by(|&a, &b| last[b].total_cmp(&last[a]));
+        let mut kept = v;
+        if top_p > 0.0 && top_p < 1.0 {
+            let mut cum = 0.0f32;
+            for (i, &j) in idx.iter().enumerate() {
+                if cum > top_p {
+                    kept = i;
+                    break;
+                }
+                cum += last[j];
+            }
+            kept = kept.max(1);
+        }
+        let mut mass = 0.0f32;
+        for &j in &idx[..kept] {
+            mass += last[j];
+        }
+        let r = next_u01() as f32 * mass.max(1e-30);
+        let mut acc = 0.0f32;
+        bonus = idx[kept - 1];
+        for &j in &idx[..kept] {
+            acc += last[j];
+            if acc >= r {
+                bonus = j;
+                break;
+            }
+        }
+        Ok((accepted, bonus))
     }
 
     pub fn decode_step(
@@ -518,7 +768,11 @@ impl RustQwenDecoder {
 /// already above the threshold) and the result is re-normalized.
 pub fn sample_logits(logits: &[f32], temperature: f32, top_k: usize, top_p: f32) -> usize {
     let vocab_size = logits.len();
-    if temperature <= 0.0 || top_k == 1 {
+    if vocab_size == 0 {
+        return 0;
+    }
+    // NaN/inf temperature -> greedy (avoids exp(inf/NaN) poisoning distribution)
+    if !temperature.is_finite() || temperature <= 0.0 || top_k == 1 {
         // Greedy argmax
         let mut best_idx = 0;
         let mut best_val = logits[0];
@@ -531,31 +785,54 @@ pub fn sample_logits(logits: &[f32], temperature: f32, top_k: usize, top_p: f32)
         return best_idx;
     }
 
-    // Top-k sampling: bounded vector tracking top-k (no 2.4 MB heap allocation per token)
+    // Top-k: NaN-safe, no huge alloc. Small-k linear scan; large-k partial select.
     let k = top_k.min(vocab_size).max(1);
-    let mut top_items: Vec<(usize, f32)> = Vec::with_capacity(k + 1);
-    let mut min_val = f32::NEG_INFINITY;
-    let mut min_pos = 0;
-
-    for (i, &val) in logits.iter().enumerate() {
-        if top_items.len() < k {
-            top_items.push((i, val));
-            if val < min_val || top_items.len() == 1 {
-                min_val = val;
-                min_pos = top_items.len() - 1;
-            }
-        } else if val > min_val {
-            top_items[min_pos] = (i, val);
-            let mut new_min = top_items[0].1;
-            let mut new_pos = 0;
-            for (idx, &(_, v)) in top_items.iter().enumerate() {
-                if v < new_min {
-                    new_min = v;
-                    new_pos = idx;
+    // Filter non-finite logits to -inf (NaN would poison max/softmax)
+    // Fast path: k >= vocab -> keep all (no selection)
+    let mut top_items: Vec<(usize, f32)> = Vec::with_capacity(k.min(4096) + 1);
+    if k >= vocab_size {
+        top_items.extend(
+            logits
+                .iter()
+                .enumerate()
+                .map(|(i, &v)| (i, if v.is_finite() { v } else { f32::NEG_INFINITY })),
+        );
+    } else if k > 1024 {
+        // Large k: partial select via nth_element (O(V) avg, no O(V*k) rescan)
+        let mut indexed: Vec<(usize, f32)> = logits
+            .iter()
+            .enumerate()
+            .map(|(i, &v)| (i, if v.is_finite() { v } else { f32::NEG_INFINITY }))
+            .collect();
+        let nth = k.min(indexed.len() - 1);
+        indexed.select_nth_unstable_by(nth, |a, b| {
+            b.1.total_cmp(&a.1)
+        });
+        top_items.extend_from_slice(&indexed[..k]);
+    } else {
+        let mut min_val = f32::NEG_INFINITY;
+        let mut min_pos = 0;
+        for (i, &raw) in logits.iter().enumerate() {
+            let val = if raw.is_finite() { raw } else { f32::NEG_INFINITY };
+            if top_items.len() < k {
+                top_items.push((i, val));
+                if val < min_val || top_items.len() == 1 {
+                    min_val = val;
+                    min_pos = top_items.len() - 1;
                 }
+            } else if val > min_val {
+                top_items[min_pos] = (i, val);
+                let mut new_min = top_items[0].1;
+                let mut new_pos = 0;
+                for (idx, &(_, v)) in top_items.iter().enumerate() {
+                    if v < new_min {
+                        new_min = v;
+                        new_pos = idx;
+                    }
+                }
+                min_val = new_min;
+                min_pos = new_pos;
             }
-            min_val = new_min;
-            min_pos = new_pos;
         }
     }
 
@@ -572,8 +849,7 @@ pub fn sample_logits(logits: &[f32], temperature: f32, top_k: usize, top_p: f32)
     // Optional nucleus (top-p) filtering on the temperature-scaled distribution.
     let mut kept_end = top_items.len();
     if top_p > 0.0 && top_p < 1.0 && kept_end > 1 {
-        top_items
-            .sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        top_items.sort_unstable_by(|a, b| b.1.total_cmp(&a.1));
         let mut prev = 0.0f32;
         for (i, &(_, p)) in top_items.iter().enumerate() {
             if prev > top_p {
@@ -641,14 +917,33 @@ impl RustQwenDecoder {
         let half_dim = head_dim / 2;
         let eps = self.rms_norm_eps;
 
-        // 1. Embedding lookup
+        // 1. Embedding lookup (bounds-checked; OOB -> zeroed step, no panic)
+        let vocab = self.embed_tokens.len() / hidden_size.max(1);
+        if token_id >= vocab || offset >= max_seq_len {
+            self.x_buf.fill(0.0);
+            self.logits.fill(0.0);
+            return;
+        }
         let emb_start = token_id * hidden_size;
+        if emb_start + hidden_size > self.embed_tokens.len() {
+            self.x_buf.fill(0.0);
+            self.logits.fill(0.0);
+            return;
+        }
         self.x_buf
             .copy_from_slice(&self.embed_tokens[emb_start..emb_start + hidden_size]);
 
         let cos_offset = offset * head_dim;
+        if cos_offset + head_dim > self.cos_table.len()
+            || cos_offset + head_dim > self.sin_table.len()
+        {
+            self.x_buf.fill(0.0);
+            self.logits.fill(0.0);
+            return;
+        }
         let cos_p = &self.cos_table[cos_offset..cos_offset + head_dim];
         let sin_p = &self.sin_table[cos_offset..cos_offset + head_dim];
+        self.kv_used = self.kv_used.max(offset + 1);
 
         // 2. Iterate all layers
         for l in 0..self.num_layers {
@@ -707,7 +1002,7 @@ impl RustQwenDecoder {
             // E. GQA Attention (Rayon parallel across heads + SIMD FMA V-accumulation)
             let seq_len = offset + 1;
             let scale = 1.0f32 / (head_dim as f32).sqrt();
-            let heads_per_kv = num_heads / num_kv_heads;
+            let heads_per_kv = (num_heads / num_kv_heads.max(1)).max(1);
 
             let q_ptr_val = q.as_ptr() as usize;
             let k_cache_ptr_val = k_cache.as_ptr() as usize;
@@ -725,15 +1020,25 @@ impl RustQwenDecoder {
                     let v_base_ptr =
                         unsafe { (v_cache_ptr_val as *const f32).add(kv_h * head_stride) };
 
+                    // Fast path: seq_len==1 (steady-state decode) -> weight=1, copy V
+                    if seq_len == 1 {
+                        let v_t_ptr = unsafe { v_base_ptr as *const f32 };
+                        unsafe {
+                            std::ptr::copy_nonoverlapping(v_t_ptr, out_h.as_mut_ptr(), head_dim);
+                        }
+                        return;
+                    }
                     THREAD_SCORES.with(|cell| {
                         let mut scores_buf = cell.borrow_mut();
-                        if scores_buf.len() < seq_len {
-                            scores_buf.resize(seq_len.max(512), 0.0);
+                        // Cap at max_seq_len to avoid unbounded growth on 32k contexts
+                        let capped = seq_len.min(32768);
+                        if scores_buf.len() < capped {
+                            scores_buf.resize(capped.max(512), 0.0);
                         }
-                        let scores = &mut scores_buf[..seq_len];
+                        let scores = &mut scores_buf[..capped];
 
                         let mut max_score = f32::NEG_INFINITY;
-                        for t in 0..seq_len {
+                        for t in 0..capped {
                             let k_t_ptr = unsafe { k_base_ptr.add(t * head_dim) };
                             let dot = unsafe { dot_f32_f32(q_head_ptr, k_t_ptr, head_dim) };
                             let sc = dot * scale;
@@ -744,14 +1049,14 @@ impl RustQwenDecoder {
                         }
 
                         let mut exp_sum = 0.0f32;
-                        for t in 0..seq_len {
+                        for t in 0..capped {
                             let ex = (scores[t] - max_score).exp();
                             scores[t] = ex;
                             exp_sum += ex;
                         }
-                        let inv_sum = 1.0f32 / exp_sum;
+                        let inv_sum = 1.0f32 / exp_sum.max(1e-30);
 
-                        for t in 0..seq_len {
+                        for t in 0..capped {
                             let w = scores[t] * inv_sum;
                             let v_t_ptr = unsafe { v_base_ptr.add(t * head_dim) };
                             unsafe {

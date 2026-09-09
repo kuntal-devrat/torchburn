@@ -160,9 +160,9 @@ impl std::fmt::Display for CudaError {
 impl std::error::Error for CudaError {}
 
 impl CudaBackend {
-    /// Check if CUDA is available at runtime.
+    /// Check if CUDA is available at runtime (cached; no fresh probe leak).
     pub fn is_available() -> bool {
-        CudaDevice::new(0).is_ok()
+        Self::get_device().is_ok()
     }
 
     /// Get or initialize the CUDA device singleton.
@@ -170,9 +170,20 @@ impl CudaBackend {
     /// `OnceLock::get_or_try_init` is avoided (unstable on some toolchains);
     /// the `Result` is stored in the cell so init failure is sticky and
     /// reported on every call without re-probing.
+    fn device_id() -> usize {
+        // Single-device today; TORCHBURN_CUDA_DEVICE selects id for future
+        // multi-GPU (NCCL tensor-parallel). Falls back to 0 on parse failure.
+        std::env::var("TORCHBURN_CUDA_DEVICE")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(0)
+    }
+
     fn get_device() -> Result<&'static Arc<CudaDevice>, CudaError> {
         CUDA_DEVICE
-            .get_or_init(|| CudaDevice::new(0).map_err(|e| e.to_string()))
+            .get_or_init(|| {
+                CudaDevice::new(Self::device_id()).map_err(|e| e.to_string())
+            })
             .as_ref()
             .map_err(|e| CudaError::InitFailed(e.clone()))
     }

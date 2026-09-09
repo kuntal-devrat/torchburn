@@ -380,14 +380,26 @@ pub fn topk(
     dim: isize,
     largest: bool,
 ) -> PyResult<(OwnedTensor, OwnedTensor)> {
-    let dim = if dim < 0 {
-        (input.shape.len() as isize + dim) as usize
-    } else {
-        dim as usize
-    };
+    if input.shape.is_empty() {
+        return Err(unsupported("topk: scalar input"));
+    }
+    let ndim = input.shape.len() as isize;
+    let dim = if dim < 0 { ndim + dim } else { dim };
+    if dim < 0 || dim >= ndim {
+        return Err(unsupported("topk: dim out of range"));
+    }
+    let dim = dim as usize;
     let _n = elem_count(&input.shape);
-    let dim_size = input.shape[dim] as usize;
+    let dim_size = input.shape[dim].max(0) as usize;
 
+    if k == 0 {
+        let mut out_shape = input.shape.clone();
+        out_shape[dim] = 0;
+        return Ok((
+            OwnedTensor::new(input.dtype, out_shape.clone()),
+            OwnedTensor::new(DType::I64, out_shape),
+        ));
+    }
     if k > dim_size {
         return Err(unsupported(&format!(
             "topk: k={} > dim_size={}",
@@ -423,7 +435,7 @@ pub fn topk(
 
             for o in 0..outer {
                 for i in 0..inner {
-                    // Collect (value, original_index) pairs along the dim
+                    // O(n) select + O(k log k) sort (was full O(n log n) sort)
                     let mut pairs: Vec<(f32, i64)> = (0..dim_size)
                         .map(|d| {
                             let idx = o * dim_size * inner + d * inner + i;
@@ -431,14 +443,25 @@ pub fn topk(
                         })
                         .collect();
 
-                    if largest {
-                        pairs.sort_by(|a, b| {
-                            b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal)
-                        });
+                    if k < dim_size {
+                        let nth = k - 1;
+                        if largest {
+                            pairs.select_nth_unstable_by(nth, |a, b| {
+                                b.0.total_cmp(&a.0)
+                            });
+                            let (top, _) = pairs.split_at_mut(k);
+                            top.sort_unstable_by(|a, b| b.0.total_cmp(&a.0));
+                        } else {
+                            pairs.select_nth_unstable_by(nth, |a, b| {
+                                a.0.total_cmp(&b.0)
+                            });
+                            let (top, _) = pairs.split_at_mut(k);
+                            top.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
+                        }
+                    } else if largest {
+                        pairs.sort_unstable_by(|a, b| b.0.total_cmp(&a.0));
                     } else {
-                        pairs.sort_by(|a, b| {
-                            a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal)
-                        });
+                        pairs.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
                     }
 
                     for ki in 0..k {
@@ -477,14 +500,25 @@ pub fn topk(
                         })
                         .collect();
 
-                    if largest {
-                        pairs.sort_by(|a, b| {
-                            b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal)
-                        });
+                    if k < dim_size {
+                        let nth = k - 1;
+                        if largest {
+                            pairs.select_nth_unstable_by(nth, |a, b| {
+                                b.0.total_cmp(&a.0)
+                            });
+                            let (top, _) = pairs.split_at_mut(k);
+                            top.sort_unstable_by(|a, b| b.0.total_cmp(&a.0));
+                        } else {
+                            pairs.select_nth_unstable_by(nth, |a, b| {
+                                a.0.total_cmp(&b.0)
+                            });
+                            let (top, _) = pairs.split_at_mut(k);
+                            top.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
+                        }
+                    } else if largest {
+                        pairs.sort_unstable_by(|a, b| b.0.total_cmp(&a.0));
                     } else {
-                        pairs.sort_by(|a, b| {
-                            a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal)
-                        });
+                        pairs.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
                     }
 
                     for ki in 0..k {

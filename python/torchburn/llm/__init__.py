@@ -7,6 +7,7 @@ from .loader import ModelLoader, resolve_hf_token
 from .engine import UniversalEngine
 from .api import LLM
 from .cli import main as cli_main
+from .speculative import SpeculativeDecoder, BatchedDecoder
 
 __all__ = [
     "LLM",
@@ -18,6 +19,8 @@ __all__ = [
     "UniversalTokenizer",
     "ModelLoader",
     "UniversalEngine",
+    "SpeculativeDecoder",
+    "BatchedDecoder",
     "resolve_hf_token",
     "cli_main",
 ]

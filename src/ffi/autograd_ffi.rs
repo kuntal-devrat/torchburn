@@ -29,24 +29,15 @@ pub fn autograd_backward(
     grad_output: &Bound<'_, PyCapsule>,
 ) -> PyResult<Vec<(usize, Py<PyCapsule>)>> {
     let grad_view = unsafe { dlpack::BorrowedTensor::from_capsule(grad_output)? };
-    let upstream = unsafe {
-        let n = dlpack::elem_count(&grad_view.shape);
-        let mut owned = dlpack::OwnedTensor::new(grad_view.dtype, grad_view.shape.clone());
-        match grad_view.dtype {
-            dlpack::DType::F32 => {
-                let src = std::slice::from_raw_parts(grad_view.data as *const f32, n);
-                let dst = std::slice::from_raw_parts_mut(owned.data.as_mut_ptr() as *mut f32, n);
-                dst.copy_from_slice(src);
-            }
-            dlpack::DType::F64 => {
-                let src = std::slice::from_raw_parts(grad_view.data as *const f64, n);
-                let dst = std::slice::from_raw_parts_mut(owned.data.as_mut_ptr() as *mut f64, n);
-                dst.copy_from_slice(src);
-            }
-            _ => {}
+    match grad_view.dtype {
+        dlpack::DType::F32 | dlpack::DType::F64 => {},
+        _ => {
+            return Err(crate::dlpack::unsupported(
+                "autograd_backward only supports f32/f64 upstream",
+            ))
         }
-        owned
-    };
+    }
+    let upstream = unsafe { super::capsule_to_owned(&grad_view) };
 
     let mut leaf_grads = std::collections::HashMap::new();
     py.allow_threads(|| crate::autograd::backward(&upstream, &mut leaf_grads));
@@ -77,26 +68,17 @@ pub fn backward_native(
     grad_output: &Bound<'_, PyCapsule>,
 ) -> PyResult<Vec<(usize, Py<PyCapsule>)>> {
     let grad_view = unsafe { dlpack::BorrowedTensor::from_capsule(grad_output)? };
-    let upstream = unsafe {
-        let n = dlpack::elem_count(&grad_view.shape);
-        let mut owned = dlpack::OwnedTensor::new(grad_view.dtype, grad_view.shape.clone());
-        match grad_view.dtype {
-            dlpack::DType::F32 => {
-                let src = std::slice::from_raw_parts(grad_view.data as *const f32, n);
-                let dst = std::slice::from_raw_parts_mut(owned.data.as_mut_ptr() as *mut f32, n);
-                dst.copy_from_slice(src);
-            }
-            dlpack::DType::F64 => {
-                let src = std::slice::from_raw_parts(grad_view.data as *const f64, n);
-                let dst = std::slice::from_raw_parts_mut(owned.data.as_mut_ptr() as *mut f64, n);
-                dst.copy_from_slice(src);
-            }
-            _ => {}
+    match grad_view.dtype {
+        dlpack::DType::F32 | dlpack::DType::F64 => {},
+        _ => {
+            return Err(crate::dlpack::unsupported(
+                "backward_native only supports f32/f64 upstream",
+            ))
         }
-        owned
-    };
+    }
+    let upstream = unsafe { super::capsule_to_owned(&grad_view) };
 
-    let grads = crate::autograd::backward_native(&upstream);
+    let grads = py.allow_threads(|| crate::autograd::backward_native(&upstream));
     let mut result = Vec::new();
     for (id, owned) in grads {
         let cap = dlpack::owned_to_capsule_owned(py, owned)?;
@@ -116,27 +98,25 @@ pub fn backward_single(
     kwargs_json: &str,
 ) -> PyResult<Vec<Py<PyCapsule>>> {
     let grad_view = unsafe { dlpack::BorrowedTensor::from_capsule(grad_output)? };
-    let upstream = unsafe {
-        let n = dlpack::elem_count(&grad_view.shape);
-        let mut owned = dlpack::OwnedTensor::new(grad_view.dtype, grad_view.shape.clone());
-        match grad_view.dtype {
-            dlpack::DType::F32 => {
-                let src = std::slice::from_raw_parts(grad_view.data as *const f32, n);
-                let dst = std::slice::from_raw_parts_mut(owned.data.as_mut_ptr() as *mut f32, n);
-                dst.copy_from_slice(src);
-            }
-            dlpack::DType::F64 => {
-                let src = std::slice::from_raw_parts(grad_view.data as *const f64, n);
-                let dst = std::slice::from_raw_parts_mut(owned.data.as_mut_ptr() as *mut f64, n);
-                dst.copy_from_slice(src);
-            }
-            _ => {}
+    match grad_view.dtype {
+        dlpack::DType::F32 | dlpack::DType::F64 => {},
+        _ => {
+            return Err(crate::dlpack::unsupported(
+                "backward_single only supports f32/f64 upstream",
+            ))
         }
-        owned
-    };
+    }
+    if grad_view.shape.iter().any(|&d| d < 0) {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "negative dim in upstream shape",
+        ));
+    }
+    let upstream = unsafe { super::capsule_to_owned(&grad_view) };
 
     let kwargs: std::collections::HashMap<String, serde_json::Value> =
-        serde_json::from_str(kwargs_json).unwrap_or_default();
+        serde_json::from_str(kwargs_json).map_err(|e| {
+            pyo3::exceptions::PyValueError::new_err(format!("invalid kwargs_json: {e}"))
+        })?;
 
     let saved_owned: Vec<dlpack::OwnedTensor> = saved_inputs
         .iter()
@@ -147,7 +127,8 @@ pub fn backward_single(
         .collect::<PyResult<_>>()?;
     let saved_refs: Vec<&dlpack::OwnedTensor> = saved_owned.iter().collect();
 
-    let grads = crate::autograd::backward_single(target, &upstream, &saved_refs, &kwargs);
+    let grads =
+        py.allow_threads(|| crate::autograd::backward_single(target, &upstream, &saved_refs, &kwargs));
     let mut result = Vec::new();
     for owned in grads {
         result.push(dlpack::owned_to_capsule_owned(py, owned)?);
@@ -180,6 +161,15 @@ pub fn backward_batch(
     let init_owned = unsafe { super::capsule_to_owned(&init_view) };
 
     // 2. Build batch tape entries (all capsule->OwnedTensor conversions here)
+    if !(targets.len() == all_kwargs.len()
+        && targets.len() == output_ids.len()
+        && targets.len() == input_ids_all.len()
+        && targets.len() == all_inputs.len())
+    {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "backward_batch: targets/kwargs/ids/inputs length mismatch",
+        ));
+    }
     let mut tape = Vec::with_capacity(targets.len());
     for i in 0..targets.len() {
         // Saved input capsules -> Vec<OwnedTensor>
@@ -190,20 +180,35 @@ pub fn backward_batch(
         }
 
         let kwargs: std::collections::HashMap<String, serde_json::Value> =
-            serde_json::from_str(&all_kwargs[i]).unwrap_or_default();
+            serde_json::from_str(&all_kwargs[i]).map_err(|e| {
+                pyo3::exceptions::PyValueError::new_err(format!(
+                    "invalid kwargs_json[{}]: {e}",
+                    i
+                ))
+            })?;
 
+        let saved_shapes = saved_shapes_all.get(i).cloned().unwrap_or_default();
+        if saved_shapes.len() != saved_owned.len() {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "backward_batch[{}]: saved_shapes len {} != inputs len {}",
+                i,
+                saved_shapes.len(),
+                saved_owned.len()
+            )));
+        }
         tape.push(crate::autograd::BatchTapeEntry {
             target: targets[i].clone(),
             saved_inputs: saved_owned,
             kwargs,
             output_id: output_ids[i],
             input_ids: input_ids_all[i].clone(),
-            saved_shapes: saved_shapes_all.get(i).cloned().unwrap_or_default(),
+            saved_shapes,
         });
     }
 
-    // 3. Run batch backward -- zero FFI overhead per op
-    let grads = crate::autograd::backward_batch(&tape, &init_owned, initial_output_id);
+    // 3. Run batch backward -- zero FFI overhead per op (GIL released)
+    let grads =
+        py.allow_threads(|| crate::autograd::backward_batch(&tape, &init_owned, initial_output_id));
 
     // 4. Convert accumulated grads -> DLPack capsules (zero-copy)
     let mut result = Vec::with_capacity(grads.len());

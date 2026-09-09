@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.2] - 2026-09-09
+
+### Changed
+- **Two-wheel distribution model.** PyPI hosts `torchburn` (one binary per
+  OS — Windows/Linux/macOS x86_64+arm64; covers CPU + WGPU/Metal/iGPU/dGPU
+  via runtime dispatch) and `torchburn-cuda` (CUDA-toolkit builds, NVIDIA
+  only). pip picks the right OS wheel automatically; users opt into
+  CUDA via `pip install torchburn-cuda`.
+- **Explicit device selection.** `TORCHBURN_DEVICE=cuda` (or `--device cuda`)
+  now raises a clear `RuntimeError` on a non-CUDA wheel, instead of silently
+  falling back to CPU/iGPU. `metal` likewise requires macOS/iOS.
+- **Auto-detect ladder:** `cuda` (torchburn-cuda only) → `metal` (macOS) →
+  `igpu` (WGPU) → `cpu`. `TORCHBURN_DEVICE` env var overrides config.
+
+### Fixed
+- **Engine device dispatch** (`llm/engine.py`): `cuda`/`metal` selected via
+  the env var now reach the corresponding backend init instead of being
+  silently swallowed by the `igpu/dgpu/cuda` env-write branch.
+- **CLI choices** (`llm/cli.py`): `--device` now exposes `cuda` and `metal`
+  with help text pointing at the matching wheel.
+- **Config docstring** (`llm/config.py`): documents the full `auto|cpu|igpu|dgpu|gpu|cuda|metal` set.
+
 ## [0.6.1] - 2026-09-08
 
 ### Added

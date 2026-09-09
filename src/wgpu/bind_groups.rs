@@ -59,8 +59,21 @@ pub(crate) fn create_and_upload_storage_buffer(
         usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
-    queue.write_buffer(&buf, 0, data);
+    write_buffer_chunked(queue, &buf, data);
     buf
+}
+
+/// Chunked host->GPU upload: single `write_buffer` of >64-256MB exceeds the
+/// staging limit on D3D12/Vulkan (the 540MB embed table panicked with
+/// "Not enough memory left"). 16MB chunks stay under all known limits.
+pub(crate) fn write_buffer_chunked(queue: &wgpu::Queue, buf: &wgpu::Buffer, data: &[u8]) {
+    const CHUNK: usize = 16 * 1024 * 1024;
+    let mut off = 0usize;
+    while off < data.len() {
+        let end = (off + CHUNK).min(data.len());
+        queue.write_buffer(buf, off as u64, &data[off..end]);
+        off = end;
+    }
 }
 
 pub(crate) fn create_uniform_buffer(

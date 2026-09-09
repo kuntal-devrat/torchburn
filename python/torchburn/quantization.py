@@ -569,11 +569,24 @@ def create_rust_qwen_decoder(model: nn.Module, max_seq_len: int = 4096) -> Any:
 
 
 def create_wgpu_qwen_decoder(model: nn.Module, max_seq_len: int = 2048) -> Any:
-    """Instantiate zero-Python end-to-end WgpuQwenDecoder for GPU (Vulkan/Metal/DX12)."""
+    """Instantiate zero-Python end-to-end WgpuQwenDecoder for GPU (Vulkan/Metal/DX12).
+
+    OOM-safe: embed tables >64MB stay on CPU by default
+    (``TORCHBURN_WGPU_EMBED=cpu|gpu|auto``); wgpu validation panics are mapped
+    to ``MemoryError`` with a CPU-fallback hint instead of ``PanicException``.
+    """
+    import os as _os
     from . import _torchburn as _native
 
     if not hasattr(_native, "WgpuQwenDecoder"):
         raise RuntimeError("WgpuQwenDecoder requires torchburn compiled with the 'burn-wgpu' feature.")
+    # Default to CPU-side embeddings (540MB table blows D3D12/Vulkan staging).
+    _os.environ.setdefault("TORCHBURN_WGPU_EMBED", "cpu")
+    if max_seq_len > 4096:
+        raise MemoryError(
+            f"max_seq_len={max_seq_len} too large for iGPU shared memory; "
+            "use max_seq_len<=2048 or the CPU Rust decoder."
+        )
 
     embed_tokens_cap = torch.to_dlpack(model.embed_tokens.weight.detach().cpu().contiguous().float())
     final_norm_cap = torch.to_dlpack(model.norm.weight.detach().cpu().contiguous().float())
@@ -604,23 +617,36 @@ def create_wgpu_qwen_decoder(model: nn.Module, max_seq_len: int = 2048) -> Any:
         layers_caps.append(caps)
 
     cfg = model.config
-    decoder = _native.WgpuQwenDecoder(
-        embed_tokens_cap,
-        layers_caps,
-        final_norm_cap,
-        lm_head_w_cap,
-        lm_head_s_cap,
-        len(model.layers),
-        cfg.hidden_size,
-        cfg.intermediate_size,
-        cfg.num_attention_heads,
-        cfg.num_key_value_heads,
-        cfg.head_dim,
-        64,
-        cfg.rms_norm_eps,
-        max_seq_len,
-        cfg.rope_theta,
-    )
+    try:
+        decoder = _native.WgpuQwenDecoder(
+            embed_tokens_cap,
+            layers_caps,
+            final_norm_cap,
+            lm_head_w_cap,
+            lm_head_s_cap,
+            len(model.layers),
+            cfg.hidden_size,
+            cfg.intermediate_size,
+            cfg.num_attention_heads,
+            cfg.num_key_value_heads,
+            cfg.head_dim,
+            64,
+            cfg.rms_norm_eps,
+            max_seq_len,
+            cfg.rope_theta,
+        )
+    except BaseException as e:
+        # wgpu raises PanicException on staging/OOM validation; map to MemoryError
+        # with an actionable fallback instead of crashing the interpreter.
+        msg = f"{type(e).__name__}: {e}"
+        if "memory" in msg.lower() or "PanicException" in type(e).__name__ or "wgpu" in msg.lower():
+            raise MemoryError(
+                "WGPU decoder OOM (likely 540MB embed upload or KV caches). "
+                "Fallback: use create_rust_qwen_decoder (CPU) or set "
+                "TORCHBURN_WGPU_EMBED=cpu and max_seq_len<=2048. "
+                f"Underlying: {msg}"
+            ) from e
+        raise
     return decoder
 
 

@@ -1067,6 +1067,9 @@ pub fn run_chain(
 /// every leaf is contiguous (Identity) or a scalar (Scalar), and every op is
 /// lane-wise (bit-identical per element to `apply_unary`/`apply_binary`).
 fn chain_f32_lane_eligible(rexprs: &[RExpr], leaves: &[LeafInfo]) -> bool {
+    if rexprs.is_empty() || rexprs.len() > 32 {
+        return false;
+    }
     leaves
         .iter()
         .all(|l| !matches!(l.map, LeafMap::General { .. }))
@@ -1134,7 +1137,10 @@ fn run_chunk_f32_lanes(
     chunk: &mut [f32],
 ) {
     let n_exprs = rexprs.len();
-    debug_assert!(n_exprs <= 32, "chain lane pass supports up to 32 exprs");
+    if n_exprs > 32 {
+        run_chunk_single_pass(rexprs, leaves, leaf_data, start, chunk);
+        return;
+    }
     let mut vals = [wide::f32x8::ZERO; 32];
     let n_groups = chunk.len() / 8;
     let mut off = 0usize;
@@ -1142,11 +1148,23 @@ fn run_chunk_f32_lanes(
         let f = start + off;
         for (k, e) in rexprs.iter().enumerate() {
             let av = match e.a {
-                RArg::Chain(m) => vals[m],
-                RArg::Leaf(li) => match leaves[li].map {
-                    LeafMap::Identity => wide::f32x8::new(copy8(&leaf_data[li][f..])),
-                    LeafMap::Scalar => wide::f32x8::splat(leaf_data[li][0]),
-                    _ => unsafe { std::hint::unreachable_unchecked() },
+                RArg::Chain(m) => vals[m.min(31)],
+                RArg::Leaf(li) => match leaves.get(li).map(|l| &l.map) {
+                    Some(LeafMap::Identity) => {
+                        if let Some(s) = leaf_data.get(li) {
+                            if f + 8 <= s.len() {
+                                wide::f32x8::new(copy8(&s[f..]))
+                            } else {
+                                wide::f32x8::ZERO
+                            }
+                        } else {
+                            wide::f32x8::ZERO
+                        }
+                    }
+                    Some(LeafMap::Scalar) => wide::f32x8::splat(
+                        leaf_data.get(li).map(|s| s[0]).unwrap_or(0.0),
+                    ),
+                    _ => wide::f32x8::ZERO,
                 },
             };
             let v = match e.op {
@@ -1155,15 +1173,27 @@ fn run_chunk_f32_lanes(
                         .blend(av, wide::f32x8::ZERO),
                     UnaryKind::Abs => av.abs(),
                     UnaryKind::Neg => av * wide::f32x8::splat(-1.0),
-                    _ => unsafe { std::hint::unreachable_unchecked() },
+                    _ => av,
                 },
                 ChainOp::Binary(b) => {
                     let bv = match e.b.expect("binary op has second operand") {
-                        RArg::Chain(m) => vals[m],
-                        RArg::Leaf(li) => match leaves[li].map {
-                            LeafMap::Identity => wide::f32x8::new(copy8(&leaf_data[li][f..])),
-                            LeafMap::Scalar => wide::f32x8::splat(leaf_data[li][0]),
-                            _ => unsafe { std::hint::unreachable_unchecked() },
+                        RArg::Chain(m) => vals[m.min(31)],
+                        RArg::Leaf(li) => match leaves.get(li).map(|l| &l.map) {
+                            Some(LeafMap::Identity) => {
+                                if let Some(s) = leaf_data.get(li) {
+                                    if f + 8 <= s.len() {
+                                        wide::f32x8::new(copy8(&s[f..]))
+                                    } else {
+                                        wide::f32x8::ZERO
+                                    }
+                                } else {
+                                    wide::f32x8::ZERO
+                                }
+                            }
+                            Some(LeafMap::Scalar) => wide::f32x8::splat(
+                                leaf_data.get(li).map(|s| s[0]).unwrap_or(0.0),
+                            ),
+                            _ => wide::f32x8::ZERO,
                         },
                     };
                     match b {
@@ -1380,22 +1410,22 @@ fn run_chunk_single_pass<T: Fp>(
             let mut vals = [T::ZERO; 32];
             for (k, e) in rexprs.iter().enumerate() {
                 let av = match e.a {
-                    RArg::Chain(m) => vals[m],
-                    RArg::Leaf(li) => match leaves[li].map {
-                        LeafMap::Identity => leaf_data[li][f],
-                        LeafMap::Scalar => leaf_data[li][0],
-                        _ => unsafe { std::hint::unreachable_unchecked() },
+                    RArg::Chain(m) => vals[m.min(31)],
+                    RArg::Leaf(li) => match leaves.get(li).map(|l| &l.map) {
+                        Some(LeafMap::Identity) => leaf_data.get(li).and_then(|s| s.get(f)).copied().unwrap_or(T::ZERO),
+                        Some(LeafMap::Scalar) => leaf_data.get(li).and_then(|s| s.first()).copied().unwrap_or(T::ZERO),
+                        _ => T::ZERO,
                     },
                 };
                 let v = match e.op {
                     ChainOp::Unary(u) => apply_unary(u, av, e.params),
                     ChainOp::Binary(b) => {
                         let bv = match e.b.expect("binary op has second operand") {
-                            RArg::Chain(m) => vals[m],
-                            RArg::Leaf(li) => match leaves[li].map {
-                                LeafMap::Identity => leaf_data[li][f],
-                                LeafMap::Scalar => leaf_data[li][0],
-                                _ => unsafe { std::hint::unreachable_unchecked() },
+                            RArg::Chain(m) => vals[m.min(31)],
+                            RArg::Leaf(li) => match leaves.get(li).map(|l| &l.map) {
+                                Some(LeafMap::Identity) => leaf_data.get(li).and_then(|s| s.get(f)).copied().unwrap_or(T::ZERO),
+                                Some(LeafMap::Scalar) => leaf_data.get(li).and_then(|s| s.first()).copied().unwrap_or(T::ZERO),
+                                _ => T::ZERO,
                             },
                         };
                         apply_binary(b, av, bv)
@@ -1411,22 +1441,22 @@ fn run_chunk_single_pass<T: Fp>(
             let f = start + off;
             for (k, e) in rexprs.iter().enumerate() {
                 let av = match e.a {
-                    RArg::Chain(m) => vals[m],
-                    RArg::Leaf(li) => match leaves[li].map {
-                        LeafMap::Identity => leaf_data[li][f],
-                        LeafMap::Scalar => leaf_data[li][0],
-                        _ => unsafe { std::hint::unreachable_unchecked() },
+                    RArg::Chain(m) => vals[m.min(vals.len() - 1)],
+                    RArg::Leaf(li) => match leaves.get(li).map(|l| &l.map) {
+                        Some(LeafMap::Identity) => leaf_data.get(li).and_then(|s| s.get(f)).copied().unwrap_or(T::ZERO),
+                        Some(LeafMap::Scalar) => leaf_data.get(li).and_then(|s| s.first()).copied().unwrap_or(T::ZERO),
+                        _ => T::ZERO,
                     },
                 };
                 let v = match e.op {
                     ChainOp::Unary(u) => apply_unary(u, av, e.params),
                     ChainOp::Binary(b) => {
                         let bv = match e.b.expect("binary op has second operand") {
-                            RArg::Chain(m) => vals[m],
-                            RArg::Leaf(li) => match leaves[li].map {
-                                LeafMap::Identity => leaf_data[li][f],
-                                LeafMap::Scalar => leaf_data[li][0],
-                                _ => unsafe { std::hint::unreachable_unchecked() },
+                            RArg::Chain(m) => vals[m.min(vals.len() - 1)],
+                            RArg::Leaf(li) => match leaves.get(li).map(|l| &l.map) {
+                                Some(LeafMap::Identity) => leaf_data.get(li).and_then(|s| s.get(f)).copied().unwrap_or(T::ZERO),
+                                Some(LeafMap::Scalar) => leaf_data.get(li).and_then(|s| s.first()).copied().unwrap_or(T::ZERO),
+                                _ => T::ZERO,
                             },
                         };
                         apply_binary(b, av, bv)

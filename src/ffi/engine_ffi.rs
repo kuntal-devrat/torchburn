@@ -74,7 +74,7 @@ pub fn rayon_threads() -> usize {
 }
 
 /// Dropout forward pass: apply dropout mask and return output capsule.
-/// If training=false, returns input unchanged.
+/// If training=false, returns input unchanged (still a copy for capsule ownership).
 #[pyfunction]
 pub fn dropout_forward(
     py: Python<'_>,
@@ -82,42 +82,99 @@ pub fn dropout_forward(
     p: f64,
     training: bool,
 ) -> PyResult<Py<PyCapsule>> {
-    let view = unsafe { dlpack::BorrowedTensor::from_capsule(input)? };
-    if !training || p == 0.0 {
+    use dlpack::DType;
+    if !training || p <= 0.0 {
+        let view = unsafe { dlpack::BorrowedTensor::from_capsule(input)? };
         let owned = unsafe { super::capsule_to_owned(&view) };
         return dlpack::owned_to_capsule_owned(py, owned);
     }
-    let n = dlpack::elem_count(&view.shape);
-    let mut out = unsafe { dlpack::OwnedTensor::new(view.dtype, view.shape.clone()) };
-    let scale = 1.0 / (1.0 - p);
-
-    use dlpack::DType;
+    if !(0.0..1.0).contains(&p) || !p.is_finite() {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "dropout p must be in [0,1), got {p}"
+        )));
+    }
+    let view = unsafe { dlpack::BorrowedTensor::from_capsule(input)? };
     match view.dtype {
-        DType::F32 => {
-            let src = unsafe { std::slice::from_raw_parts(view.data as *const f32, n) };
-            let dst =
-                unsafe { std::slice::from_raw_parts_mut(out.data.as_mut_ptr() as *mut f32, n) };
-            for i in 0..n {
-                let keep: bool = rand::random::<f64>() >= p;
-                dst[i] = if keep { src[i] * scale as f32 } else { 0.0 };
-            }
-        }
-        DType::F64 => {
-            let src = unsafe { std::slice::from_raw_parts(view.data as *const f64, n) };
-            let dst =
-                unsafe { std::slice::from_raw_parts_mut(out.data.as_mut_ptr() as *mut f64, n) };
-            for i in 0..n {
-                let keep: bool = rand::random::<f64>() >= p;
-                dst[i] = if keep { src[i] * scale } else { 0.0 };
-            }
-        }
+        DType::F32 | DType::F64 => {},
         _ => {
-            return Err(pyo3::exceptions::PyRuntimeError::new_err(
+            // TB_UNSUPPORTED so the Python interpreter can fallback cleanly
+            return Err(crate::dlpack::unsupported(
                 "dropout only supports f32/f64",
             ));
         }
     }
-
+    let dtype = view.dtype;
+    let shape = view.shape.to_vec();
+    // Clone into owned src (handles strided) on GIL, compute off GIL
+    let src_owned = unsafe { super::capsule_to_owned(&view) };
+    let out = py.allow_threads(move || {
+        use rayon::prelude::*;
+        #[inline(always)]
+        fn splitmix64(state: &mut u64) -> u64 {
+            *state = state.wrapping_add(0x9E3779B97F4A7C15);
+            let mut z = *state;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
+            z ^ (z >> 31)
+        }
+        #[inline(always)]
+        fn next_f64(state: &mut u64) -> f64 {
+            // 53-bit uniform in [0,1)
+            const DIV: f64 = (1u64 << 53) as f64;
+            ((splitmix64(state) >> 11) as f64) / DIV
+        }
+        let n = dlpack::elem_count(&shape);
+        let mut out = dlpack::OwnedTensor::new(dtype, shape);
+        let scale = 1.0 / (1.0 - p);
+        let seed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.subsec_nanos() as u64 ^ (n as u64).wrapping_mul(0x9E3779B97F4A7C15))
+            .unwrap_or(0x1234_5678_9ABC_DEF0);
+        match dtype {
+            DType::F32 => {
+                let src = unsafe {
+                    std::slice::from_raw_parts(src_owned.data.as_ptr() as *const f32, n)
+                };
+                let dst = unsafe {
+                    std::slice::from_raw_parts_mut(out.data.as_mut_ptr() as *mut f32, n)
+                };
+                dst.par_chunks_mut(16_384)
+                    .enumerate()
+                    .for_each(|(ci, chunk)| {
+                        let mut st = seed.wrapping_add(ci as u64 * 0x9E3779B9).max(1);
+                        let base = ci * 16_384;
+                        for (j, d) in chunk.iter_mut().enumerate() {
+                            let keep = next_f64(&mut st) >= p;
+                            *d = if keep {
+                                src[base + j] * scale as f32
+                            } else {
+                                0.0
+                            };
+                        }
+                    });
+            }
+            DType::F64 => {
+                let src = unsafe {
+                    std::slice::from_raw_parts(src_owned.data.as_ptr() as *const f64, n)
+                };
+                let dst = unsafe {
+                    std::slice::from_raw_parts_mut(out.data.as_mut_ptr() as *mut f64, n)
+                };
+                dst.par_chunks_mut(16_384)
+                    .enumerate()
+                    .for_each(|(ci, chunk)| {
+                        let mut st = seed.wrapping_add(ci as u64 * 0x9E3779B9).max(1);
+                        let base = ci * 16_384;
+                        for (j, d) in chunk.iter_mut().enumerate() {
+                            let keep = next_f64(&mut st) >= p;
+                            *d = if keep { src[base + j] * scale } else { 0.0 };
+                        }
+                    });
+            }
+            _ => unreachable!(),
+        }
+        out
+    });
     dlpack::owned_to_capsule_owned(py, out)
 }
 

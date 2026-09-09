@@ -42,13 +42,15 @@ pub struct WgpuQwenDecoder {
     pub max_seq_len: usize,
     #[pyo3(get)]
     pub rows_per_wg: u32,
-    // The full token-embedding table lives **on the GPU** as a persistent storage
-    // buffer, uploaded once at construction time. Each decode step writes only a
-    // single 4-byte token-id into `token_id_buf`; a small WGSL compute shader
-    // (`embed_lookup.wgsl`) then copies the correct row into `x_buf` as the very
-    // first dispatch of the model graph, eliminating the per-token 3.5 KB
-    // host→GPU write_buffer that was the dominant iGPU bottleneck.
+    // Token-embedding table: GPU-resident only when small or explicitly
+    // requested. The 151936×896×4 ≈ 540MB table exceeds D3D12/Vulkan staging
+    // limits ("Not enough memory left") and wastes iGPU shared RAM, so tables
+    // >64MB default to CPU lookup + 3.5KB `x_buf` write per token.
+    // `TORCHBURN_WGPU_EMBED=cpu|gpu|auto` overrides (auto = size heuristic).
     pub(crate) embed_table_buf: wgpu::Buffer,
+    /// Host copy used when `use_gpu_embed == false`.
+    pub(crate) embed_cpu: Option<Vec<f32>>,
+    pub(crate) use_gpu_embed: bool,
     /// 4-byte uniform: the token id written per step (replaces the old 3.5 KB copy).
     pub(crate) token_id_buf: wgpu::Buffer,
     /// Uniform params for embed_lookup shader: [vocab_size, hidden_size, 0, 0].
@@ -197,12 +199,15 @@ impl WgpuQwenDecoder {
                 timestamp_writes: None,
             });
 
-            // Step 0: GPU-side embedding lookup — reads token_id_buf, writes x_buf.
-            // This replaces the old 3.5 KB host write_buffer per token.
-            cpass.set_pipeline(&self.pipelines.embed_lookup_pipeline);
-            cpass.set_bind_group(0, &self.bg_embed_lookup, &[]);
-            let embed_wgs = (self.hidden_size as u32 + 255) / 256;
-            cpass.dispatch_workgroups(embed_wgs, 1, 1);
+            // Step 0: embedding lookup. GPU path reads token_id_buf via shader;
+            // CPU path (large tables) skips the shader — x_buf was filled by
+            // the host 3.5KB write in record_and_submit_step.
+            if self.use_gpu_embed {
+                cpass.set_pipeline(&self.pipelines.embed_lookup_pipeline);
+                cpass.set_bind_group(0, &self.bg_embed_lookup, &[]);
+                let embed_wgs = (self.hidden_size as u32 + 255) / 256;
+                cpass.dispatch_workgroups(embed_wgs, 1, 1);
+            }
 
             // Layer 0 starts with RMSNorm on x_buf (populated by embed lookup above)
             cpass.set_pipeline(&self.pipelines.rmsnorm_pipeline);
@@ -308,20 +313,43 @@ impl WgpuQwenDecoder {
         })?;
         let rows_per_wg = ctx.rows_per_wg;
         let has_subgroups = ctx.has_subgroups;
+        let use_pipeline_cache = ctx.has_pipeline_cache;
         let device = Arc::new(ctx.device.clone());
         let queue = Arc::new(ctx.queue.clone());
-        let pipelines = Arc::new(WgpuPipelines::new(&device, rows_per_wg, has_subgroups));
+        let pipelines = Arc::new(WgpuPipelines::new(
+            &device,
+            rows_per_wg,
+            has_subgroups,
+            use_pipeline_cache,
+        ));
 
         let emb_view = unsafe { dlpack::BorrowedTensor::from_capsule(embed_tokens)? };
         let vocab_size = emb_view.shape[0] as usize;
         let emb_slice = unsafe { typed_slice::<f32>(&emb_view) };
-        // Upload the entire embedding table to GPU once. For a 0.5B model with
-        // hidden_size=896 this is 151K*896*4 ≈ 540 MB — but for small models
-        // (e.g. Qwen-0.5B, vocab=151936, hidden=896) it is only ~540 MB.
-        // We upload regardless: the iGPU shares system RAM, so VRAM cost is zero.
-        let embed_table_buf = create_and_upload_storage_buffer(&device, &queue, unsafe {
-            std::slice::from_raw_parts(emb_slice.as_ptr() as *const u8, emb_slice.len() * 4)
-        });
+        // OOM fix: 151936×896×4 ≈ 540MB in ONE write_buffer exceeds the
+        // D3D12/Vulkan staging limit. Tables >64MB default to CPU-side lookup
+        // (3.5KB x_buf write per token); GPU table only for small vocabs or
+        // TORCHBURN_WGPU_EMBED=gpu. Chunked upload covers the GPU path.
+        let embed_bytes = emb_slice.len() * 4;
+        let embed_mode = std::env::var("TORCHBURN_WGPU_EMBED")
+            .map(|s| s.to_lowercase())
+            .unwrap_or_else(|_| "auto".to_string());
+        let use_gpu_embed = match embed_mode.as_str() {
+            "gpu" => true,
+            "cpu" => false,
+            _ => embed_bytes <= 64 * 1024 * 1024,
+        };
+        let (embed_table_buf, embed_cpu): (wgpu::Buffer, Option<Vec<f32>>) = if use_gpu_embed {
+            let buf = create_and_upload_storage_buffer(&device, &queue, unsafe {
+                std::slice::from_raw_parts(emb_slice.as_ptr() as *const u8, emb_slice.len() * 4)
+            });
+            (buf, None)
+        } else {
+            // Dummy 16-byte buffer keeps the embed bind-group valid; the
+            // shader is skipped and x_buf is filled from host instead.
+            let buf = create_storage_buffer(&device, 16, true);
+            (buf, Some(emb_slice.to_vec()))
+        };
 
         let q_dim = num_heads * head_dim;
         let kv_dim = num_kv_heads * head_dim;
@@ -554,6 +582,8 @@ impl WgpuQwenDecoder {
             max_seq_len,
             rows_per_wg,
             embed_table_buf,
+            embed_cpu,
+            use_gpu_embed,
             token_id_buf,
             embed_lookup_params_buf,
             bg_embed_lookup,
@@ -589,6 +619,23 @@ impl WgpuQwenDecoder {
     /// Returns the ring slot the logits were copied into.
     fn record_and_submit_step(&mut self, token_id: usize, offset: usize) -> PyResult<usize> {
         self.write_token_inputs(token_id, offset);
+        // CPU-embed path: host lookup + 3.5KB x_buf upload (no 540MB table).
+        if !self.use_gpu_embed {
+            if let Some(ref table) = self.embed_cpu {
+                let hs = self.hidden_size;
+                let start = token_id.saturating_mul(hs);
+                if start + hs > table.len() {
+                    return Err(pyo3::exceptions::PyValueError::new_err("token_id OOB"));
+                }
+                let bytes = unsafe {
+                    std::slice::from_raw_parts(
+                        table[start..start + hs].as_ptr() as *const u8,
+                        hs * 4,
+                    )
+                };
+                crate::wgpu::bind_groups::write_buffer_chunked(&self.queue, &self.x_buf, bytes);
+            }
+        }
 
         let vocab_size = self.vocab_size;
         let slot = self.staging_ring_idx % self.staging_bufs.len();

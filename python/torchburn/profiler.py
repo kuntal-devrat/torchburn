@@ -200,7 +200,7 @@ def clear_memory_pool() -> None:
 
 
 def trace(model, example_inputs, **kwargs) -> dict[str, Any]:
-    """Generate a Chrome trace JSON for a model (stub for ROADMAP 15.5).
+    """Generate a Chrome trace JSON for a model.
 
     Returns a dict with `traceEvents` that can be loaded in `chrome://tracing`
     or `perfetto`. Currently profiles the native execution via `profile()`.

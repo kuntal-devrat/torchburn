@@ -103,7 +103,11 @@ pub(crate) fn record(op: Box<dyn BackwardOp>, output_ids: &[usize], input_ids: &
 }
 
 /// Save tensor data so the backward pass can read it later.
+/// No-op when tape disabled (prevents unbounded growth if user forgets backward).
 pub fn save_data(id: usize, data: &OwnedTensor) {
+    if !is_enabled() {
+        return;
+    }
     SAVED_DATA.with(|s| {
         // Leak a clone of the data.  The clone is freed when the tape is consumed.
         // If an old entry exists for the same id, free it to avoid leak.
@@ -120,26 +124,51 @@ pub fn save_data(id: usize, data: &OwnedTensor) {
 
 /// Save borrowed tensor data by cloning it into a leaked owned tensor.
 pub fn save_borrowed(id: usize, data: &BorrowedTensor) {
+    if !is_enabled() {
+        return;
+    }
     let owned = unsafe { owned_from_borrowed(data) };
-    save_data(id, &owned);
+    // save_data re-checks enabled; direct insert to avoid double check cost is fine
+    SAVED_DATA.with(|s| {
+        let ptr = Box::into_raw(Box::new(owned));
+        let mut map = s.borrow_mut();
+        if let Some(old_ptr) = map.insert(id, ptr) {
+            unsafe {
+                drop(Box::from_raw(old_ptr));
+            }
+        }
+    });
 }
 
-/// Create an OwnedTensor from a BorrowedTensor (clones the data).
+/// Create an OwnedTensor from a BorrowedTensor (strided-safe, all dtypes).
 unsafe fn owned_from_borrowed(b: &BorrowedTensor) -> OwnedTensor {
     let n = elem_count(&b.shape);
-    let mut out = OwnedTensor::new(b.dtype, b.shape.clone());
-    match b.dtype {
-        DType::F32 => {
-            let src = std::slice::from_raw_parts(b.data as *const f32, n);
-            let dst = std::slice::from_raw_parts_mut(out.data.as_mut_ptr() as *mut f32, n);
-            dst.copy_from_slice(src);
+    let mut out = OwnedTensor::new(b.dtype, b.shape.to_vec());
+    if n == 0 {
+        return out;
+    }
+    if b.is_contiguous() {
+        let bytes = n * b.dtype.elem_size();
+        std::ptr::copy_nonoverlapping(b.data, out.data.as_mut_ptr() as *mut u8, bytes);
+        return out;
+    }
+    let elem = b.dtype.elem_size();
+    let ndim = b.shape.len();
+    let mut idx = vec![0i64; ndim];
+    for out_off in 0..n {
+        let mut rem = out_off;
+        for d in (0..ndim).rev() {
+            let dim = b.shape[d].max(1) as usize;
+            idx[d] = (rem % dim) as i64;
+            rem /= dim;
         }
-        DType::F64 => {
-            let src = std::slice::from_raw_parts(b.data as *const f64, n);
-            let dst = std::slice::from_raw_parts_mut(out.data.as_mut_ptr() as *mut f64, n);
-            dst.copy_from_slice(src);
+        let mut phys: i64 = 0;
+        for d in 0..ndim {
+            phys += idx[d] * b.strides[d];
         }
-        _ => {}
+        let src = b.data.add((phys.max(0) as usize) * elem);
+        let dst = (out.data.as_mut_ptr() as *mut u8).add(out_off * elem);
+        std::ptr::copy_nonoverlapping(src, dst, elem);
     }
     out
 }
@@ -150,9 +179,10 @@ unsafe fn owned_from_borrowed(b: &BorrowedTensor) -> OwnedTensor {
 /// Leaf tensors (parameters) accumulate into this map; intermediate
 /// gradients are consumed and freed after each op.
 pub fn backward(grad_output: &OwnedTensor, leaf_grads: &mut HashMap<usize, OwnedTensor>) {
-    // Map to accumulate intermediate gradients by tensor ID across branches
+    // Map to accumulate intermediate gradients by tensor ID across branches.
+    // Fix: avoid O(N^2) current_upstream.clone() per op; route strictly by
+    // output_id, fallback only for the final op (initial upstream).
     let mut node_grads: HashMap<usize, OwnedTensor> = HashMap::new();
-    let mut current_upstream: Option<OwnedTensor> = Some(grad_output.clone());
 
     TAPE.with(|t| {
         TAPE_META.with(|m| {
@@ -161,19 +191,27 @@ pub fn backward(grad_output: &OwnedTensor, leaf_grads: &mut HashMap<usize, Owned
             let len = tape.len();
             for rev_idx in 0..len {
                 let i = len - 1 - rev_idx;
-                // SAFETY: we only read from the tape entries; no mutations.
                 let op: &(dyn BackwardOp + 'static) = &*tape[i];
                 let me = &meta[i];
 
-                // Retrieve upstream gradient: either from node_grads by output ID,
-                // or fall back to current_upstream (for the initial output or linear chains).
-                let upstream = me
-                    .output_ids
-                    .iter()
-                    .find_map(|id| node_grads.remove(id))
-                    .or_else(|| current_upstream.clone());
-
-                let upstream = match &upstream {
+                // Sum all output grads (fan-out: same tensor consumed twice)
+                let mut upstream_opt: Option<OwnedTensor> = None;
+                for id in me.output_ids.iter() {
+                    if let Some(g) = node_grads.remove(id) {
+                        match upstream_opt.take() {
+                            None => upstream_opt = Some(g),
+                            Some(mut acc) => {
+                                add_in_place(&mut acc, &g);
+                                upstream_opt = Some(acc);
+                            }
+                        }
+                    }
+                }
+                // Fallback only for the last recorded op (first in reverse)
+                if upstream_opt.is_none() && rev_idx == 0 {
+                    upstream_opt = Some(grad_output.clone());
+                }
+                let upstream = match upstream_opt {
                     Some(u) => u,
                     None => continue,
                 };
@@ -187,15 +225,8 @@ pub fn backward(grad_output: &OwnedTensor, leaf_grads: &mut HashMap<usize, Owned
                     })
                     .collect();
 
-                let grads = op.backward(upstream, &saved_refs);
+                let grads = op.backward(&upstream, &saved_refs);
 
-                // Update fallback upstream from first input gradient if available
-                if let Some((_, first_grad)) = grads.first() {
-                    current_upstream = Some(first_grad.clone());
-                }
-
-                // Route and accumulate into both node_grads (for intermediate consumers)
-                // and leaf_grads (for final parameter gradients).
                 for (tensor_id, grad) in grads {
                     node_grads
                         .entry(tensor_id)

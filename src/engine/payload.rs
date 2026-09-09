@@ -10,7 +10,7 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 pub struct Payload {
     #[serde(default)]
     pub inputs: Vec<InputSpec>,
@@ -20,7 +20,7 @@ pub struct Payload {
     pub outputs: Vec<u32>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 pub struct InputSpec {
     pub shape: Vec<i64>,
     pub dtype: String,

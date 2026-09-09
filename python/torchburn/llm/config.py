@@ -95,7 +95,9 @@ class GenerationConfig:
 class EngineConfig:
     """Settings controlling backend execution and device dispatch."""
 
-    device: str = "auto"  # "auto", "cpu", "gpu", "igpu"
+    # "auto" (cuda>metal>igpu>cpu), "cpu", "igpu", "dgpu", "gpu",
+    # "cuda" (needs torchburn-cuda), "metal" (macOS only).
+    device: str = "auto"
     quantization: str = "int4"  # "int4", "int8", "none"
     num_threads: Optional[int] = None
     use_static_kv_cache: bool = True

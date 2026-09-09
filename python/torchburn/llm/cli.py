@@ -29,7 +29,7 @@ def main(args: Optional[list[str]] = None) -> int:
     # --- chat ---
     chat_parser = subparsers.add_parser("chat", help="Launch interactive multi-turn chat")
     chat_parser.add_argument("--model", "-m", type=str, default=r"models/qwen_0_5b", help="Model path or HuggingFace repo ID")
-    chat_parser.add_argument("--device", "-d", type=str, default="auto", choices=["auto", "cpu", "igpu", "dgpu", "gpu", "vulkan"], help="Execution target")
+    chat_parser.add_argument("--device", "-d", type=str, default="auto", choices=["auto", "cpu", "igpu", "dgpu", "gpu", "vulkan", "cuda", "metal"], help="Execution target (cuda needs torchburn-cuda, metal needs macOS)")
     chat_parser.add_argument("--quant", "-q", type=str, default="int4", choices=["int4", "int8", "none"], help="Weight quantization")
     chat_parser.add_argument("--system", "-s", type=str, default=None, help="System prompt")
     chat_parser.add_argument("--max-tokens", type=int, default=256, help="Maximum generated tokens per turn")
@@ -41,7 +41,7 @@ def main(args: Optional[list[str]] = None) -> int:
     gen_parser = subparsers.add_parser("generate", help="Generate completion for a prompt")
     gen_parser.add_argument("prompt", type=str, help="Input prompt text")
     gen_parser.add_argument("--model", "-m", type=str, default=r"models/qwen_0_5b", help="Model path or HuggingFace repo ID")
-    gen_parser.add_argument("--device", "-d", type=str, default="auto", choices=["auto", "cpu", "igpu", "dgpu", "gpu", "vulkan"], help="Execution target")
+    gen_parser.add_argument("--device", "-d", type=str, default="auto", choices=["auto", "cpu", "igpu", "dgpu", "gpu", "vulkan", "cuda", "metal"], help="Execution target (cuda needs torchburn-cuda, metal needs macOS)")
     gen_parser.add_argument("--quant", "-q", type=str, default="int4", choices=["int4", "int8", "none"], help="Weight quantization")
     gen_parser.add_argument("--max-tokens", type=int, default=128, help="Maximum tokens to generate")
     gen_parser.add_argument("--temperature", type=float, default=0.7, help="Sampling temperature")
@@ -52,7 +52,7 @@ def main(args: Optional[list[str]] = None) -> int:
     # --- benchmark ---
     bench_parser = subparsers.add_parser("benchmark", help="Benchmark generation speed (tok/s)")
     bench_parser.add_argument("--model", "-m", type=str, default=r"models/qwen_0_5b", help="Model path or HuggingFace repo ID")
-    bench_parser.add_argument("--device", "-d", type=str, default="auto", choices=["auto", "cpu", "igpu", "dgpu", "gpu", "vulkan"], help="Execution target")
+    bench_parser.add_argument("--device", "-d", type=str, default="auto", choices=["auto", "cpu", "igpu", "dgpu", "gpu", "vulkan", "cuda", "metal"], help="Execution target (cuda needs torchburn-cuda, metal needs macOS)")
     bench_parser.add_argument("--quant", "-q", type=str, default="int4", choices=["int4", "int8", "none"], help="Weight quantization")
     bench_parser.add_argument("--tokens", type=int, default=64, help="Tokens to generate in benchmark")
     bench_parser.add_argument("--warmup", type=int, default=1, help="Warmup iterations")

@@ -28,8 +28,38 @@ pub(crate) struct WgpuPipelines {
     pub(crate) rows_per_wg: u32,
 }
 
+/// Best-effort pipeline cache (Vulkan/DX12/Metal): empty cache enables
+/// driver-side reuse within the process; disk persistence is a future step
+/// (wgpu 25 `create_pipeline_cache` returns directly, no Result).
+/// `fallback: true` keeps creation working on adapters without cache support.
+fn create_pipeline_cache(device: &wgpu::Device) -> wgpu::PipelineCache {
+    // SAFETY: descriptor is valid (static label, None data, fallback true);
+    // cache only affects compilation reuse, no aliasing.
+    unsafe {
+        device.create_pipeline_cache(&wgpu::PipelineCacheDescriptor {
+            label: Some("torchburn-pipeline-cache"),
+            data: None,
+            fallback: true,
+        })
+    }
+}
+
 impl WgpuPipelines {
-    pub(crate) fn new(device: &wgpu::Device, rows_per_wg: u32, has_subgroups: bool) -> Self {
+    pub(crate) fn new(
+        device: &wgpu::Device,
+        rows_per_wg: u32,
+        has_subgroups: bool,
+        use_pipeline_cache: bool,
+    ) -> Self {
+        // Pipeline cache is optional: creation panics when the device was not
+        // created with the PIPELINE_CACHE feature (e.g. Intel Iris Xe Vulkan).
+        // Keep the cache alive for the whole constructor and pass references.
+        let pipeline_cache: Option<wgpu::PipelineCache> = if use_pipeline_cache {
+            Some(create_pipeline_cache(device))
+        } else {
+            None
+        };
+        let cache_ref = pipeline_cache.as_ref();
         let wg_size = rows_per_wg * 16;
         let gemv_shader_raw = include_str!("../shaders/gemv_w4a32.wgsl");
         let gemv_shader_src = gemv_shader_raw
@@ -113,7 +143,7 @@ impl WgpuPipelines {
             module: &gemv_shader,
             entry_point: Some("main"),
             compilation_options: wgpu::PipelineCompilationOptions::default(),
-            cache: None,
+            cache: cache_ref,
         });
 
         // 1b. Fused Gate + Up GEMV + SwiGLU pipeline & layout
@@ -218,7 +248,7 @@ impl WgpuPipelines {
                 module: &gemv_swiglu_shader,
                 entry_point: Some("main"),
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
-                cache: None,
+                cache: cache_ref,
             });
 
         // 2. RMSNorm pipeline & layout
@@ -289,7 +319,7 @@ impl WgpuPipelines {
             module: &rmsnorm_shader,
             entry_point: Some("main"),
             compilation_options: wgpu::PipelineCompilationOptions::default(),
-            cache: None,
+            cache: cache_ref,
         });
 
         // 3. RoPE + KV Cache Append pipeline & layout
@@ -393,7 +423,7 @@ impl WgpuPipelines {
             module: &rope_shader,
             entry_point: Some("main"),
             compilation_options: wgpu::PipelineCompilationOptions::default(),
-            cache: None,
+            cache: cache_ref,
         });
 
         // 4. Attn Decode pipeline & layout
@@ -467,7 +497,7 @@ impl WgpuPipelines {
             module: &attn_shader,
             entry_point: Some("main"),
             compilation_options: wgpu::PipelineCompilationOptions::default(),
-            cache: None,
+            cache: cache_ref,
         });
 
         // 5. SwiGLU pipeline & layout
@@ -531,7 +561,7 @@ impl WgpuPipelines {
             module: &swiglu_shader,
             entry_point: Some("main"),
             compilation_options: wgpu::PipelineCompilationOptions::default(),
-            cache: None,
+            cache: cache_ref,
         });
 
         // 6. Residual Add pipeline & layout
@@ -585,7 +615,7 @@ impl WgpuPipelines {
             module: &residual_shader,
             entry_point: Some("main"),
             compilation_options: wgpu::PipelineCompilationOptions::default(),
-            cache: None,
+            cache: cache_ref,
         });
 
         // 7. Fused Residual Add + RMSNorm pipeline & layout
@@ -664,7 +694,7 @@ impl WgpuPipelines {
                 module: &fused_add_rmsnorm_shader,
                 entry_point: Some("main"),
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
-                cache: None,
+                cache: cache_ref,
             });
 
         // ── Embed lookup pipeline ───────────────────────────────────────────────
@@ -731,7 +761,7 @@ impl WgpuPipelines {
                 module: &embed_lookup_shader,
                 entry_point: Some("main"),
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
-                cache: None,
+                cache: cache_ref,
             });
 
         Self {

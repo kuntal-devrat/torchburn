@@ -55,6 +55,8 @@ impl GgufQuantType {
             1 => Self::F16,
             2 => Self::Q4_0,
             3 => Self::Q4_1,
+            4 => Self::Q4_0,
+            5 => Self::Q4_1,
             6 => Self::Q5_0,
             7 => Self::Q5_1,
             8 => Self::Q8_0,
@@ -91,22 +93,28 @@ impl GgufQuantType {
             Self::Q5_K => 256,
             Self::Q6_K => 256,
             Self::Q8_K => 256,
-            _ => 32,
+            Self::IQ4_NL | Self::IQ4_XS => 32,
+            _ => 256,
         }
     }
 
-    /// Bytes per block.
+    /// Bytes per block (llama.cpp canonical sizes; 0 = unsupported).
     pub fn bytes_per_block(&self) -> usize {
         match self {
             Self::F32 => 4,
             Self::F16 => 2,
-            Self::Q4_0 => 16 + 2,     // 32 nibbles + f16 scale
-            Self::Q4_1 => 16 + 2 + 2, // 32 nibbles + f16 min + f16 scale
-            Self::Q8_0 => 32 + 2,     // 32 bytes + f16 scale
-            Self::Q8_1 => 32 + 2 + 2,
-            Self::Q4_K => 144, // 256 weights, complex layout
+            Self::Q4_0 => 16 + 2,
+            Self::Q4_1 => 16 + 2 + 2,
+            Self::Q5_0 => 16 + 4 + 2,
+            Self::Q5_1 => 16 + 4 + 2 + 2,
+            Self::Q8_0 => 32 + 2,
+            Self::Q8_1 => 32 + 4 + 4,
+            Self::Q2_K => 84,
+            Self::Q3_K => 110,
+            Self::Q4_K => 144,
+            Self::Q5_K => 176,
             Self::Q6_K => 210,
-            Self::Q8_K => 256 + 16, // 256 bytes + scales
+            Self::Q8_K => 256 + 16,
             _ => 0,
         }
     }
@@ -120,14 +128,52 @@ impl GgufQuantType {
     }
 
     /// Map to TorchBurn's native quant type if supported.
+    /// NOTE: K-quants have super-block scales and are NOT directly executable
+    /// by W4A32/W8A32 kernels — they require explicit dequant.
     pub fn to_native_quant(&self) -> Option<NativeQuantType> {
         match self {
-            Self::Q4_0 | Self::Q4_1 | Self::Q4_K => Some(NativeQuantType::W4A32),
-            Self::Q8_0 | Self::Q8_1 | Self::Q8_K => Some(NativeQuantType::W8A32),
+            Self::Q4_0 | Self::Q4_1 => Some(NativeQuantType::W4A32),
+            Self::Q8_0 | Self::Q8_1 => Some(NativeQuantType::W8A32),
             Self::F32 => Some(NativeQuantType::F32),
             Self::F16 => Some(NativeQuantType::F16),
             _ => None,
         }
+    }
+
+    /// Expected raw bytes for `n_elem` elements (None if unsupported/overflow).
+    /// Used by loaders to validate offsets before slicing (no panic).
+    pub fn expected_bytes(&self, n_elem: usize) -> Option<usize> {
+        let bpb = self.bytes_per_block();
+        if bpb == 0 {
+            return None;
+        }
+        let bs = self.block_size().max(1);
+        n_elem.div_ceil(bs).checked_mul(bpb)
+    }
+
+    /// True if the type must be dequantized to F32/F16 on load (K-quants, IQ).
+    /// Python `gguf_loader` should route these through dequant, not zeros.
+    pub fn needs_dequant(&self) -> bool {
+        matches!(
+            self,
+            Self::Q2_K
+                | Self::Q3_K
+                | Self::Q4_K
+                | Self::Q5_K
+                | Self::Q6_K
+                | Self::Q8_K
+                | Self::Q5_0
+                | Self::Q5_1
+                | Self::Q8_1
+                | Self::IQ2_XXS
+                | Self::IQ2_XS
+                | Self::IQ3_XXS
+                | Self::IQ1_S
+                | Self::IQ4_NL
+                | Self::IQ3_S
+                | Self::IQ2_S
+                | Self::IQ4_XS
+        )
     }
 }
 
@@ -151,15 +197,27 @@ pub struct GgufTensorInfo {
 }
 
 impl GgufTensorInfo {
-    /// Total number of elements.
+    /// Total number of elements (checked, saturating).
     pub fn n_elements(&self) -> usize {
-        self.dims.iter().product::<u64>() as usize
+        let mut acc: u64 = 1;
+        for &d in &self.dims {
+            acc = acc.saturating_mul(d);
+            if acc > (isize::MAX as u64) {
+                return isize::MAX as usize;
+            }
+        }
+        acc as usize
     }
 
-    /// Total number of bytes in the quantized data.
+    /// Total number of bytes in the quantized data (checked, round up partial).
     pub fn n_bytes(&self) -> usize {
-        let n_blocks = self.n_elements() / self.quant_type.block_size();
-        n_blocks * self.quant_type.bytes_per_block()
+        let bpb = self.quant_type.bytes_per_block();
+        if bpb == 0 {
+            return 0;
+        }
+        let bs = self.quant_type.block_size().max(1);
+        let n_blocks = self.n_elements().div_ceil(bs);
+        n_blocks.saturating_mul(bpb)
     }
 }
 
@@ -213,10 +271,30 @@ impl GgufModel {
             .collect()
     }
 
-    /// Get tensor data from a memory-mapped file.
+    /// Get tensor data from a memory-mapped file (checked).
     pub fn tensor_data<'a>(&self, tensor: &GgufTensorInfo, mmap: &'a [u8]) -> &'a [u8] {
-        let start = (self.data_offset + tensor.offset) as usize;
-        let end = start + tensor.n_bytes();
+        let start = self.data_offset.saturating_add(tensor.offset) as usize;
+        let end = start.saturating_add(tensor.n_bytes());
+        if end > mmap.len() || start > end {
+            return &[];
+        }
         &mmap[start..end]
+    }
+
+    /// Checked variant with explicit error.
+    pub fn try_tensor_data<'a>(
+        &self,
+        tensor: &GgufTensorInfo,
+        mmap: &'a [u8],
+    ) -> Result<&'a [u8], String> {
+        let start = self.data_offset.saturating_add(tensor.offset) as usize;
+        let end = start.saturating_add(tensor.n_bytes());
+        if end > mmap.len() || start > end {
+            return Err(format!(
+                "tensor {} out of bounds",
+                tensor.name
+            ));
+        }
+        Ok(&mmap[start..end])
     }
 }

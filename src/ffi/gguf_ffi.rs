@@ -7,12 +7,22 @@ use crate::gguf::GgufMmap;
 
 /// Get information about a GGUF file (architecture, name, version, tensor count).
 #[pyfunction]
-pub fn gguf_info(path: String) -> PyResult<PyObject> {
-    let mmap = GgufMmap::open(std::path::Path::new(&path))
-        .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))?;
+pub fn gguf_info(py: Python<'_>, path: String) -> PyResult<PyObject> {
+    // Release GIL during file IO + parse
+    let mmap = py
+        .allow_threads(|| GgufMmap::open(std::path::Path::new(&path)))
+        .map_err(|e| {
+            let s = e.to_string();
+            if s.contains("magic") || s.contains("version") || s.contains("quant") {
+                pyo3::exceptions::PyValueError::new_err(s)
+            } else {
+                pyo3::exceptions::PyIOError::new_err(s)
+            }
+        })?;
     let model = mmap.model();
 
-    Python::with_gil(|py| {
+    {
+
         let dict = PyDict::new(py);
         dict.set_item("version", model.version)?;
         dict.set_item("tensor_count", model.tensors.len())?;
@@ -34,17 +44,19 @@ pub fn gguf_info(path: String) -> PyResult<PyObject> {
         dict.set_item("quant_types", quant_summary)?;
 
         Ok(dict.into())
-    })
+    }
 }
 
 /// List all tensors in a GGUF file with their shapes and quant types.
 #[pyfunction]
-pub fn gguf_tensors(path: String) -> PyResult<Vec<PyObject>> {
-    let mmap = GgufMmap::open(std::path::Path::new(&path))
+pub fn gguf_tensors(py: Python<'_>, path: String) -> PyResult<Vec<PyObject>> {
+    let mmap = py
+        .allow_threads(|| GgufMmap::open(std::path::Path::new(&path)))
         .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))?;
     let model = mmap.model();
 
-    Python::with_gil(|py| {
+    {
+
         let mut result = Vec::with_capacity(model.tensors.len());
         for t in &model.tensors {
             let dict = PyDict::new(py);
@@ -60,24 +72,26 @@ pub fn gguf_tensors(path: String) -> PyResult<Vec<PyObject>> {
             result.push(dict.into());
         }
         Ok(result)
-    })
+    }
 }
 
 /// Get metadata key-value pairs from a GGUF file.
 #[pyfunction]
-pub fn gguf_metadata(path: String) -> PyResult<Vec<(String, PyObject)>> {
-    let mmap = GgufMmap::open(std::path::Path::new(&path))
+pub fn gguf_metadata(py: Python<'_>, path: String) -> PyResult<Vec<(String, PyObject)>> {
+    let mmap = py
+        .allow_threads(|| GgufMmap::open(std::path::Path::new(&path)))
         .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))?;
     let model = mmap.model();
 
-    Python::with_gil(|py| {
+    {
+
         let mut result = Vec::new();
         for (key, value) in &model.metadata {
             let py_val = gguf_value_to_pyobject(py, value)?;
             result.push((key.clone(), py_val));
         }
         Ok(result)
-    })
+    }
 }
 
 fn gguf_value_to_pyobject(
