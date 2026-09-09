@@ -439,6 +439,7 @@ unsafe fn gemv_row8_w4a8_group64_v2_vnni_avx512(
 /// `x` must hold `k` readable f32s; `w_blocked` must hold `n` rows of
 /// `(k / 64) * V2_BLOCK_BYTES` bytes; `bias` (if `Some`) must hold `n`
 /// f32s; `out` must hold `n` writable f32s.
+#[allow(unused_variables)]
 pub unsafe fn gemv_w4a32_grouped_v2(
     x: *const f32,
     w_blocked: *const u8,
@@ -460,6 +461,7 @@ pub unsafe fn gemv_w4a32_grouped_v2(
 
     let n_threads = rayon::current_num_threads();
 
+    #[cfg(target_arch = "x86_64")]
     let feats = crate::dispatch::cpu_features();
 
     #[cfg(target_arch = "x86_64")]
@@ -477,12 +479,15 @@ pub unsafe fn gemv_w4a32_grouped_v2(
     #[cfg(not(target_arch = "x86_64"))]
     let has_avx2 = false;
 
+    #[cfg(target_arch = "x86_64")]
     let (x_u8_opt, s_x) = if has_vnni && group_size == 64 {
         let (u, s) = unsafe { quantize_activation_to_u8(x, k) };
         (Some(u), s)
     } else {
         (None, 1.0f32)
     };
+    #[cfg(not(target_arch = "x86_64"))]
+    let x_u8_opt = None;
     let x_u8_ptr = x_u8_opt.as_ref().map(|v| v.as_ptr() as usize);
 
     // Phase 1.2: distribute over 8-row blocks. On the VNNI tier each block runs

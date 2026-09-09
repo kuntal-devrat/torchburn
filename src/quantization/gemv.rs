@@ -768,6 +768,7 @@ pub(crate) unsafe fn gemv_w8a32(
             k: usize,
         ) {
             let j = oct * 8;
+            #[cfg(target_arch = "x86_64")]
             let w_base = w.add(j * k);
             #[cfg(target_arch = "x86_64")]
             let dots = gemv_8rows_w8a32_avx512(x, w_base, k, k);
@@ -1681,6 +1682,7 @@ unsafe fn dot_f32_u4_group32(x: *const f32, w_packed: *const u8) -> f32 {
 /// `x` must hold `k` readable f32s; `w_packed` must hold `n` rows of
 /// `k / 2` packed int4 bytes; `scales` must hold `n * num_groups` f32s;
 /// `bias` (if `Some`) must hold `n` f32s; `out` must hold `n` writable f32s.
+#[allow(unused_variables)]
 pub unsafe fn gemv_w4a32_grouped(
     x: *const f32,
     w_packed: *const u8,
@@ -1725,12 +1727,15 @@ pub unsafe fn gemv_w4a32_grouped(
 
     let has_neon = feats.neon;
 
+    #[cfg(target_arch = "x86_64")]
     let (x_u8_opt, s_x) = if has_vnni && group_size == 64 {
         let (u, s) = unsafe { quantize_activation_to_u8(x, k) };
         (Some(u), s)
     } else {
         (None, 1.0f32)
     };
+    #[cfg(not(target_arch = "x86_64"))]
+    let x_u8_opt = None;
     let x_u8_ptr = x_u8_opt.as_ref().map(|v| v.as_ptr() as usize);
 
     (0..n)

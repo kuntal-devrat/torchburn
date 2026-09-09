@@ -1178,6 +1178,7 @@ pub(crate) unsafe fn fast_vector_add(dst: *mut f32, src: *const f32, n: usize) {
         fast_vector_add_neon(dst, src, n);
         return;
     }
+    #[allow(unreachable_code)]
     for i in 0..n {
         *dst.add(i) += *src.add(i);
     }
@@ -1248,6 +1249,7 @@ pub(crate) unsafe fn fast_vector_fma(dst: *mut f32, src: *const f32, scale: f32,
         fast_vector_fma_neon(dst, src, scale, n);
         return;
     }
+    #[allow(unreachable_code)]
     for i in 0..n {
         *dst.add(i) += scale * *src.add(i);
     }
