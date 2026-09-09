@@ -26,11 +26,7 @@ pub(crate) unsafe fn capsule_to_owned(view: &dlpack::BorrowedTensor) -> dlpack::
     }
     if view.is_contiguous() {
         let bytes = n * view.dtype.elem_size();
-        std::ptr::copy_nonoverlapping(
-            view.data,
-            owned.data.as_mut_ptr() as *mut u8,
-            bytes,
-        );
+        std::ptr::copy_nonoverlapping(view.data, owned.data.as_mut_ptr() as *mut u8, bytes);
         return owned;
     }
     let ndim = view.shape.len();

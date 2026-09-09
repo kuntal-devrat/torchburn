@@ -182,30 +182,10 @@ pub fn masked_select(a: &BorrowedTensor, mask: &BorrowedTensor) -> PyResult<Owne
         DType::Bool | DType::U8 | DType::I8 => unsafe {
             typed_slice::<u8>(mask).iter().map(|&x| x != 0).collect()
         },
-        DType::F32 => unsafe {
-            typed_slice::<f32>(mask)
-                .iter()
-                .map(|&x| x != 0.0)
-                .collect()
-        },
-        DType::F64 => unsafe {
-            typed_slice::<f64>(mask)
-                .iter()
-                .map(|&x| x != 0.0)
-                .collect()
-        },
-        DType::I64 => unsafe {
-            typed_slice::<i64>(mask)
-                .iter()
-                .map(|&x| x != 0)
-                .collect()
-        },
-        DType::I32 => unsafe {
-            typed_slice::<i32>(mask)
-                .iter()
-                .map(|&x| x != 0)
-                .collect()
-        },
+        DType::F32 => unsafe { typed_slice::<f32>(mask).iter().map(|&x| x != 0.0).collect() },
+        DType::F64 => unsafe { typed_slice::<f64>(mask).iter().map(|&x| x != 0.0).collect() },
+        DType::I64 => unsafe { typed_slice::<i64>(mask).iter().map(|&x| x != 0).collect() },
+        DType::I32 => unsafe { typed_slice::<i32>(mask).iter().map(|&x| x != 0).collect() },
         _ => return Err(unsupported("masked_select mask must be bool/int/float")),
     };
     match a.dtype {
@@ -269,8 +249,7 @@ pub fn istft(a: &BorrowedTensor) -> PyResult<OwnedTensor> {
                 let im = ad[idx + 1];
                 // Reconstruct full spectrum symmetry: k and N-k conjugate.
                 // For k=0 and k=n_fft/2 the bin is real-only in RFFT.
-                let angle =
-                    2.0 * std::f64::consts::PI * (k * t) as f64 / n_fft as f64;
+                let angle = 2.0 * std::f64::consts::PI * (k * t) as f64 / n_fft as f64;
                 let (c, sn) = (angle.cos() as f32, angle.sin() as f32);
                 let w = if k == 0 || k == n_freqs - 1 { 1.0 } else { 2.0 };
                 s += w * (re * c - im * sn);

@@ -356,7 +356,10 @@ pub fn execute_native(payload: &Payload, capsules: &[CapsuleRef]) -> PyResult<Ve
         // Remap slots to steps. Value::Array remap only for slot-list targets
         // (cat/stack); shape constants must NOT be rewritten.
         fn is_slot_list_target(t: &str) -> bool {
-            matches!(t, "cat" | "stack" | "concat" | "unbind" | "split_with_sizes")
+            matches!(
+                t,
+                "cat" | "stack" | "concat" | "unbind" | "split_with_sizes"
+            )
         }
         let mut remap = Vec::with_capacity(base + nodes.len());
         remap.extend(0..base);

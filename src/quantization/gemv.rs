@@ -544,7 +544,6 @@ unsafe fn dot_f32_u4_neon(x: *const f32, w_packed: *const u8, len: usize) -> f32
 /// and 32-element group kernels share one implementation.
 #[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "neon")]
-#[inline(always)]
 unsafe fn dot_f32_u4_chunks_neon(x: *const f32, w_packed: *const u8, chunks: usize) -> f32 {
     use std::arch::aarch64::*;
     // 64-bit (uint8x8_t) nibble pipeline — see `dot_f32_u4_neon`.
@@ -588,7 +587,6 @@ unsafe fn dot_f32_u4_chunks_neon(x: *const f32, w_packed: *const u8, chunks: usi
 /// Equivalent to `dot_f32_u4_group64_avx512` / `dot_f32_u4_group64_avx2`.
 #[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "neon")]
-#[inline(always)]
 unsafe fn dot_f32_u4_group64_neon(x: *const f32, w_packed: *const u8) -> f32 {
     // 64 elements = 32 packed bytes = 4 chunks of 16 elements (8 bytes each).
     // (Historically this looped 2 chunks, silently dropping the second half of
@@ -599,7 +597,6 @@ unsafe fn dot_f32_u4_group64_neon(x: *const f32, w_packed: *const u8) -> f32 {
 /// ARM NEON: 32-element grouped INT4 dot product with group-wise scale.
 #[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "neon")]
-#[inline(always)]
 unsafe fn dot_f32_u4_group32_neon(x: *const f32, w_packed: *const u8) -> f32 {
     // 32 elements = 16 packed bytes = 2 chunks of 16 elements (8 bytes each).
     dot_f32_u4_chunks_neon(x, w_packed, 2)

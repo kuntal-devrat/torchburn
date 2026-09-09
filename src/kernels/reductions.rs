@@ -145,11 +145,10 @@ pub fn grid_sample(input: &BorrowedTensor, grid: &BorrowedTensor) -> PyResult<Ow
                     let v01 = at(ni, ci, y0, x0 + 1);
                     let v10 = at(ni, ci, y0 + 1, x0);
                     let v11 = at(ni, ci, y0 + 1, x0 + 1);
-                    od[((ni * c + ci) * ho + hoi) * wo + woi] =
-                        v00 * (1.0 - dx) * (1.0 - dy)
-                            + v01 * dx * (1.0 - dy)
-                            + v10 * (1.0 - dx) * dy
-                            + v11 * dx * dy;
+                    od[((ni * c + ci) * ho + hoi) * wo + woi] = v00 * (1.0 - dx) * (1.0 - dy)
+                        + v01 * dx * (1.0 - dy)
+                        + v10 * (1.0 - dx) * dy
+                        + v11 * dx * dy;
                 }
             }
         }

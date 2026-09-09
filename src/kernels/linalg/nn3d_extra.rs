@@ -54,13 +54,24 @@ pub fn conv3d(
             for do_ in 0..dout {
                 for ho in 0..hout {
                     for wo in 0..wout {
-                        let mut s = if bd.is_empty() { 0.0 } else { bd[co % bd.len()] };
+                        let mut s = if bd.is_empty() {
+                            0.0
+                        } else {
+                            bd[co % bd.len()]
+                        };
                         for ci in 0..cin {
                             for kd_ in 0..kd {
                                 for kh_ in 0..kh {
                                     for kw_ in 0..kw {
-                                        let iv = id[((((ni * cin + ci) * din) + do_ + kd_) * hin + ho + kh_) * win + wo + kw_];
-                                        let wv = wd[((((co * cin + ci) * kd) + kd_) * kh + kh_) * kw + kw_];
+                                        let iv = id[((((ni * cin + ci) * din) + do_ + kd_) * hin
+                                            + ho
+                                            + kh_)
+                                            * win
+                                            + wo
+                                            + kw_];
+                                        let wv = wd[((((co * cin + ci) * kd) + kd_) * kh + kh_)
+                                            * kw
+                                            + kw_];
                                         s += iv * wv;
                                     }
                                 }
@@ -120,8 +131,15 @@ pub fn conv_transpose3d(
                             for kd_ in 0..kd {
                                 for kh_ in 0..kh {
                                     for kw_ in 0..kw {
-                                        let wv = wd[((((co * cin + ci) * kd) + kd_) * kh + kh_) * kw + kw_];
-                                        od[((((ni * cout + co) * dout) + di + kd_) * hout + hi + kh_) * wout + wi + kw_] += iv * wv;
+                                        let wv = wd[((((co * cin + ci) * kd) + kd_) * kh + kh_)
+                                            * kw
+                                            + kw_];
+                                        od[((((ni * cout + co) * dout) + di + kd_) * hout
+                                            + hi
+                                            + kh_)
+                                            * wout
+                                            + wi
+                                            + kw_] += iv * wv;
                                     }
                                 }
                             }
@@ -174,7 +192,10 @@ pub fn max_pool3d(input: &BorrowedTensor, kernel: &[i64], stride: &[i64]) -> PyR
     let od_ = pool3d_out(d, kd, sd).max(1);
     let oh = pool3d_out(h, kh, sh).max(1);
     let ow = pool3d_out(w, kw, sw).max(1);
-    let mut out = OwnedTensor::new(DType::F32, vec![n as i64, c as i64, od_ as i64, oh as i64, ow as i64]);
+    let mut out = OwnedTensor::new(
+        DType::F32,
+        vec![n as i64, c as i64, od_ as i64, oh as i64, ow as i64],
+    );
     let id = unsafe { typed_slice::<f32>(input) };
     let od = unsafe { typed_mut_slice::<f32>(&mut out) };
     for ni in 0..n {
@@ -228,7 +249,10 @@ pub fn avg_pool3d(input: &BorrowedTensor, kernel: &[i64], stride: &[i64]) -> PyR
     let od_ = pool3d_out(d, kd, sd).max(1);
     let oh = pool3d_out(h, kh, sh).max(1);
     let ow = pool3d_out(w, kw, sw).max(1);
-    let mut out = OwnedTensor::new(DType::F32, vec![n as i64, c as i64, od_ as i64, oh as i64, ow as i64]);
+    let mut out = OwnedTensor::new(
+        DType::F32,
+        vec![n as i64, c as i64, od_ as i64, oh as i64, ow as i64],
+    );
     let id = unsafe { typed_slice::<f32>(input) };
     let od = unsafe { typed_mut_slice::<f32>(&mut out) };
     let denom = (kd * kh * kw) as f32;
@@ -398,7 +422,9 @@ pub fn fractional_max_pool2d(input: &BorrowedTensor, output_size: &[i64]) -> PyR
     let mut col_b: Vec<usize> = Vec::with_capacity(ow + 1);
     let mut st: u64 = (h as u64 * 0x9E3779B1) ^ (w as u64 * 0x85EBCA6B) ^ 0x12345678;
     let mut rnd = || {
-        st = st.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        st = st
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         (st >> 33) as usize
     };
     row_b.push(0);
@@ -420,8 +446,14 @@ pub fn fractional_max_pool2d(input: &BorrowedTensor, output_size: &[i64]) -> PyR
         for ci in 0..c {
             for ho in 0..oh {
                 for wo in 0..ow {
-                    let (hs, he) = (row_b[ho].min(h), row_b[ho + 1].min(h).max(row_b[ho].min(h) + 1));
-                    let (ws, we) = (col_b[wo].min(w), col_b[wo + 1].min(w).max(col_b[wo].min(w) + 1));
+                    let (hs, he) = (
+                        row_b[ho].min(h),
+                        row_b[ho + 1].min(h).max(row_b[ho].min(h) + 1),
+                    );
+                    let (ws, we) = (
+                        col_b[wo].min(w),
+                        col_b[wo + 1].min(w).max(col_b[wo].min(w) + 1),
+                    );
                     let mut best = f32::NEG_INFINITY;
                     for hi in hs..he.min(h) {
                         for wi in ws..we.min(w) {

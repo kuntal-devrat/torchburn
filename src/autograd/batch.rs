@@ -227,7 +227,9 @@ pub fn backward_batch(
                             };
                             if n >= 16_384 {
                                 use rayon::prelude::*;
-                                e.par_iter_mut().zip(p.par_iter()).for_each(|(x, y)| *x += *y);
+                                e.par_iter_mut()
+                                    .zip(p.par_iter())
+                                    .for_each(|(x, y)| *x += *y);
                             } else {
                                 for j in 0..n {
                                     e[j] += p[j];
@@ -246,7 +248,9 @@ pub fn backward_batch(
                             };
                             if n >= 16_384 {
                                 use rayon::prelude::*;
-                                e.par_iter_mut().zip(p.par_iter()).for_each(|(x, y)| *x += *y);
+                                e.par_iter_mut()
+                                    .zip(p.par_iter())
+                                    .for_each(|(x, y)| *x += *y);
                             } else {
                                 for j in 0..n {
                                     e[j] += p[j];

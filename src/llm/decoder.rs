@@ -388,12 +388,8 @@ impl RustQwenDecoder {
         }
         if used >= self.max_seq_len {
             use rayon::prelude::*;
-            self.k_caches
-                .par_iter_mut()
-                .for_each(|kc| kc.fill(0.0));
-            self.v_caches
-                .par_iter_mut()
-                .for_each(|vc| vc.fill(0.0));
+            self.k_caches.par_iter_mut().for_each(|kc| kc.fill(0.0));
+            self.v_caches.par_iter_mut().for_each(|vc| vc.fill(0.0));
         } else {
             let hd = self.head_dim;
             let stride = self.max_seq_len * hd;
@@ -479,7 +475,9 @@ impl RustQwenDecoder {
             return Err(pyo3::exceptions::PyValueError::new_err("empty prefill"));
         }
         if tokens.len() > self.max_seq_len {
-            return Err(pyo3::exceptions::PyValueError::new_err("prefill exceeds max_seq_len"));
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "prefill exceeds max_seq_len",
+            ));
         }
         for (i, &tok) in tokens.iter().enumerate() {
             self.step_internal(tok, i);
@@ -498,7 +496,9 @@ impl RustQwenDecoder {
         tokens: Vec<usize>,
     ) -> PyResult<Vec<Vec<f32>>> {
         if start_offset + tokens.len() > self.max_seq_len {
-            return Err(pyo3::exceptions::PyValueError::new_err("verify exceeds max_seq_len"));
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "verify exceeds max_seq_len",
+            ));
         }
         let mut out: Vec<Vec<f32>> = Vec::with_capacity(tokens.len());
         for (i, &tok) in tokens.iter().enumerate() {
@@ -544,10 +544,14 @@ impl RustQwenDecoder {
         let mut bonus: usize;
         // Softmax helper (temperature-scaled, NaN-safe)
         fn softmax_row(logits: &[f32], temp: f32) -> Vec<f32> {
-            let t = if temp.is_finite() && temp > 0.0 { temp } else { 1.0 };
-            let m = logits
-                .iter()
-                .fold(f32::NEG_INFINITY, |a, &b| a.max(if b.is_finite() { b } else { f32::NEG_INFINITY }));
+            let t = if temp.is_finite() && temp > 0.0 {
+                temp
+            } else {
+                1.0
+            };
+            let m = logits.iter().fold(f32::NEG_INFINITY, |a, &b| {
+                a.max(if b.is_finite() { b } else { f32::NEG_INFINITY })
+            });
             let mut exps: Vec<f32> = logits
                 .iter()
                 .map(|&x| ((if x.is_finite() { x } else { f32::NEG_INFINITY } - m) / t).exp())
@@ -805,15 +809,17 @@ pub fn sample_logits(logits: &[f32], temperature: f32, top_k: usize, top_p: f32)
             .map(|(i, &v)| (i, if v.is_finite() { v } else { f32::NEG_INFINITY }))
             .collect();
         let nth = k.min(indexed.len() - 1);
-        indexed.select_nth_unstable_by(nth, |a, b| {
-            b.1.total_cmp(&a.1)
-        });
+        indexed.select_nth_unstable_by(nth, |a, b| b.1.total_cmp(&a.1));
         top_items.extend_from_slice(&indexed[..k]);
     } else {
         let mut min_val = f32::NEG_INFINITY;
         let mut min_pos = 0;
         for (i, &raw) in logits.iter().enumerate() {
-            let val = if raw.is_finite() { raw } else { f32::NEG_INFINITY };
+            let val = if raw.is_finite() {
+                raw
+            } else {
+                f32::NEG_INFINITY
+            };
             if top_items.len() < k {
                 top_items.push((i, val));
                 if val < min_val || top_items.len() == 1 {

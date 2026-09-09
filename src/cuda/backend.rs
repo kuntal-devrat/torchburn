@@ -181,9 +181,7 @@ impl CudaBackend {
 
     fn get_device() -> Result<&'static Arc<CudaDevice>, CudaError> {
         CUDA_DEVICE
-            .get_or_init(|| {
-                CudaDevice::new(Self::device_id()).map_err(|e| e.to_string())
-            })
+            .get_or_init(|| CudaDevice::new(Self::device_id()).map_err(|e| e.to_string()))
             .as_ref()
             .map_err(|e| CudaError::InitFailed(e.clone()))
     }

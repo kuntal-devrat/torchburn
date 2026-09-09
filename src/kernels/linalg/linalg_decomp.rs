@@ -17,18 +17,20 @@ fn read_mat_f64(t: &BorrowedTensor) -> PyResult<(usize, usize, Vec<f64>)> {
     let m = t.shape[0].max(0) as usize;
     let n = t.shape[1].max(0) as usize;
     if elem_count(&t.shape) != m * n {
-        return Err(unsupported("strided matrices must be contiguous for decomp"));
+        return Err(unsupported(
+            "strided matrices must be contiguous for decomp",
+        ));
     }
     let v: Vec<f64> = match t.dtype {
         DType::F32 => unsafe { typed_slice::<f32>(t).iter().map(|&x| x as f64).collect() },
         DType::F64 => unsafe { typed_slice::<f64>(t).to_vec() },
-        DType::I32 => unsafe {
-            typed_slice::<i32>(t).iter().map(|&x| x as f64).collect()
-        },
-        DType::I64 => unsafe {
-            typed_slice::<i64>(t).iter().map(|&x| x as f64).collect()
-        },
-        _ => return Err(unsupported("decomp requires f32/f64 (int upcast supported)")),
+        DType::I32 => unsafe { typed_slice::<i32>(t).iter().map(|&x| x as f64).collect() },
+        DType::I64 => unsafe { typed_slice::<i64>(t).iter().map(|&x| x as f64).collect() },
+        _ => {
+            return Err(unsupported(
+                "decomp requires f32/f64 (int upcast supported)",
+            ))
+        }
     };
     Ok((m, n, v))
 }
@@ -105,7 +107,11 @@ pub fn nuclear_norm(a: &BorrowedTensor) -> PyResult<OwnedTensor> {
     let s = svdvals(a)?;
     let dt = s.dtype;
     let sum: f64 = match dt {
-        DType::F64 => unsafe { typed_slice::<f64>(&BorrowedTensor::from_owned(&s)).iter().sum() },
+        DType::F64 => unsafe {
+            typed_slice::<f64>(&BorrowedTensor::from_owned(&s))
+                .iter()
+                .sum()
+        },
         _ => unsafe {
             typed_slice::<f32>(&BorrowedTensor::from_owned(&s))
                 .iter()
@@ -141,7 +147,10 @@ pub fn matrix_rank(a: &BorrowedTensor) -> PyResult<OwnedTensor> {
     let (smax, vals): (f64, Vec<f64>) = match sb.dtype {
         DType::F64 => {
             let sl = unsafe { typed_slice::<f64>(&sb) };
-            (sl.iter().fold(0.0, |m: f64, &x| m.max(x.abs())), sl.to_vec())
+            (
+                sl.iter().fold(0.0, |m: f64, &x| m.max(x.abs())),
+                sl.to_vec(),
+            )
         }
         _ => {
             let sl = unsafe { typed_slice::<f32>(&sb) };
@@ -233,7 +242,11 @@ fn solve_lu(a: &BorrowedTensor, b: &BorrowedTensor) -> PyResult<OwnedTensor> {
     if b.shape.is_empty() || b.shape.len() > 2 {
         return Err(unsupported("solve B must be 1D/2D"));
     }
-    let nrhs = if b.shape.len() == 1 { 1 } else { b.shape[1].max(0) as usize };
+    let nrhs = if b.shape.len() == 1 {
+        1
+    } else {
+        b.shape[1].max(0) as usize
+    };
     let brows = b.shape[0].max(0) as usize;
     if brows != n {
         return Err(unsupported("solve dimension mismatch"));
@@ -301,7 +314,11 @@ fn solve_lu(a: &BorrowedTensor, b: &BorrowedTensor) -> PyResult<OwnedTensor> {
     Ok(out)
 }
 
-fn read_mat_f64_as(t: &BorrowedTensor, rows: usize, cols: usize) -> PyResult<(usize, usize, Vec<f64>)> {
+fn read_mat_f64_as(
+    t: &BorrowedTensor,
+    rows: usize,
+    cols: usize,
+) -> PyResult<(usize, usize, Vec<f64>)> {
     // Read B which may be 1D (n) or 2D (n×k); normalize to rows×cols row-major.
     if t.shape.len() == 1 {
         let (m, v) = (t.shape[0].max(0) as usize, {
@@ -389,8 +406,7 @@ pub fn cholesky_inverse(u: &BorrowedTensor) -> PyResult<OwnedTensor> {
     if n != n2 {
         return Err(unsupported("cholesky_inverse requires square"));
     }
-    let invu = tri_inverse_upper(&uv, n)
-        .ok_or_else(|| unsupported("singular Cholesky factor"))?;
+    let invu = tri_inverse_upper(&uv, n).ok_or_else(|| unsupported("singular Cholesky factor"))?;
     let mut inv = vec![0.0; n * n];
     for i in 0..n {
         for j in 0..n {
@@ -416,7 +432,11 @@ pub fn cholesky_solve(b: &BorrowedTensor, u: &BorrowedTensor) -> PyResult<OwnedT
     if brows != n {
         return Err(unsupported("cholesky_solve dimension mismatch"));
     }
-    let nrhs = if b.shape.len() == 1 { 1 } else { b.shape[1].max(0) as usize };
+    let nrhs = if b.shape.len() == 1 {
+        1
+    } else {
+        b.shape[1].max(0) as usize
+    };
     let (_, _, bv) = read_mat_f64_as(b, n, nrhs)?;
     // Forward: U^T Y = B (lower triangular solve)
     let mut y = vec![0.0; n * nrhs];
@@ -465,7 +485,9 @@ pub fn qr(a: &BorrowedTensor) -> PyResult<(OwnedTensor, OwnedTensor)> {
     let k = m.min(n);
     let mut q = vec![0.0; m * k];
     let mut r = vec![0.0; k * n];
-    let mut v: Vec<Vec<f64>> = (0..n).map(|j| (0..m).map(|i| av[i * n + j]).collect()).collect();
+    let mut v: Vec<Vec<f64>> = (0..n)
+        .map(|j| (0..m).map(|i| av[i * n + j]).collect())
+        .collect();
     for i in 0..k {
         let mut norm = 0.0;
         for row in 0..m {
@@ -662,7 +684,9 @@ pub fn eig(a: &BorrowedTensor) -> PyResult<(OwnedTensor, OwnedTensor)> {
         // check deflation: subdiagonal small -> treat as zero (skip, full QR)
         let mut converged = true;
         for i in 1..n {
-            if h[i * n + i - 1].abs() > 1e-10 * (h[(i - 1) * n + i - 1].abs() + h[i * n + i].abs() + 1e-30) {
+            if h[i * n + i - 1].abs()
+                > 1e-10 * (h[(i - 1) * n + i - 1].abs() + h[i * n + i].abs() + 1e-30)
+            {
                 converged = false;
                 break;
             }
@@ -750,7 +774,9 @@ fn qr_f64(a: &[f64], n: usize) -> PyResult<(Vec<f64>, Vec<f64>)> {
     // Here we return Q (n×n, columns orthonormal) and R (n×n upper).
     let mut q = vec![0.0; n * n];
     let mut r = vec![0.0; n * n];
-    let mut v: Vec<Vec<f64>> = (0..n).map(|j| (0..n).map(|i| a[i * n + j]).collect()).collect();
+    let mut v: Vec<Vec<f64>> = (0..n)
+        .map(|j| (0..n).map(|i| a[i * n + j]).collect())
+        .collect();
     for i in 0..n {
         let mut norm = 0.0;
         for row in 0..n {
@@ -897,7 +923,11 @@ pub fn triangular_solve(b: &BorrowedTensor, a: &BorrowedTensor) -> PyResult<Owne
     if brows != n {
         return Err(unsupported("triangular_solve dimension mismatch"));
     }
-    let nrhs = if b.shape.len() == 1 { 1 } else { b.shape[1].max(0) as usize };
+    let nrhs = if b.shape.len() == 1 {
+        1
+    } else {
+        b.shape[1].max(0) as usize
+    };
     let (_, _, bv) = read_mat_f64_as(b, n, nrhs)?;
     let mut lower_nz = false;
     let mut upper_nz = false;

@@ -95,12 +95,10 @@ pub fn dropout_forward(
     }
     let view = unsafe { dlpack::BorrowedTensor::from_capsule(input)? };
     match view.dtype {
-        DType::F32 | DType::F64 => {},
+        DType::F32 | DType::F64 => {}
         _ => {
             // TB_UNSUPPORTED so the Python interpreter can fallback cleanly
-            return Err(crate::dlpack::unsupported(
-                "dropout only supports f32/f64",
-            ));
+            return Err(crate::dlpack::unsupported("dropout only supports f32/f64"));
         }
     }
     let dtype = view.dtype;
@@ -132,12 +130,10 @@ pub fn dropout_forward(
             .unwrap_or(0x1234_5678_9ABC_DEF0);
         match dtype {
             DType::F32 => {
-                let src = unsafe {
-                    std::slice::from_raw_parts(src_owned.data.as_ptr() as *const f32, n)
-                };
-                let dst = unsafe {
-                    std::slice::from_raw_parts_mut(out.data.as_mut_ptr() as *mut f32, n)
-                };
+                let src =
+                    unsafe { std::slice::from_raw_parts(src_owned.data.as_ptr() as *const f32, n) };
+                let dst =
+                    unsafe { std::slice::from_raw_parts_mut(out.data.as_mut_ptr() as *mut f32, n) };
                 dst.par_chunks_mut(16_384)
                     .enumerate()
                     .for_each(|(ci, chunk)| {
@@ -154,12 +150,10 @@ pub fn dropout_forward(
                     });
             }
             DType::F64 => {
-                let src = unsafe {
-                    std::slice::from_raw_parts(src_owned.data.as_ptr() as *const f64, n)
-                };
-                let dst = unsafe {
-                    std::slice::from_raw_parts_mut(out.data.as_mut_ptr() as *mut f64, n)
-                };
+                let src =
+                    unsafe { std::slice::from_raw_parts(src_owned.data.as_ptr() as *const f64, n) };
+                let dst =
+                    unsafe { std::slice::from_raw_parts_mut(out.data.as_mut_ptr() as *mut f64, n) };
                 dst.par_chunks_mut(16_384)
                     .enumerate()
                     .for_each(|(ci, chunk)| {

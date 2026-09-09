@@ -22,7 +22,6 @@ pub fn gguf_info(py: Python<'_>, path: String) -> PyResult<PyObject> {
     let model = mmap.model();
 
     {
-
         let dict = PyDict::new(py);
         dict.set_item("version", model.version)?;
         dict.set_item("tensor_count", model.tensors.len())?;
@@ -56,7 +55,6 @@ pub fn gguf_tensors(py: Python<'_>, path: String) -> PyResult<Vec<PyObject>> {
     let model = mmap.model();
 
     {
-
         let mut result = Vec::with_capacity(model.tensors.len());
         for t in &model.tensors {
             let dict = PyDict::new(py);
@@ -84,7 +82,6 @@ pub fn gguf_metadata(py: Python<'_>, path: String) -> PyResult<Vec<(String, PyOb
     let model = mmap.model();
 
     {
-
         let mut result = Vec::new();
         for (key, value) in &model.metadata {
             let py_val = gguf_value_to_pyobject(py, value)?;

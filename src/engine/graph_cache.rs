@@ -81,7 +81,10 @@ pub fn prepare_graph(dict: &Bound<'_, pyo3::types::PyDict>) -> PyResult<i64> {
     }
     let preplanned = if !unsafe_output {
         fn is_slot_list_target(t: &str) -> bool {
-            matches!(t, "cat" | "stack" | "concat" | "unbind" | "split_with_sizes")
+            matches!(
+                t,
+                "cat" | "stack" | "concat" | "unbind" | "split_with_sizes"
+            )
         }
         let mut remap = Vec::with_capacity(base + nodes.len());
         remap.extend(0..base);

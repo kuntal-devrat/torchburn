@@ -446,15 +446,11 @@ pub fn topk(
                     if k < dim_size {
                         let nth = k - 1;
                         if largest {
-                            pairs.select_nth_unstable_by(nth, |a, b| {
-                                b.0.total_cmp(&a.0)
-                            });
+                            pairs.select_nth_unstable_by(nth, |a, b| b.0.total_cmp(&a.0));
                             let (top, _) = pairs.split_at_mut(k);
                             top.sort_unstable_by(|a, b| b.0.total_cmp(&a.0));
                         } else {
-                            pairs.select_nth_unstable_by(nth, |a, b| {
-                                a.0.total_cmp(&b.0)
-                            });
+                            pairs.select_nth_unstable_by(nth, |a, b| a.0.total_cmp(&b.0));
                             let (top, _) = pairs.split_at_mut(k);
                             top.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
                         }
@@ -503,15 +499,11 @@ pub fn topk(
                     if k < dim_size {
                         let nth = k - 1;
                         if largest {
-                            pairs.select_nth_unstable_by(nth, |a, b| {
-                                b.0.total_cmp(&a.0)
-                            });
+                            pairs.select_nth_unstable_by(nth, |a, b| b.0.total_cmp(&a.0));
                             let (top, _) = pairs.split_at_mut(k);
                             top.sort_unstable_by(|a, b| b.0.total_cmp(&a.0));
                         } else {
-                            pairs.select_nth_unstable_by(nth, |a, b| {
-                                a.0.total_cmp(&b.0)
-                            });
+                            pairs.select_nth_unstable_by(nth, |a, b| a.0.total_cmp(&b.0));
                             let (top, _) = pairs.split_at_mut(k);
                             top.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
                         }

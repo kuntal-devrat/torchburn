@@ -290,10 +290,7 @@ impl GgufModel {
         let start = self.data_offset.saturating_add(tensor.offset) as usize;
         let end = start.saturating_add(tensor.n_bytes());
         if end > mmap.len() || start > end {
-            return Err(format!(
-                "tensor {} out of bounds",
-                tensor.name
-            ));
+            return Err(format!("tensor {} out of bounds", tensor.name));
         }
         Ok(&mmap[start..end])
     }

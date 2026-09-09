@@ -1161,16 +1161,17 @@ fn run_chunk_f32_lanes(
                             wide::f32x8::ZERO
                         }
                     }
-                    Some(LeafMap::Scalar) => wide::f32x8::splat(
-                        leaf_data.get(li).map(|s| s[0]).unwrap_or(0.0),
-                    ),
+                    Some(LeafMap::Scalar) => {
+                        wide::f32x8::splat(leaf_data.get(li).map(|s| s[0]).unwrap_or(0.0))
+                    }
                     _ => wide::f32x8::ZERO,
                 },
             };
             let v = match e.op {
                 ChainOp::Unary(u) => match u {
-                    UnaryKind::Relu => wide::CmpGt::cmp_gt(av, wide::f32x8::ZERO)
-                        .blend(av, wide::f32x8::ZERO),
+                    UnaryKind::Relu => {
+                        wide::CmpGt::cmp_gt(av, wide::f32x8::ZERO).blend(av, wide::f32x8::ZERO)
+                    }
                     UnaryKind::Abs => av.abs(),
                     UnaryKind::Neg => av * wide::f32x8::splat(-1.0),
                     _ => av,
@@ -1190,9 +1191,9 @@ fn run_chunk_f32_lanes(
                                     wide::f32x8::ZERO
                                 }
                             }
-                            Some(LeafMap::Scalar) => wide::f32x8::splat(
-                                leaf_data.get(li).map(|s| s[0]).unwrap_or(0.0),
-                            ),
+                            Some(LeafMap::Scalar) => {
+                                wide::f32x8::splat(leaf_data.get(li).map(|s| s[0]).unwrap_or(0.0))
+                            }
                             _ => wide::f32x8::ZERO,
                         },
                     };
@@ -1412,8 +1413,16 @@ fn run_chunk_single_pass<T: Fp>(
                 let av = match e.a {
                     RArg::Chain(m) => vals[m.min(31)],
                     RArg::Leaf(li) => match leaves.get(li).map(|l| &l.map) {
-                        Some(LeafMap::Identity) => leaf_data.get(li).and_then(|s| s.get(f)).copied().unwrap_or(T::ZERO),
-                        Some(LeafMap::Scalar) => leaf_data.get(li).and_then(|s| s.first()).copied().unwrap_or(T::ZERO),
+                        Some(LeafMap::Identity) => leaf_data
+                            .get(li)
+                            .and_then(|s| s.get(f))
+                            .copied()
+                            .unwrap_or(T::ZERO),
+                        Some(LeafMap::Scalar) => leaf_data
+                            .get(li)
+                            .and_then(|s| s.first())
+                            .copied()
+                            .unwrap_or(T::ZERO),
                         _ => T::ZERO,
                     },
                 };
@@ -1423,8 +1432,16 @@ fn run_chunk_single_pass<T: Fp>(
                         let bv = match e.b.expect("binary op has second operand") {
                             RArg::Chain(m) => vals[m.min(31)],
                             RArg::Leaf(li) => match leaves.get(li).map(|l| &l.map) {
-                                Some(LeafMap::Identity) => leaf_data.get(li).and_then(|s| s.get(f)).copied().unwrap_or(T::ZERO),
-                                Some(LeafMap::Scalar) => leaf_data.get(li).and_then(|s| s.first()).copied().unwrap_or(T::ZERO),
+                                Some(LeafMap::Identity) => leaf_data
+                                    .get(li)
+                                    .and_then(|s| s.get(f))
+                                    .copied()
+                                    .unwrap_or(T::ZERO),
+                                Some(LeafMap::Scalar) => leaf_data
+                                    .get(li)
+                                    .and_then(|s| s.first())
+                                    .copied()
+                                    .unwrap_or(T::ZERO),
                                 _ => T::ZERO,
                             },
                         };
@@ -1443,8 +1460,16 @@ fn run_chunk_single_pass<T: Fp>(
                 let av = match e.a {
                     RArg::Chain(m) => vals[m.min(vals.len() - 1)],
                     RArg::Leaf(li) => match leaves.get(li).map(|l| &l.map) {
-                        Some(LeafMap::Identity) => leaf_data.get(li).and_then(|s| s.get(f)).copied().unwrap_or(T::ZERO),
-                        Some(LeafMap::Scalar) => leaf_data.get(li).and_then(|s| s.first()).copied().unwrap_or(T::ZERO),
+                        Some(LeafMap::Identity) => leaf_data
+                            .get(li)
+                            .and_then(|s| s.get(f))
+                            .copied()
+                            .unwrap_or(T::ZERO),
+                        Some(LeafMap::Scalar) => leaf_data
+                            .get(li)
+                            .and_then(|s| s.first())
+                            .copied()
+                            .unwrap_or(T::ZERO),
                         _ => T::ZERO,
                     },
                 };
@@ -1454,8 +1479,16 @@ fn run_chunk_single_pass<T: Fp>(
                         let bv = match e.b.expect("binary op has second operand") {
                             RArg::Chain(m) => vals[m.min(vals.len() - 1)],
                             RArg::Leaf(li) => match leaves.get(li).map(|l| &l.map) {
-                                Some(LeafMap::Identity) => leaf_data.get(li).and_then(|s| s.get(f)).copied().unwrap_or(T::ZERO),
-                                Some(LeafMap::Scalar) => leaf_data.get(li).and_then(|s| s.first()).copied().unwrap_or(T::ZERO),
+                                Some(LeafMap::Identity) => leaf_data
+                                    .get(li)
+                                    .and_then(|s| s.get(f))
+                                    .copied()
+                                    .unwrap_or(T::ZERO),
+                                Some(LeafMap::Scalar) => leaf_data
+                                    .get(li)
+                                    .and_then(|s| s.first())
+                                    .copied()
+                                    .unwrap_or(T::ZERO),
                                 _ => T::ZERO,
                             },
                         };

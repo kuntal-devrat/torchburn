@@ -30,7 +30,7 @@ pub fn autograd_backward(
 ) -> PyResult<Vec<(usize, Py<PyCapsule>)>> {
     let grad_view = unsafe { dlpack::BorrowedTensor::from_capsule(grad_output)? };
     match grad_view.dtype {
-        dlpack::DType::F32 | dlpack::DType::F64 => {},
+        dlpack::DType::F32 | dlpack::DType::F64 => {}
         _ => {
             return Err(crate::dlpack::unsupported(
                 "autograd_backward only supports f32/f64 upstream",
@@ -69,7 +69,7 @@ pub fn backward_native(
 ) -> PyResult<Vec<(usize, Py<PyCapsule>)>> {
     let grad_view = unsafe { dlpack::BorrowedTensor::from_capsule(grad_output)? };
     match grad_view.dtype {
-        dlpack::DType::F32 | dlpack::DType::F64 => {},
+        dlpack::DType::F32 | dlpack::DType::F64 => {}
         _ => {
             return Err(crate::dlpack::unsupported(
                 "backward_native only supports f32/f64 upstream",
@@ -99,7 +99,7 @@ pub fn backward_single(
 ) -> PyResult<Vec<Py<PyCapsule>>> {
     let grad_view = unsafe { dlpack::BorrowedTensor::from_capsule(grad_output)? };
     match grad_view.dtype {
-        dlpack::DType::F32 | dlpack::DType::F64 => {},
+        dlpack::DType::F32 | dlpack::DType::F64 => {}
         _ => {
             return Err(crate::dlpack::unsupported(
                 "backward_single only supports f32/f64 upstream",
@@ -127,8 +127,9 @@ pub fn backward_single(
         .collect::<PyResult<_>>()?;
     let saved_refs: Vec<&dlpack::OwnedTensor> = saved_owned.iter().collect();
 
-    let grads =
-        py.allow_threads(|| crate::autograd::backward_single(target, &upstream, &saved_refs, &kwargs));
+    let grads = py.allow_threads(|| {
+        crate::autograd::backward_single(target, &upstream, &saved_refs, &kwargs)
+    });
     let mut result = Vec::new();
     for owned in grads {
         result.push(dlpack::owned_to_capsule_owned(py, owned)?);
@@ -181,10 +182,7 @@ pub fn backward_batch(
 
         let kwargs: std::collections::HashMap<String, serde_json::Value> =
             serde_json::from_str(&all_kwargs[i]).map_err(|e| {
-                pyo3::exceptions::PyValueError::new_err(format!(
-                    "invalid kwargs_json[{}]: {e}",
-                    i
-                ))
+                pyo3::exceptions::PyValueError::new_err(format!("invalid kwargs_json[{}]: {e}", i))
             })?;
 
         let saved_shapes = saved_shapes_all.get(i).cloned().unwrap_or_default();

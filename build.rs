@@ -24,7 +24,9 @@ fn main() {
             || rustflags.contains("target-cpu=x86-64-v4");
         #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
         let host_has = {
-            let is_native = std::env::var("HOST").map(|h| h.contains("x86_64")).unwrap_or(false);
+            let is_native = std::env::var("HOST")
+                .map(|h| h.contains("x86_64"))
+                .unwrap_or(false);
             is_native && std::arch::is_x86_feature_detected!("avx512f")
         };
         #[cfg(not(any(target_arch = "x86_64", target_arch = "x86")))]

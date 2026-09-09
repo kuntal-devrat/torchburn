@@ -434,7 +434,13 @@ unsafe fn binary_splat_f32_avx2(op: BinaryOp, a: &[f32], scalar: f32, rev: bool,
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f")]
-unsafe fn binary_splat_f32_avx512(op: BinaryOp, a: &[f32], scalar: f32, rev: bool, out: &mut [f32]) {
+unsafe fn binary_splat_f32_avx512(
+    op: BinaryOp,
+    a: &[f32],
+    scalar: f32,
+    rev: bool,
+    out: &mut [f32],
+) {
     use std::arch::x86_64::*;
     let n = out.len();
     let sv = _mm512_set1_ps(scalar);
@@ -615,18 +621,16 @@ fn run_binary<T: Scalar>(
     if b.elem_count() == 1 && a_contig && std::mem::size_of::<T>() == 4 {
         let scalar = unsafe { std::ptr::read(b_data.as_ptr() as *const f32) };
         let a_f32 = unsafe { std::slice::from_raw_parts(a_data.as_ptr() as *const f32, n) };
-        let out_f32 = unsafe {
-            std::slice::from_raw_parts_mut(out_data.as_mut_ptr() as *mut f32, n)
-        };
+        let out_f32 =
+            unsafe { std::slice::from_raw_parts_mut(out_data.as_mut_ptr() as *mut f32, n) };
         simd_binary_splat_f32(op, a_f32, scalar, false, out_f32);
         return;
     }
     if a.elem_count() == 1 && b_contig && std::mem::size_of::<T>() == 4 {
         let scalar = unsafe { std::ptr::read(a_data.as_ptr() as *const f32) };
         let b_f32 = unsafe { std::slice::from_raw_parts(b_data.as_ptr() as *const f32, n) };
-        let out_f32 = unsafe {
-            std::slice::from_raw_parts_mut(out_data.as_mut_ptr() as *mut f32, n)
-        };
+        let out_f32 =
+            unsafe { std::slice::from_raw_parts_mut(out_data.as_mut_ptr() as *mut f32, n) };
         simd_binary_splat_f32(op, b_f32, scalar, true, out_f32);
         return;
     }
