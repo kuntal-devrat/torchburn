@@ -548,23 +548,31 @@ def create_rust_qwen_decoder(model: nn.Module, max_seq_len: int = 4096) -> Any:
         layers_caps.append(caps)
 
     cfg = model.config
-    decoder = _native.RustQwenDecoder(
-        embed_tokens_cap,
-        layers_caps,
-        final_norm_cap,
-        lm_head_w_cap,
-        lm_head_s_cap,
-        len(model.layers),
-        cfg.hidden_size,
-        cfg.intermediate_size,
-        cfg.num_attention_heads,
-        cfg.num_key_value_heads,
-        cfg.head_dim,
-        64,
-        cfg.rms_norm_eps,
-        max_seq_len,
-        cfg.rope_theta,
-    )
+    try:
+        decoder = _native.RustQwenDecoder(
+            embed_tokens_cap,
+            layers_caps,
+            final_norm_cap,
+            lm_head_w_cap,
+            lm_head_s_cap,
+            len(model.layers),
+            cfg.hidden_size,
+            cfg.intermediate_size,
+            cfg.num_attention_heads,
+            cfg.num_key_value_heads,
+            cfg.head_dim,
+            64,
+            cfg.rms_norm_eps,
+            max_seq_len,
+            cfg.rope_theta,
+        )
+    except BaseException as e:
+        msg = f"{type(e).__name__}: {e}"
+        if "memory" in msg.lower() or "PanicException" in type(e).__name__:
+            raise MemoryError(
+                f"Rust decoder host RAM exhausted: {msg}"
+            ) from e
+        raise
     return decoder
 
 

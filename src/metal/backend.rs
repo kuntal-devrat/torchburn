@@ -48,17 +48,29 @@ impl MetalBufferCache {
 }
 
 /// Pipeline state cache — PSO compilation is expensive; cache by function name.
+/// Libraries are cached per shader source hash so that different shader
+/// sources (e.g. METAL_GEMM_SHADER vs METAL_GEMV_W4A32_SHADER) coexist
+/// without recompiling.
 struct MetalPipelineCache {
     pipelines: Vec<(String, ComputePipelineState)>,
-    library: Option<Library>,
+    /// Per-source-string compiled libraries, keyed by a hash of the source.
+    libraries: Vec<(u64, Library)>,
 }
 
 impl MetalPipelineCache {
     fn new() -> Self {
         Self {
             pipelines: Vec::new(),
-            library: None,
+            libraries: Vec::new(),
         }
+    }
+
+    /// Hash a shader source string for library dedup.
+    fn source_hash(source: &str) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        source.hash(&mut h);
+        h.finish()
     }
 
     fn get_or_create(
@@ -70,13 +82,18 @@ impl MetalPipelineCache {
         if let Some(idx) = self.pipelines.iter().position(|(n, _)| n == name) {
             return Some(&self.pipelines[idx].1);
         }
-        // Compile library if not yet done
-        if self.library.is_none() {
+        // Find or compile the library for this source string
+        let sh = Self::source_hash(source);
+        let lib_idx = if let Some(pos) = self.libraries.iter().position(|(h, _)| *h == sh) {
+            pos
+        } else {
             let opts = CompileOptions::new();
             opts.set_fast_math_enabled(true);
-            self.library = device.new_library_with_source(source, &opts).ok();
-        }
-        let lib = self.library.as_ref()?;
+            let lib = device.new_library_with_source(source, &opts).ok()?;
+            self.libraries.push((sh, lib));
+            self.libraries.len() - 1
+        };
+        let lib = &self.libraries[lib_idx].1;
         let func = lib.get_function(name, None).ok()?;
         let pso = device
             .new_compute_pipeline_state_with_function(&func)
@@ -97,16 +114,33 @@ impl MetalBackend {
     }
 
     /// Get or initialize the Metal backend singleton.
+    /// Returns `None` gracefully if no Metal device is available (non-Mac
+    /// host, headless server, etc.) instead of panicking.
     pub fn instance() -> Option<&'static MetalBackend> {
         METAL_DEVICE.get_or_init(|| {
-            let device = Device::system_default().expect("No Metal device available");
-            let command_queue = device.new_command_queue();
-            MetalBackend {
-                device,
-                command_queue,
+            match Device::system_default() {
+                Some(device) => {
+                    let command_queue = device.new_command_queue();
+                    MetalBackend {
+                        device,
+                        command_queue,
+                    }
+                }
+                None => {
+                    // Return a dummy that will be detected by the None check
+                    // below. OnceLock always inits; we use is_available()
+                    // to guard callers.
+                    return;
+                }
             }
         });
-        Some(METAL_DEVICE.get().unwrap())
+        // If Device::system_default() returned None, the OnceLock body
+        // diverged (returned early). Re-check availability.
+        if Self::is_available() {
+            METAL_DEVICE.get()
+        } else {
+            None
+        }
     }
 
     /// Get the Metal device.
@@ -281,13 +315,13 @@ impl MetalBackend {
 
         let ptr = out_buf.contents() as *const f32;
         unsafe {
-            std::ptr::copy_nonoverlapping(ptr, out.as_mut_ptr(), n);
-        }
-
-        // Apply bias on CPU
-        if let Some(b) = bias {
-            for (o, &bv) in out.iter_mut().zip(b.iter()) {
-                *o += bv;
+            if let Some(b) = bias {
+                let out_ptr = out.as_mut_ptr();
+                for i in 0..n {
+                    *out_ptr.add(i) = *ptr.add(i) + *b.as_ptr().add(i);
+                }
+            } else {
+                std::ptr::copy_nonoverlapping(ptr, out.as_mut_ptr(), n);
             }
         }
         Some(())

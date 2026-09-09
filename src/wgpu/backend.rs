@@ -681,7 +681,10 @@ pub fn wgpu_gemv_w4a32(
         }
     }
 
-    let p = weight_map.get(&key).unwrap();
+    let p = weight_map.get(&key).ok_or_else(|| {
+        "wgpu: weight buffer was evicted from cache during the same call (this is a bug)"
+            .to_string()
+    })?;
 
     // 1. x buffer: only 3.5 KB upload per projection instead of 260 MB!
     let x_size = (((num_cols * 4 + 15) & !15).max(16)) as u64;

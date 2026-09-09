@@ -80,16 +80,37 @@ pub fn record(op: &str, elapsed_us: u64) {
     }
 }
 
+use std::borrow::Cow;
+
 /// Guard type: records elapsed time when dropped.
 pub struct OpTimer {
-    op: &'static str,
+    op: Cow<'static, str>,
     start: Instant,
 }
 
 impl OpTimer {
     #[inline(always)]
     pub fn start(op: &'static str) -> Self {
-        Self { op, start: Instant::now() }
+        Self {
+            op: Cow::Borrowed(op),
+            start: Instant::now(),
+        }
+    }
+
+    #[inline(always)]
+    pub fn start_str(op: &str) -> Self {
+        Self {
+            op: Cow::Owned(op.to_string()),
+            start: Instant::now(),
+        }
+    }
+
+    #[inline(always)]
+    pub fn start_owned(op: String) -> Self {
+        Self {
+            op: Cow::Owned(op),
+            start: Instant::now(),
+        }
     }
 }
 
@@ -97,17 +118,30 @@ impl Drop for OpTimer {
     #[inline]
     fn drop(&mut self) {
         let us = self.start.elapsed().as_micros() as u64;
-        record(self.op, us);
+        record(&self.op, us);
     }
 }
 
-/// Begin timing an op by target string. Returns `None` when profiling is off
-/// (zero-cost path) or `Some(OpTimer)` when on. The timer records on drop.
-///
-/// Usage in dispatch_node:
-/// ```rust
-/// let _timer = crate::profiler::maybe_time(target);
-/// ```
+/// Begin timing an op by static target string. Returns `None` when profiling is off.
+#[inline(always)]
+pub fn maybe_time(target: &'static str) -> Option<OpTimer> {
+    if is_enabled() {
+        Some(OpTimer::start(target))
+    } else {
+        None
+    }
+}
+
+/// Begin timing an op by dynamic target string. Returns `None` when profiling is off.
+#[inline(always)]
+pub fn maybe_time_str(target: &str) -> Option<OpTimer> {
+    if is_enabled() {
+        Some(OpTimer::start_str(target))
+    } else {
+        None
+    }
+}
+
 #[inline(always)]
 pub fn maybe_time_dyn(target: &str, start: Instant) {
     if is_enabled() {
@@ -158,7 +192,7 @@ pub fn profiler_report() -> Vec<(String, u64, u64, u64, u64)> {
         })
         .collect();
     // Sort by total_us descending (hottest ops first)
-    rows.sort_unstable_by(|a, b| b.2.cmp(&a.2));
+    rows.sort_unstable_by_key(|b| std::cmp::Reverse(b.2));
     rows
 }
 
@@ -174,11 +208,16 @@ pub fn profiler_print() {
         "\n[torchburn profiler] Op timing report ({} ops):",
         rows.len()
     );
-    eprintln!("{:<40} {:>8} {:>12} {:>10} {:>10}",
-        "op", "calls", "total_us", "min_us", "max_us");
+    eprintln!(
+        "{:<40} {:>8} {:>12} {:>10} {:>10}",
+        "op", "calls", "total_us", "min_us", "max_us"
+    );
     eprintln!("{}", "-".repeat(84));
     for (op, calls, total, min, max) in &rows {
-        eprintln!("{:<40} {:>8} {:>12} {:>10} {:>10}", op, calls, total, min, max);
+        eprintln!(
+            "{:<40} {:>8} {:>12} {:>10} {:>10}",
+            op, calls, total, min, max
+        );
     }
     eprintln!();
 }

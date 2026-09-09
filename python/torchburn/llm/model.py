@@ -10,6 +10,17 @@ import torch.nn.functional as F
 from .config import ModelConfig
 
 
+class LearnedPositionEmbedding(nn.Module):
+    """GPT-2 style learned absolute position embeddings."""
+
+    def __init__(self, max_seq_len: int, hidden_size: int):
+        super().__init__()
+        self.weight = nn.Parameter(torch.zeros(max_seq_len, hidden_size))
+
+    def forward(self, seq_len: int, offset: int, device: torch.device) -> torch.Tensor:
+        return self.weight[offset : offset + seq_len].to(device)
+
+
 class StaticKVCache:
     """Pre-allocated contiguous KV-cache buffer for zero-allocation token generation."""
 
@@ -120,6 +131,10 @@ class UniversalAttention(nn.Module):
         self.num_kv_heads = config.num_key_value_heads or self.num_heads
         self.head_dim = config.head_dim or (self.hidden_size // self.num_heads)
         self.scale = 1.0 / math.sqrt(self.head_dim)
+        self.qk_layernorm = config.qk_layernorm
+        if self.qk_layernorm:
+            self.q_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps)
+            self.k_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps)
 
         self.q_dim = self.num_heads * self.head_dim
         self.k_dim = self.num_kv_heads * self.head_dim
@@ -205,8 +220,13 @@ class UniversalAttention(nn.Module):
             k = self.k_proj(x).view(B, T, self.num_kv_heads, self.head_dim).transpose(1, 2)
             v = self.v_proj(x).view(B, T, self.num_kv_heads, self.head_dim).transpose(1, 2)
 
-        # Apply RoPE
-        q, k = apply_rotary_pos_emb(q, k, cos, sin)
+        if self.qk_layernorm:
+            q = self.q_norm(q)
+            k = self.k_norm(k)
+
+        # Apply RoPE (skipped for learned absolute positions)
+        if cos is not None and sin is not None:
+            q, k = apply_rotary_pos_emb(q, k, cos, sin)
 
         # KV-cache update
         if kv_cache is not None:
@@ -222,7 +242,16 @@ class UniversalAttention(nn.Module):
             new_kv_cache = (k, v)
 
         # Scaled dot-product attention
-        enable_gqa = (self.num_kv_heads < self.num_heads)
+        # expand k/v head-by-head when num_kv_heads does not divide num_heads
+        # (e.g. GPT-2 variants where head_dim covers the full hidden size).
+        if self.num_kv_heads != self.num_heads and self.num_heads % self.num_kv_heads != 0:
+            reps = self.num_heads // self.num_kv_heads
+            extra = self.num_heads - self.num_kv_heads * reps
+            k = torch.cat([k] * reps + [k[:, :extra]], dim=1)
+            v = torch.cat([v] * reps + [v[:, :extra]], dim=1)
+            enable_gqa = False
+        else:
+            enable_gqa = (self.num_kv_heads < self.num_heads)
         if T > 1 and offset > 0:
             # Continuation prefill: query row i attends to keys <= offset + i.
             # Vectorized causal mask (bool => True means "attend"), no python loop.
@@ -257,7 +286,11 @@ class UniversalMLP(nn.Module):
             self.down_proj = nn.Linear(config.intermediate_size, config.hidden_size, bias=False)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # Fused SwiGLU check if quantized
+        activation = str(self.config.hidden_act).lower()
+        is_silu = activation in ("silu", "swish")
+
+        # Fused SwiGLU check if quantized. The native kernel is only valid for
+        # SiLU-gated MLPs; other supported activations use the reference path.
         if (
             x.shape[1] == 1
             and hasattr(self.gate_proj, "qweight")
@@ -271,7 +304,8 @@ class UniversalMLP(nn.Module):
         # Batched prefill path: use the Rust GEMM kernel when seq_len > 1 and
         # the weights are quantized INT4 on the CPU backend.
         if (
-            x.shape[1] > 1
+            is_silu
+            and x.shape[1] > 1
             and hasattr(self.gate_proj, "qweight")
             and hasattr(self.up_proj, "qweight")
             and hasattr(self.down_proj, "qweight")
@@ -285,7 +319,48 @@ class UniversalMLP(nn.Module):
             except AttributeError:
                 pass  # older build without fused_swiglu_mlp_batched — fall through
 
-        return self.down_proj(F.silu(self.gate_proj(x)) * self.up_proj(x))
+        if is_silu:
+            activated = F.silu(self.gate_proj(x))
+        elif activation in ("gelu_new", "gelu_pytorch_tanh"):
+            activated = F.gelu(self.gate_proj(x), approximate="tanh")
+        elif activation == "gelu":
+            activated = F.gelu(self.gate_proj(x))
+        elif activation == "relu":
+            activated = F.relu(self.gate_proj(x))
+        elif activation == "relu2":
+            activated = F.relu(self.gate_proj(x)).square()
+        else:
+            raise ValueError(f"Unsupported decoder activation '{self.config.hidden_act}'")
+        return self.down_proj(activated * self.up_proj(x))
+
+
+class UniversalMoE(nn.Module):
+    """Token-choice Mixture-of-Experts layer (Mixtral / DeepSeek / Qwen3-MoE style)."""
+
+    def __init__(self, config: ModelConfig, quant: Optional[str] = None):
+        super().__init__()
+        self.config = config
+        self.num_experts = config.num_experts
+        self.top_k = config.num_experts_per_tok
+        self.gate = nn.Linear(config.hidden_size, self.num_experts, bias=False)
+        self.experts = nn.ModuleList([
+            UniversalMLP(config, quant=quant) for _ in range(self.num_experts)
+        ])
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        B, T, C = x.shape
+        flat = x.reshape(-1, C)
+        scores = F.softmax(self.gate(flat), dim=-1)
+        topk_scores, topk_idx = torch.topk(scores, self.top_k, dim=-1)
+        out = torch.zeros_like(flat)
+        for expert_idx, expert in enumerate(self.experts):
+            token_mask, slot = torch.where(topk_idx == expert_idx)
+            if token_mask.numel() == 0:
+                continue
+            expert_in = flat[token_mask]
+            expert_out = expert(expert_in.unsqueeze(1)).squeeze(1)
+            out.index_add_(0, token_mask, expert_out * topk_scores[token_mask, slot].unsqueeze(-1))
+        return out.reshape(B, T, C)
 
 
 class UniversalTransformerBlock(nn.Module):
@@ -296,7 +371,13 @@ class UniversalTransformerBlock(nn.Module):
         self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps, norm_type=config.norm_type)
         self.self_attn = UniversalAttention(config, quant=quant, fused_qkv=fused_qkv)
         self.post_attention_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps, norm_type=config.norm_type)
-        self.mlp = UniversalMLP(config, quant=quant)
+        if config.num_experts > 0:
+            self.moe = UniversalMoE(config, quant=quant)
+            self.mlp = None
+        else:
+            self.moe = None
+            self.mlp = UniversalMLP(config, quant=quant)
+        self.use_parallel_residual = config.use_parallel_residual
 
     def forward(
         self,
@@ -309,11 +390,15 @@ class UniversalTransformerBlock(nn.Module):
         residual = x
         normed = self.input_layernorm(x)
         attn_out, new_cache = self.self_attn(normed, cos=cos, sin=sin, kv_cache=kv_cache, offset=offset)
+        if self.use_parallel_residual:
+            mlp_out = (self.moe if self.moe is not None else self.mlp)(normed)
+            x = residual + attn_out + mlp_out
+            return x, new_cache
         x = residual + attn_out
 
         residual = x
         normed = self.post_attention_layernorm(x)
-        mlp_out = self.mlp(normed)
+        mlp_out = (self.moe if self.moe is not None else self.mlp)(normed)
         x = residual + mlp_out
 
         return x, new_cache
@@ -333,16 +418,23 @@ class UniversalTransformer(nn.Module):
         self.config = config
         self.quant = quant
         self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size)
-        self.rotary_emb = RotaryEmbedding(
-            dim=config.head_dim or (config.hidden_size // config.num_attention_heads),
-            max_seq_len=config.max_position_embeddings,
-            theta=config.rope_theta,
-        )
         self.layers = nn.ModuleList([
             UniversalTransformerBlock(config, quant=quant, fused_qkv=fused_qkv)
             for _ in range(config.num_hidden_layers)
         ])
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps, norm_type=config.norm_type)
+        self.position_encoding = config.position_encoding
+        if self.position_encoding == "learned":
+            self.position_embedding = LearnedPositionEmbedding(
+                config.max_position_embeddings, config.hidden_size
+            )
+        else:
+            self.position_embedding = None
+        self.rotary_emb = RotaryEmbedding(
+            dim=config.head_dim or (config.hidden_size // config.num_attention_heads),
+            max_seq_len=config.max_position_embeddings,
+            theta=config.rope_theta,
+        )
 
         if quant in ("int4", "int8"):
             from torchburn.quantization import QuantizedLinear
@@ -406,7 +498,11 @@ class UniversalTransformer(nn.Module):
         x = self.embed_tokens(input_ids)
         if self.config.scale_embeddings:
             x = x * math.sqrt(self.config.hidden_size)
-        cos, sin = self.rotary_emb(x, seq_len=T, offset=offset)
+        if self.position_encoding == "learned":
+            x = x + self.position_embedding(T, offset, x.device)
+            cos = sin = None
+        else:
+            cos, sin = self.rotary_emb(x, seq_len=T, offset=offset)
 
         new_caches = []
         for i, layer in enumerate(self.layers):

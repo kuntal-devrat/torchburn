@@ -20,6 +20,7 @@ dist/
 .vscode/
 .DS_Store
 .freebuff/
+.superbrain/
 
 # Internal PRDs, Roadmaps & Superplans (exclude all PRDs except README.md)
 ROADMAP_PRD.md

@@ -67,6 +67,8 @@ extern "C" {
 /// # Safety
 /// Pointers `a`, `b`, and `c` must be valid, properly aligned, and point to
 /// memory buffers of sufficient length for the specified matrix dimensions and strides.
+// NOTE: Parameter order is (m, k, n) to match matrixmultiply crate conventions,
+// whereas CBLAS C convention is (m, n, k). The internal cblas call reorders to (m, n, k).
 #[inline]
 pub unsafe fn sgemm_f32(
     m: i32,
@@ -104,6 +106,8 @@ pub unsafe fn sgemm_f32(
 /// # Safety
 /// Pointers `a`, `b`, and `c` must be valid, properly aligned, and point to
 /// memory buffers of sufficient length for the specified matrix dimensions and strides.
+// NOTE: Parameter order is (m, k, n) to match matrixmultiply crate conventions,
+// whereas CBLAS C convention is (m, n, k). The internal cblas call reorders to (m, n, k).
 #[inline]
 pub unsafe fn dgemm_f64(
     m: i32,

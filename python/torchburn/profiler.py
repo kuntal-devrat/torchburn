@@ -146,7 +146,7 @@ def coverage_report() -> dict[str, Any]:
     }
 
 
-def memory_stats() -> dict[str, Any]:
+def profiling_stats() -> dict[str, Any]:
     """Get accumulated profiling statistics since last reset.
 
     Returns:
@@ -159,6 +159,24 @@ def memory_stats() -> dict[str, Any]:
         native_ratio: fraction of nodes executed natively
     """
     return _STATS.stats()
+
+
+def memory_stats() -> dict[str, Any]:
+    """Get accumulated profiling statistics since last reset.
+
+    Note: For buffer allocation and memory pool diagnostics, see
+    `memory_pool_stats()` instead.
+
+    Returns:
+        calls: number of profiled executions
+        total_ms: total wall time across all profiled calls
+        avg_ms: average wall time per call
+        total_nodes: total graph nodes across all calls
+        total_native: total native nodes across all calls
+        total_fallbacks: total fallback nodes across all calls
+        native_ratio: fraction of nodes executed natively
+    """
+    return profiling_stats()
 
 
 def reset_stats() -> None:
@@ -200,43 +218,86 @@ def clear_memory_pool() -> None:
 
 
 def trace(model, example_inputs, **kwargs) -> dict[str, Any]:
-    """Generate a Chrome trace JSON for a model.
+    """Generate a Chrome trace JSON for a model with per-op execution events.
 
     Returns a dict with `traceEvents` that can be loaded in `chrome://tracing`
-    or `perfetto`. Currently profiles the native execution via `profile()`.
+    or `perfetto`. Profiles both aggregate native execution and individual op timings.
     """
     import torch
 
     if not isinstance(example_inputs, (list, tuple)):
         example_inputs = [example_inputs]
+
+    # Reset and enable native op profiler if available
+    profiler_active = False
+    try:
+        _native.profiler_reset()
+        _native.profiler_enable()
+        profiler_active = True
+    except AttributeError:
+        pass
+
     # Compile and profile
     compiled = torch.compile(model, backend="torchburn", **kwargs)
     with profile() as result:
         # Warmup + timed run
         _ = compiled(*example_inputs)
-    # Build minimal Chrome trace format
+
+    # Collect op-level report
+    raw_report = []
+    if profiler_active:
+        try:
+            raw_report = _native.profiler_report()
+            _native.profiler_disable()
+        except AttributeError:
+            pass
+
+    events = [
+        {
+            "name": "torchburn::execute",
+            "cat": "torchburn",
+            "ph": "X",
+            "ts": 0,
+            "dur": result.wall_time_ms * 1000,
+            "pid": 1,
+            "tid": 1,
+            "args": {
+                "engine": result.engine,
+                "nodes": result.num_nodes,
+                "native": result.num_supported,
+                "fallback": result.num_unsupported,
+            },
+        }
+    ]
+
+    # Add per-op slice events under torchburn::execute
+    cur_ts = 0.0
+    for op, calls, total_us, min_us, max_us in raw_report:
+        events.append({
+            "name": f"torchburn::{op}",
+            "cat": "op",
+            "ph": "X",
+            "ts": cur_ts,
+            "dur": float(total_us),
+            "pid": 1,
+            "tid": 1,
+            "args": {
+                "calls": calls,
+                "total_us": total_us,
+                "min_us": min_us,
+                "max_us": max_us,
+                "avg_us": total_us / max(calls, 1),
+            },
+        })
+        cur_ts += float(total_us)
+
     return {
-        "traceEvents": [
-            {
-                "name": "torchburn::execute",
-                "cat": "torchburn",
-                "ph": "X",
-                "ts": 0,
-                "dur": result.wall_time_ms * 1000,
-                "pid": 1,
-                "tid": 1,
-                "args": {
-                    "engine": result.engine,
-                    "nodes": result.num_nodes,
-                    "native": result.num_supported,
-                    "fallback": result.num_unsupported,
-                },
-            }
-        ],
+        "traceEvents": events,
         "displayTimeUnit": "ms",
         "metadata": {
             "engine": result.engine,
             "wall_time_ms": result.wall_time_ms,
+            "per_op_count": len(raw_report),
         },
     }
 

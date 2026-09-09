@@ -104,6 +104,30 @@ fn fast_sum_f64(data: &[f64]) -> f64 {
     }
 }
 
+fn fast_sum_i64(data: &[i64]) -> i64 {
+    let n = data.len();
+    if n >= 32768 {
+        let chunk_size = (n / rayon::current_num_threads()).max(8192);
+        data.par_chunks(chunk_size)
+            .map(|chunk| chunk.iter().copied().sum::<i64>())
+            .sum()
+    } else {
+        data.iter().copied().sum()
+    }
+}
+
+fn fast_sum_i32(data: &[i32]) -> i64 {
+    let n = data.len();
+    if n >= 32768 {
+        let chunk_size = (n / rayon::current_num_threads()).max(8192);
+        data.par_chunks(chunk_size)
+            .map(|chunk| chunk.iter().map(|&x| x as i64).sum::<i64>())
+            .sum()
+    } else {
+        data.iter().map(|&x| x as i64).sum()
+    }
+}
+
 fn fast_max_f32(data: &[f32]) -> (f32, usize) {
     let n = data.len();
     if n >= 32768 {
@@ -169,6 +193,54 @@ fn fast_min_f32(data: &[f32]) -> (f32, usize) {
         }
         (m_val, m_idx)
     }
+}
+
+fn fast_max_i64(data: &[i64]) -> (i64, usize) {
+    let mut m_val = i64::MIN;
+    let mut m_idx = 0;
+    for (i, &v) in data.iter().enumerate() {
+        if v > m_val {
+            m_val = v;
+            m_idx = i;
+        }
+    }
+    (m_val, m_idx)
+}
+
+fn fast_max_i32(data: &[i32]) -> (i32, usize) {
+    let mut m_val = i32::MIN;
+    let mut m_idx = 0;
+    for (i, &v) in data.iter().enumerate() {
+        if v > m_val {
+            m_val = v;
+            m_idx = i;
+        }
+    }
+    (m_val, m_idx)
+}
+
+fn fast_min_i64(data: &[i64]) -> (i64, usize) {
+    let mut m_val = i64::MAX;
+    let mut m_idx = 0;
+    for (i, &v) in data.iter().enumerate() {
+        if v < m_val {
+            m_val = v;
+            m_idx = i;
+        }
+    }
+    (m_val, m_idx)
+}
+
+fn fast_min_i32(data: &[i32]) -> (i32, usize) {
+    let mut m_val = i32::MAX;
+    let mut m_idx = 0;
+    for (i, &v) in data.iter().enumerate() {
+        if v < m_val {
+            m_val = v;
+            m_idx = i;
+        }
+    }
+    (m_val, m_idx)
 }
 
 // ---------------------------------------------------------------------------
@@ -261,16 +333,35 @@ fn sum_f32(a: &BorrowedTensor, dim: usize, keepdim: bool) -> OwnedTensor {
         return out;
     }
 
-    // Generic path for non-innermost dimensions
-    for outer in 0..outer_size {
-        for inner in 0..inner_size {
-            let mut sum = 0.0f32;
-            for i in 0..dim_size {
-                let idx = outer * (dim_size * inner_size) + i * inner_size + inner;
-                sum += a_data[idx];
+    // Generic path for non-innermost dimensions — parallelized via Rayon
+    // when the outer dimension is large enough to amortize thread overhead.
+    if outer_size >= 4096 {
+        use rayon::prelude::*;
+        let out_p = out_data.as_mut_ptr() as usize;
+        (0..outer_size).into_par_iter().for_each(|outer| {
+            for inner in 0..inner_size {
+                let mut sum = 0.0f32;
+                for i in 0..dim_size {
+                    let idx = outer * (dim_size * inner_size) + i * inner_size + inner;
+                    sum += a_data[idx];
+                }
+                let out_idx = outer * inner_size + inner;
+                unsafe {
+                    *(out_p as *mut f32).add(out_idx) = sum;
+                }
             }
-            let out_idx = outer * inner_size + inner;
-            out_data[out_idx] = sum;
+        });
+    } else {
+        for outer in 0..outer_size {
+            for inner in 0..inner_size {
+                let mut sum = 0.0f32;
+                for i in 0..dim_size {
+                    let idx = outer * (dim_size * inner_size) + i * inner_size + inner;
+                    sum += a_data[idx];
+                }
+                let out_idx = outer * inner_size + inner;
+                out_data[out_idx] = sum;
+            }
         }
     }
     out
@@ -304,11 +395,77 @@ fn sum_f64(a: &BorrowedTensor, dim: usize, keepdim: bool) -> OwnedTensor {
                 let idx = outer * (dim_size * inner_size) + i * inner_size + inner;
                 sum += a_data[idx];
             }
-            let out_idx = if keepdim {
-                outer * inner_size + inner
-            } else {
-                outer * inner_size + inner
-            };
+            let out_idx = outer * inner_size + inner;
+            out_data[out_idx] = sum;
+        }
+    }
+    out
+}
+
+fn sum_i64(a: &BorrowedTensor, dim: usize, keepdim: bool) -> OwnedTensor {
+    let a_data = unsafe { typed_slice::<i64>(a) };
+    let out_shape = reduce_shape(&a.shape, dim, keepdim);
+    let mut out = OwnedTensor::new(DType::I64, out_shape);
+    let out_data = unsafe { typed_mut_slice::<i64>(&mut out) };
+
+    let shape = &a.shape;
+    let rank = shape.len();
+    let dim_size = shape[dim] as usize;
+    let mut outer_stride = 1i64;
+    for i in 0..dim {
+        outer_stride *= shape[i];
+    }
+    let mut inner_stride = 1i64;
+    for i in (dim + 1)..rank {
+        inner_stride *= shape[i];
+    }
+
+    let outer_size = outer_stride as usize;
+    let inner_size = inner_stride as usize;
+
+    for outer in 0..outer_size {
+        for inner in 0..inner_size {
+            let mut sum = 0i64;
+            for i in 0..dim_size {
+                let idx = outer * (dim_size * inner_size) + i * inner_size + inner;
+                sum += a_data[idx];
+            }
+            let out_idx = outer * inner_size + inner;
+            out_data[out_idx] = sum;
+        }
+    }
+    out
+}
+
+fn sum_i32(a: &BorrowedTensor, dim: usize, keepdim: bool) -> OwnedTensor {
+    let a_data = unsafe { typed_slice::<i32>(a) };
+    let out_shape = reduce_shape(&a.shape, dim, keepdim);
+    let mut out = OwnedTensor::new(DType::I64, out_shape);
+    let out_data = unsafe { typed_mut_slice::<i64>(&mut out) };
+
+    let shape = &a.shape;
+    let rank = shape.len();
+    let dim_size = shape[dim] as usize;
+    let mut outer_stride = 1i64;
+    for i in 0..dim {
+        outer_stride *= shape[i];
+    }
+    let mut inner_stride = 1i64;
+    for i in (dim + 1)..rank {
+        inner_stride *= shape[i];
+    }
+
+    let outer_size = outer_stride as usize;
+    let inner_size = inner_stride as usize;
+
+    for outer in 0..outer_size {
+        for inner in 0..inner_size {
+            let mut sum = 0i64;
+            for i in 0..dim_size {
+                let idx = outer * (dim_size * inner_size) + i * inner_size + inner;
+                sum += a_data[idx] as i64;
+            }
+            let out_idx = outer * inner_size + inner;
             out_data[out_idx] = sum;
         }
     }
@@ -330,53 +487,52 @@ pub fn sum(a: &BorrowedTensor, dim: Option<isize>, keepdim: bool) -> PyResult<Ow
             Ok(match a.dtype {
                 DType::F32 => sum_f32(a, d, keepdim),
                 DType::F64 => sum_f64(a, d, keepdim),
-                DType::I64
-                | DType::I32
-                | DType::I8
-                | DType::U8
-                | DType::Bool
-                | DType::F16
-                | DType::BF16 => {
-                    return Err(unsupported("this kernel only supports f32/f64 tensors"))
+                DType::I64 => sum_i64(a, d, keepdim),
+                DType::I32 => sum_i32(a, d, keepdim),
+                DType::I8 | DType::U8 | DType::Bool | DType::F16 | DType::BF16 => {
+                    return Err(unsupported(
+                        "this kernel only supports f32/f64/i64/i32 tensors",
+                    ))
                 }
             })
         }
         None => {
             // Reduce all dims — scalar output
-            let total: f64 = match a.dtype {
-                DType::F32 => fast_sum_f32(unsafe { typed_slice::<f32>(a) }),
-                DType::F64 => fast_sum_f64(unsafe { typed_slice::<f64>(a) }),
-                DType::I64
-                | DType::I32
-                | DType::I8
-                | DType::U8
-                | DType::Bool
-                | DType::F16
-                | DType::BF16 => {
-                    return Err(unsupported("this kernel only supports f32/f64 tensors"))
-                }
-            };
-            let mut out = OwnedTensor::new(a.dtype, vec![]);
             match a.dtype {
                 DType::F32 => {
+                    let total = fast_sum_f32(unsafe { typed_slice::<f32>(a) });
+                    let mut out = OwnedTensor::new(DType::F32, vec![]);
                     let d = unsafe { typed_mut_slice::<f32>(&mut out) };
                     d[0] = total as f32;
+                    Ok(out)
                 }
                 DType::F64 => {
+                    let total = fast_sum_f64(unsafe { typed_slice::<f64>(a) });
+                    let mut out = OwnedTensor::new(DType::F64, vec![]);
                     let d = unsafe { typed_mut_slice::<f64>(&mut out) };
                     d[0] = total;
+                    Ok(out)
                 }
-                DType::I64
-                | DType::I32
-                | DType::I8
-                | DType::U8
-                | DType::Bool
-                | DType::F16
-                | DType::BF16 => {
-                    return Err(unsupported("this kernel only supports f32/f64 tensors"));
+                DType::I64 => {
+                    let total = fast_sum_i64(unsafe { typed_slice::<i64>(a) });
+                    let mut out = OwnedTensor::new(DType::I64, vec![]);
+                    let d = unsafe { typed_mut_slice::<i64>(&mut out) };
+                    d[0] = total;
+                    Ok(out)
+                }
+                DType::I32 => {
+                    let total = fast_sum_i32(unsafe { typed_slice::<i32>(a) });
+                    let mut out = OwnedTensor::new(DType::I64, vec![]);
+                    let d = unsafe { typed_mut_slice::<i64>(&mut out) };
+                    d[0] = total;
+                    Ok(out)
+                }
+                DType::I8 | DType::U8 | DType::Bool | DType::F16 | DType::BF16 => {
+                    return Err(unsupported(
+                        "this kernel only supports f32/f64/i64/i32 tensors",
+                    ));
                 }
             }
-            Ok(out)
         }
     }
 }
@@ -464,10 +620,14 @@ pub fn mean(a: &BorrowedTensor, dim: Option<isize>, keepdim: bool) -> PyResult<O
 
 pub fn sum_dims(a: &BorrowedTensor, dims: &[isize], keepdim: bool) -> PyResult<OwnedTensor> {
     let rank = a.shape.len();
-    let norm: Vec<usize> = dims.iter().map(|&d| norm_dim(d, rank)).collect();
+    let mut norm: Vec<usize> = dims.iter().map(|&d| norm_dim(d, rank)).collect();
     if norm.len() <= 1 {
         return sum(a, norm.first().map(|&d| d as isize), keepdim);
     }
+    // Sort dims DESCENDING so each reduction step removes the highest dim
+    // first. This keeps the remaining dim indices valid: reducing dim 3
+    // before dim 1 means dim 1's index is unchanged for the next step.
+    norm.sort_unstable_by(|a, b| b.cmp(a));
     // Reduce with keepdim=true on every step except the last so positions stay
     // valid for the remaining dims; the final step honours the caller's flag.
     let mut cur = sum(a, Some(norm[0] as isize), true)?;
@@ -588,6 +748,90 @@ fn max_f64(a: &BorrowedTensor, dim: usize, keepdim: bool) -> (OwnedTensor, Owned
     (out_val, out_idx)
 }
 
+fn max_i64(a: &BorrowedTensor, dim: usize, keepdim: bool) -> (OwnedTensor, OwnedTensor) {
+    let a_data = unsafe { typed_slice::<i64>(a) };
+    let out_shape = reduce_shape(&a.shape, dim, keepdim);
+    let mut out_val = OwnedTensor::new(DType::I64, out_shape.clone());
+    let mut out_idx = OwnedTensor::new(DType::I64, out_shape);
+    let out_val_data = unsafe { typed_mut_slice::<i64>(&mut out_val) };
+    let out_idx_data = unsafe { typed_mut_slice::<i64>(&mut out_idx) };
+
+    let shape = &a.shape;
+    let rank = shape.len();
+    let dim_size = shape[dim] as usize;
+    let mut outer_stride = 1i64;
+    for i in 0..dim {
+        outer_stride *= shape[i];
+    }
+    let mut inner_stride = 1i64;
+    for i in (dim + 1)..rank {
+        inner_stride *= shape[i];
+    }
+
+    let outer_size = outer_stride as usize;
+    let inner_size = inner_stride as usize;
+
+    for outer in 0..outer_size {
+        for inner in 0..inner_size {
+            let mut max_val = i64::MIN;
+            let mut max_i = 0usize;
+            for i in 0..dim_size {
+                let idx = outer * (dim_size * inner_size) + i * inner_size + inner;
+                if a_data[idx] > max_val {
+                    max_val = a_data[idx];
+                    max_i = i;
+                }
+            }
+            let out_idx_pos = outer * inner_size + inner;
+            out_val_data[out_idx_pos] = max_val;
+            out_idx_data[out_idx_pos] = max_i as i64;
+        }
+    }
+    (out_val, out_idx)
+}
+
+fn max_i32(a: &BorrowedTensor, dim: usize, keepdim: bool) -> (OwnedTensor, OwnedTensor) {
+    let a_data = unsafe { typed_slice::<i32>(a) };
+    let out_shape = reduce_shape(&a.shape, dim, keepdim);
+    let mut out_val = OwnedTensor::new(DType::I32, out_shape.clone());
+    let mut out_idx = OwnedTensor::new(DType::I64, out_shape);
+    let out_val_data = unsafe { typed_mut_slice::<i32>(&mut out_val) };
+    let out_idx_data = unsafe { typed_mut_slice::<i64>(&mut out_idx) };
+
+    let shape = &a.shape;
+    let rank = shape.len();
+    let dim_size = shape[dim] as usize;
+    let mut outer_stride = 1i64;
+    for i in 0..dim {
+        outer_stride *= shape[i];
+    }
+    let mut inner_stride = 1i64;
+    for i in (dim + 1)..rank {
+        inner_stride *= shape[i];
+    }
+
+    let outer_size = outer_stride as usize;
+    let inner_size = inner_stride as usize;
+
+    for outer in 0..outer_size {
+        for inner in 0..inner_size {
+            let mut max_val = i32::MIN;
+            let mut max_i = 0usize;
+            for i in 0..dim_size {
+                let idx = outer * (dim_size * inner_size) + i * inner_size + inner;
+                if a_data[idx] > max_val {
+                    max_val = a_data[idx];
+                    max_i = i;
+                }
+            }
+            let out_idx_pos = outer * inner_size + inner;
+            out_val_data[out_idx_pos] = max_val;
+            out_idx_data[out_idx_pos] = max_i as i64;
+        }
+    }
+    (out_val, out_idx)
+}
+
 pub fn max_reduce(
     a: &BorrowedTensor,
     dim: Option<isize>,
@@ -607,14 +851,12 @@ pub fn max_reduce(
             Ok(match a.dtype {
                 DType::F32 => max_f32(a, d, keepdim),
                 DType::F64 => max_f64(a, d, keepdim),
-                DType::I64
-                | DType::I32
-                | DType::I8
-                | DType::U8
-                | DType::Bool
-                | DType::F16
-                | DType::BF16 => {
-                    return Err(unsupported("this kernel only supports f32/f64 tensors"))
+                DType::I64 => max_i64(a, d, keepdim),
+                DType::I32 => max_i32(a, d, keepdim),
+                DType::I8 | DType::U8 | DType::Bool | DType::F16 | DType::BF16 => {
+                    return Err(unsupported(
+                        "this kernel only supports f32/f64/i64/i32 tensors",
+                    ))
                 }
             })
         }
@@ -658,14 +900,40 @@ pub fn max_reduce(
                     }
                     Ok((out_val, out_idx))
                 }
-                DType::I64
-                | DType::I32
-                | DType::I8
-                | DType::U8
-                | DType::Bool
-                | DType::F16
-                | DType::BF16 => {
-                    return Err(unsupported("this kernel only supports f32/f64 tensors"));
+                DType::I64 => {
+                    let data = unsafe { typed_slice::<i64>(a) };
+                    let (max_val, max_i) = fast_max_i64(data);
+                    let mut out_val = OwnedTensor::new(DType::I64, vec![]);
+                    let mut out_idx = OwnedTensor::new(DType::I64, vec![]);
+                    {
+                        let v = unsafe { typed_mut_slice::<i64>(&mut out_val) };
+                        v[0] = max_val;
+                    }
+                    {
+                        let i = unsafe { typed_mut_slice::<i64>(&mut out_idx) };
+                        i[0] = max_i as i64;
+                    }
+                    Ok((out_val, out_idx))
+                }
+                DType::I32 => {
+                    let data = unsafe { typed_slice::<i32>(a) };
+                    let (max_val, max_i) = fast_max_i32(data);
+                    let mut out_val = OwnedTensor::new(DType::I32, vec![]);
+                    let mut out_idx = OwnedTensor::new(DType::I64, vec![]);
+                    {
+                        let v = unsafe { typed_mut_slice::<i32>(&mut out_val) };
+                        v[0] = max_val;
+                    }
+                    {
+                        let i = unsafe { typed_mut_slice::<i64>(&mut out_idx) };
+                        i[0] = max_i as i64;
+                    }
+                    Ok((out_val, out_idx))
+                }
+                DType::I8 | DType::U8 | DType::Bool | DType::F16 | DType::BF16 => {
+                    return Err(unsupported(
+                        "this kernel only supports f32/f64/i64/i32 tensors",
+                    ));
                 }
             }
         }
@@ -758,6 +1026,90 @@ fn min_f64(a: &BorrowedTensor, dim: usize, keepdim: bool) -> (OwnedTensor, Owned
     (out_val, out_idx)
 }
 
+fn min_i64(a: &BorrowedTensor, dim: usize, keepdim: bool) -> (OwnedTensor, OwnedTensor) {
+    let a_data = unsafe { typed_slice::<i64>(a) };
+    let out_shape = reduce_shape(&a.shape, dim, keepdim);
+    let mut out_val = OwnedTensor::new(DType::I64, out_shape.clone());
+    let mut out_idx = OwnedTensor::new(DType::I64, out_shape);
+    let out_val_data = unsafe { typed_mut_slice::<i64>(&mut out_val) };
+    let out_idx_data = unsafe { typed_mut_slice::<i64>(&mut out_idx) };
+
+    let shape = &a.shape;
+    let rank = shape.len();
+    let dim_size = shape[dim] as usize;
+    let mut outer_stride = 1i64;
+    for i in 0..dim {
+        outer_stride *= shape[i];
+    }
+    let mut inner_stride = 1i64;
+    for i in (dim + 1)..rank {
+        inner_stride *= shape[i];
+    }
+
+    let outer_size = outer_stride as usize;
+    let inner_size = inner_stride as usize;
+
+    for outer in 0..outer_size {
+        for inner in 0..inner_size {
+            let mut min_val = i64::MAX;
+            let mut min_i = 0usize;
+            for i in 0..dim_size {
+                let idx = outer * (dim_size * inner_size) + i * inner_size + inner;
+                if a_data[idx] < min_val {
+                    min_val = a_data[idx];
+                    min_i = i;
+                }
+            }
+            let out_pos = outer * inner_size + inner;
+            out_val_data[out_pos] = min_val;
+            out_idx_data[out_pos] = min_i as i64;
+        }
+    }
+    (out_val, out_idx)
+}
+
+fn min_i32(a: &BorrowedTensor, dim: usize, keepdim: bool) -> (OwnedTensor, OwnedTensor) {
+    let a_data = unsafe { typed_slice::<i32>(a) };
+    let out_shape = reduce_shape(&a.shape, dim, keepdim);
+    let mut out_val = OwnedTensor::new(DType::I32, out_shape.clone());
+    let mut out_idx = OwnedTensor::new(DType::I64, out_shape);
+    let out_val_data = unsafe { typed_mut_slice::<i32>(&mut out_val) };
+    let out_idx_data = unsafe { typed_mut_slice::<i64>(&mut out_idx) };
+
+    let shape = &a.shape;
+    let rank = shape.len();
+    let dim_size = shape[dim] as usize;
+    let mut outer_stride = 1i64;
+    for i in 0..dim {
+        outer_stride *= shape[i];
+    }
+    let mut inner_stride = 1i64;
+    for i in (dim + 1)..rank {
+        inner_stride *= shape[i];
+    }
+
+    let outer_size = outer_stride as usize;
+    let inner_size = inner_stride as usize;
+
+    for outer in 0..outer_size {
+        for inner in 0..inner_size {
+            let mut min_val = i32::MAX;
+            let mut min_i = 0usize;
+            for i in 0..dim_size {
+                let idx = outer * (dim_size * inner_size) + i * inner_size + inner;
+                if a_data[idx] < min_val {
+                    min_val = a_data[idx];
+                    min_i = i;
+                }
+            }
+            let out_pos = outer * inner_size + inner;
+            out_val_data[out_pos] = min_val;
+            out_idx_data[out_pos] = min_i as i64;
+        }
+    }
+    (out_val, out_idx)
+}
+
 pub fn min_reduce(
     a: &BorrowedTensor,
     dim: Option<isize>,
@@ -777,14 +1129,12 @@ pub fn min_reduce(
             Ok(match a.dtype {
                 DType::F32 => min_f32(a, d, keepdim),
                 DType::F64 => min_f64(a, d, keepdim),
-                DType::I64
-                | DType::I32
-                | DType::I8
-                | DType::U8
-                | DType::Bool
-                | DType::F16
-                | DType::BF16 => {
-                    return Err(unsupported("this kernel only supports f32/f64 tensors"))
+                DType::I64 => min_i64(a, d, keepdim),
+                DType::I32 => min_i32(a, d, keepdim),
+                DType::I8 | DType::U8 | DType::Bool | DType::F16 | DType::BF16 => {
+                    return Err(unsupported(
+                        "this kernel only supports f32/f64/i64/i32 tensors",
+                    ))
                 }
             })
         }
@@ -826,14 +1176,40 @@ pub fn min_reduce(
                 }
                 Ok((out_val, out_idx))
             }
-            DType::I64
-            | DType::I32
-            | DType::I8
-            | DType::U8
-            | DType::Bool
-            | DType::F16
-            | DType::BF16 => {
-                return Err(unsupported("this kernel only supports f32/f64 tensors"));
+            DType::I64 => {
+                let data = unsafe { typed_slice::<i64>(a) };
+                let (min_val, min_i) = fast_min_i64(data);
+                let mut out_val = OwnedTensor::new(DType::I64, vec![]);
+                let mut out_idx = OwnedTensor::new(DType::I64, vec![]);
+                {
+                    let v = unsafe { typed_mut_slice::<i64>(&mut out_val) };
+                    v[0] = min_val;
+                }
+                {
+                    let i = unsafe { typed_mut_slice::<i64>(&mut out_idx) };
+                    i[0] = min_i as i64;
+                }
+                Ok((out_val, out_idx))
+            }
+            DType::I32 => {
+                let data = unsafe { typed_slice::<i32>(a) };
+                let (min_val, min_i) = fast_min_i32(data);
+                let mut out_val = OwnedTensor::new(DType::I32, vec![]);
+                let mut out_idx = OwnedTensor::new(DType::I64, vec![]);
+                {
+                    let v = unsafe { typed_mut_slice::<i32>(&mut out_val) };
+                    v[0] = min_val;
+                }
+                {
+                    let i = unsafe { typed_mut_slice::<i64>(&mut out_idx) };
+                    i[0] = min_i as i64;
+                }
+                Ok((out_val, out_idx))
+            }
+            DType::I8 | DType::U8 | DType::Bool | DType::F16 | DType::BF16 => {
+                return Err(unsupported(
+                    "this kernel only supports f32/f64/i64/i32 tensors",
+                ));
             }
         },
     }
@@ -850,35 +1226,8 @@ pub fn argmax(a: &BorrowedTensor, dim: Option<isize>, keepdim: bool) -> PyResult
 }
 
 pub fn argmin(a: &BorrowedTensor, dim: Option<isize>, keepdim: bool) -> PyResult<OwnedTensor> {
-    // argmin is negated max
-    let negated = match a.dtype {
-        DType::F32 => {
-            let data = unsafe { typed_slice::<f32>(a) };
-            let mut out = OwnedTensor::new(DType::F32, a.shape.clone());
-            let out_data = unsafe { typed_mut_slice::<f32>(&mut out) };
-            for (i, &v) in data.iter().enumerate() {
-                out_data[i] = -v;
-            }
-            out
-        }
-        DType::F64 => {
-            let data = unsafe { typed_slice::<f64>(a) };
-            let mut out = OwnedTensor::new(DType::F64, a.shape.clone());
-            let out_data = unsafe { typed_mut_slice::<f64>(&mut out) };
-            for (i, &v) in data.iter().enumerate() {
-                out_data[i] = -v;
-            }
-            out
-        }
-        DType::I64
-        | DType::I32
-        | DType::I8
-        | DType::U8
-        | DType::Bool
-        | DType::F16
-        | DType::BF16 => return Err(unsupported("this kernel only supports f32/f64 tensors")),
-    };
-    let (_, idx) = max_reduce(&BorrowedTensor::from_owned(&negated), dim, keepdim)?;
+    // Direct min_reduce — correct NaN handling and avoids redundant negation copy.
+    let (_, idx) = min_reduce(a, dim, keepdim)?;
     Ok(idx)
 }
 
@@ -928,6 +1277,9 @@ pub fn std_dev(
     }
 }
 
+/// Welford's online single-pass variance — numerically stable, one pass over
+/// the data instead of two (mean then squared-difference). Halves memory
+/// bandwidth compared to the previous two-pass implementation.
 fn variance(
     a: &BorrowedTensor,
     dim: Option<isize>,
@@ -942,8 +1294,6 @@ fn variance(
         a.clone()
     };
     let a = &a;
-    let m = mean(a, dim, keepdim)?;
-    // var = mean((x - mean)^2), then divide by n or n-1
     match dim {
         Some(d) => {
             let d = norm_dim(d, a.shape.len());
@@ -970,42 +1320,47 @@ fn variance(
 
             match a.dtype {
                 DType::F32 => {
-                    let m_view = m.as_view();
-                    let m_data = unsafe { typed_slice::<f32>(&m_view) };
                     let a_data = unsafe { typed_slice::<f32>(a) };
                     let out_data = unsafe { typed_mut_slice::<f32>(&mut out) };
                     for outer in 0..outer_size {
                         for inner in 0..inner_size {
-                            let mean_val = m_data[outer * inner_size + inner];
-                            let mut sum_sq = 0.0f32;
+                            // Welford's online algorithm: single pass
+                            let mut mean = 0.0f64;
+                            let mut m2 = 0.0f64;
                             for i in 0..dim_size as usize {
                                 let idx = outer * (dim_size as usize * inner_size)
                                     + i * inner_size
                                     + inner;
-                                let diff = a_data[idx] - mean_val;
-                                sum_sq += diff * diff;
+                                let x = a_data[idx] as f64;
+                                let count = (i + 1) as f64;
+                                let delta = x - mean;
+                                mean += delta / count;
+                                let delta2 = x - mean;
+                                m2 += delta * delta2;
                             }
-                            out_data[outer * inner_size + inner] = sum_sq / n as f32;
+                            out_data[outer * inner_size + inner] = (m2 / n) as f32;
                         }
                     }
                 }
                 DType::F64 => {
-                    let m_view = m.as_view();
-                    let m_data = unsafe { typed_slice::<f64>(&m_view) };
                     let a_data = unsafe { typed_slice::<f64>(a) };
                     let out_data = unsafe { typed_mut_slice::<f64>(&mut out) };
                     for outer in 0..outer_size {
                         for inner in 0..inner_size {
-                            let mean_val = m_data[outer * inner_size + inner];
-                            let mut sum_sq = 0.0f64;
+                            let mut mean = 0.0f64;
+                            let mut m2 = 0.0f64;
                             for i in 0..dim_size as usize {
                                 let idx = outer * (dim_size as usize * inner_size)
                                     + i * inner_size
                                     + inner;
-                                let diff = a_data[idx] - mean_val;
-                                sum_sq += diff * diff;
+                                let x = a_data[idx];
+                                let count = (i + 1) as f64;
+                                let delta = x - mean;
+                                mean += delta / count;
+                                let delta2 = x - mean;
+                                m2 += delta * delta2;
                             }
-                            out_data[outer * inner_size + inner] = sum_sq / n;
+                            out_data[outer * inner_size + inner] = m2 / n;
                         }
                     }
                 }
@@ -1031,28 +1386,34 @@ fn variance(
             let mut out = OwnedTensor::new(a.dtype, vec![]);
             match a.dtype {
                 DType::F32 => {
-                    let m_view = m.as_view();
-                    let m_val = unsafe { typed_slice::<f32>(&m_view) }[0];
                     let a_data = unsafe { typed_slice::<f32>(a) };
-                    let mut sum_sq = 0.0f32;
-                    for &v in a_data.iter() {
-                        let diff = v - m_val;
-                        sum_sq += diff * diff;
+                    // Welford single-pass: no separate mean() call needed
+                    let mut mean = 0.0f64;
+                    let mut m2 = 0.0f64;
+                    for (i, &v) in a_data.iter().enumerate() {
+                        let x = v as f64;
+                        let count = (i + 1) as f64;
+                        let delta = x - mean;
+                        mean += delta / count;
+                        let delta2 = x - mean;
+                        m2 += delta * delta2;
                     }
                     let d = unsafe { typed_mut_slice::<f32>(&mut out) };
-                    d[0] = sum_sq / n as f32;
+                    d[0] = (m2 / n) as f32;
                 }
                 DType::F64 => {
-                    let m_view = m.as_view();
-                    let m_val = unsafe { typed_slice::<f64>(&m_view) }[0];
                     let a_data = unsafe { typed_slice::<f64>(a) };
-                    let mut sum_sq = 0.0f64;
-                    for &v in a_data.iter() {
-                        let diff = v - m_val;
-                        sum_sq += diff * diff;
+                    let mut mean = 0.0f64;
+                    let mut m2 = 0.0f64;
+                    for (i, &v) in a_data.iter().enumerate() {
+                        let count = (i + 1) as f64;
+                        let delta = v - mean;
+                        mean += delta / count;
+                        let delta2 = v - mean;
+                        m2 += delta * delta2;
                     }
                     let d = unsafe { typed_mut_slice::<f64>(&mut out) };
-                    d[0] = sum_sq / n;
+                    d[0] = m2 / n;
                 }
                 DType::I64
                 | DType::I32
@@ -1146,14 +1507,69 @@ pub fn cumsum(a: &BorrowedTensor, dim: isize) -> PyResult<OwnedTensor> {
             }
         }
 
-        DType::I64
-        | DType::I32
-        | DType::I8
-        | DType::U8
-        | DType::Bool
-        | DType::F16
-        | DType::BF16 => {
-            return Err(unsupported("this kernel only supports f32/f64 tensors"));
+        DType::I64 => {
+            let a_data = unsafe { typed_slice::<i64>(a) };
+            let out_data = unsafe { typed_mut_slice::<i64>(&mut out) };
+            let shape = &a.shape;
+            let rank = shape.len();
+            let dim_size = shape[d] as usize;
+            let mut outer_stride = 1i64;
+            for i in 0..d {
+                outer_stride *= shape[i];
+            }
+            let mut inner_stride = 1i64;
+            for i in (d + 1)..rank {
+                inner_stride *= shape[i];
+            }
+
+            let outer_size = outer_stride as usize;
+            let inner_size = inner_stride as usize;
+
+            for outer in 0..outer_size {
+                for inner in 0..inner_size {
+                    let mut cum = 0i64;
+                    for i in 0..dim_size {
+                        let idx = outer * (dim_size * inner_size) + i * inner_size + inner;
+                        cum = cum.wrapping_add(a_data[idx]);
+                        out_data[idx] = cum;
+                    }
+                }
+            }
+        }
+        DType::I32 => {
+            let a_data = unsafe { typed_slice::<i32>(a) };
+            let out_data = unsafe { typed_mut_slice::<i32>(&mut out) };
+            let shape = &a.shape;
+            let rank = shape.len();
+            let dim_size = shape[d] as usize;
+            let mut outer_stride = 1i64;
+            for i in 0..d {
+                outer_stride *= shape[i];
+            }
+            let mut inner_stride = 1i64;
+            for i in (d + 1)..rank {
+                inner_stride *= shape[i];
+            }
+
+            let outer_size = outer_stride as usize;
+            let inner_size = inner_stride as usize;
+
+            for outer in 0..outer_size {
+                for inner in 0..inner_size {
+                    let mut cum = 0i32;
+                    for i in 0..dim_size {
+                        let idx = outer * (dim_size * inner_size) + i * inner_size + inner;
+                        cum = cum.wrapping_add(a_data[idx]);
+                        out_data[idx] = cum;
+                    }
+                }
+            }
+        }
+
+        DType::I8 | DType::U8 | DType::Bool | DType::F16 | DType::BF16 => {
+            return Err(unsupported(
+                "this kernel only supports f32/f64/i64/i32 tensors",
+            ));
         }
     }
     Ok(out)
@@ -1233,53 +1649,101 @@ pub fn prod(a: &BorrowedTensor, dim: Option<isize>, keepdim: bool) -> PyResult<O
                         }
                     }
                 }
-                DType::I64
-                | DType::I32
-                | DType::I8
-                | DType::U8
-                | DType::Bool
-                | DType::F16
-                | DType::BF16 => {
-                    return Err(unsupported("this kernel only supports f32/f64 tensors"));
+                DType::I64 => {
+                    let a_data = unsafe { typed_slice::<i64>(a) };
+                    let out_data = unsafe { typed_mut_slice::<i64>(&mut out) };
+                    let shape = &a.shape;
+                    let rank = shape.len();
+                    let dim_size = shape[d] as usize;
+                    let mut outer_stride = 1i64;
+                    for i in 0..d {
+                        outer_stride *= shape[i];
+                    }
+                    let mut inner_stride = 1i64;
+                    for i in (d + 1)..rank {
+                        inner_stride *= shape[i];
+                    }
+                    let outer_size = outer_stride as usize;
+                    let inner_size = inner_stride as usize;
+                    for outer in 0..outer_size {
+                        for inner in 0..inner_size {
+                            let mut prod = 1i64;
+                            for i in 0..dim_size {
+                                let idx = outer * (dim_size * inner_size) + i * inner_size + inner;
+                                prod = prod.wrapping_mul(a_data[idx]);
+                            }
+                            out_data[outer * inner_size + inner] = prod;
+                        }
+                    }
+                }
+                DType::I32 => {
+                    let a_data = unsafe { typed_slice::<i32>(a) };
+                    let out_data = unsafe { typed_mut_slice::<i32>(&mut out) };
+                    let shape = &a.shape;
+                    let rank = shape.len();
+                    let dim_size = shape[d] as usize;
+                    let mut outer_stride = 1i64;
+                    for i in 0..d {
+                        outer_stride *= shape[i];
+                    }
+                    let mut inner_stride = 1i64;
+                    for i in (d + 1)..rank {
+                        inner_stride *= shape[i];
+                    }
+                    let outer_size = outer_stride as usize;
+                    let inner_size = inner_stride as usize;
+                    for outer in 0..outer_size {
+                        for inner in 0..inner_size {
+                            let mut prod = 1i32;
+                            for i in 0..dim_size {
+                                let idx = outer * (dim_size * inner_size) + i * inner_size + inner;
+                                prod = prod.wrapping_mul(a_data[idx]);
+                            }
+                            out_data[outer * inner_size + inner] = prod;
+                        }
+                    }
+                }
+                DType::I8 | DType::U8 | DType::Bool | DType::F16 | DType::BF16 => {
+                    return Err(unsupported(
+                        "this kernel only supports f32/f64/i64/i32 tensors",
+                    ));
                 }
             }
             Ok(out)
         }
         None => {
-            let total: f64 = match a.dtype {
-                DType::F32 => unsafe { typed_slice::<f32>(a) }
-                    .iter()
-                    .map(|&x| x as f64)
-                    .product(),
-                DType::F64 => unsafe { typed_slice::<f64>(a) }.iter().copied().product(),
-                DType::I64
-                | DType::I32
-                | DType::I8
-                | DType::U8
-                | DType::Bool
-                | DType::F16
-                | DType::BF16 => {
-                    return Err(unsupported("this kernel only supports f32/f64 tensors"))
-                }
-            };
             let mut out = OwnedTensor::new(a.dtype, vec![]);
             match a.dtype {
                 DType::F32 => {
+                    let total: f32 = unsafe { typed_slice::<f32>(a) }.iter().copied().product();
                     let d = unsafe { typed_mut_slice::<f32>(&mut out) };
-                    d[0] = total as f32;
+                    d[0] = total;
                 }
                 DType::F64 => {
+                    let total: f64 = unsafe { typed_slice::<f64>(a) }.iter().copied().product();
                     let d = unsafe { typed_mut_slice::<f64>(&mut out) };
                     d[0] = total;
                 }
-                DType::I64
-                | DType::I32
-                | DType::I8
-                | DType::U8
-                | DType::Bool
-                | DType::F16
-                | DType::BF16 => {
-                    return Err(unsupported("this kernel only supports f32/f64 tensors"));
+                DType::I64 => {
+                    let total: i64 = unsafe { typed_slice::<i64>(a) }
+                        .iter()
+                        .copied()
+                        .fold(1i64, |acc, x| acc.wrapping_mul(x));
+                    let d = unsafe { typed_mut_slice::<i64>(&mut out) };
+                    d[0] = total;
+                }
+                DType::I32 => {
+                    let total: i32 = unsafe { typed_slice::<i32>(a) }
+                        .iter()
+                        .copied()
+                        .fold(1i32, |acc, x| acc.wrapping_mul(x));
+                    let d = unsafe { typed_mut_slice::<i32>(&mut out) };
+                    d[0] = total;
+                }
+                DType::I8 | DType::U8 | DType::Bool | DType::F16 | DType::BF16 => {
+                    return Err(unsupported(
+                        "this kernel only supports f32/f64/i64/i32 tensors",
+                    ));
                 }
             }
             Ok(out)

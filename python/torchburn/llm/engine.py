@@ -85,6 +85,12 @@ class UniversalEngine:
             os.environ["TORCHBURN_DEVICE"] = target_device
 
         quant = self.config.quantization.lower()
+        model_config = getattr(self.raw_model, "config", None)
+        native_decoder_supported = (
+            str(getattr(model_config, "hidden_act", "silu")).lower() in ("silu", "swish")
+            and not bool(getattr(model_config, "scale_embeddings", False))
+            and getattr(model_config, "norm_type", "standard") == "standard"
+        )
         if quant in ("int4", "int8"):
             bits = 4 if quant == "int4" else 8
             backend = "igpu" if target_device in ("igpu", "gpu", "dgpu", "vulkan") else "cpu"
@@ -109,7 +115,7 @@ class UniversalEngine:
                 torchburn.quantize_model(self.raw_model, bits=bits, exclude_modules=[], backend=backend)
 
 
-            if bits == 4 and target_device in ("cuda",):
+            if bits == 4 and native_decoder_supported and target_device in ("cuda",):
                 # Priority 1: NVIDIA CUDA dGPU
                 try:
                     print("[\033[93mCUDA dGPU\033[0m] Initializing CUDA INT4 Decoder...")
@@ -119,14 +125,14 @@ class UniversalEngine:
                     print(f"[\033[93mWarning\033[0m] CUDA decoder init failed ({cuda_err}); trying iGPU/CPU.")
                     target_device = "igpu"
 
-            if self._rust_decoder is None and bits == 4 and backend == "cpu":
+            if self._rust_decoder is None and bits == 4 and native_decoder_supported and backend == "cpu":
                 try:
                     print("[\033[92mTorchBurn\033[0m] Initializing Zero-Python Pure Rust Decoder (AVX-512 VNNI)...")
                     self._rust_decoder = torchburn.create_rust_qwen_decoder(self.raw_model)
                     print("[\033[92mTorchBurn\033[0m] Pure Rust Decoder active (45-50+ tok/s).")
                 except Exception as dec_err:
                     print(f"[\033[93mWarning\033[0m] Pure-Rust decoder init ({dec_err}), using fused layer SIMD.")
-            elif self._rust_decoder is None and bits == 4 and backend == "igpu":
+            elif self._rust_decoder is None and bits == 4 and native_decoder_supported and backend == "igpu":
                 try:
                     print("[\033[95miGPU Active\033[0m] Initializing End-to-End WGPU GPU Graph Decoder (Vulkan)...")
                     self._wgpu_decoder = torchburn.create_wgpu_qwen_decoder(self.raw_model)
@@ -257,6 +263,13 @@ class UniversalEngine:
             torch.manual_seed(cfg.seed)
 
         input_ids_list = self.tokenizer.encode(prompt)
+        if not input_ids_list:
+            raise ValueError(
+                "Tokenizer produced no tokens for the prompt; refusing to run generation "
+                "with an invalid empty context."
+            )
+        if cfg.max_new_tokens < 0:
+            raise ValueError("max_new_tokens must be non-negative")
         seq_len = len(input_ids_list)
 
         # 1. Multi-Turn Prefix Overlap Detection
@@ -330,11 +343,10 @@ class UniversalEngine:
                     logits, kv_caches, _ = self.prefill(last_t, kv_caches=kv_caches_native, offset=max(0, seq_len - 1))
                 else:
                     logits, kv_caches, _ = self.prefill(last_t)
-            except Exception:
-                # Ultimate fallback: zeros (greedy picks 0, still functional)
-                import torch as _t
-                vsz = getattr(getattr(self.raw_model, "config", None), "vocab_size", 32000)
-                logits = _t.zeros(1, 1, int(vsz))
+            except Exception as exc:
+                raise RuntimeError(
+                    "Native prefill completed but the model could not produce sampling logits"
+                ) from exc
 
         prefill_tok_sec = (seq_len - prefix_len) / max(prefill_time, 1e-6)
 
@@ -427,9 +439,10 @@ class UniversalEngine:
             if next_token == eos_id:
                 break
 
-            piece = self.tokenizer.decode([next_token], skip_special_tokens=False)
+            emitted_token = next_token
+            piece = self.tokenizer.decode([emitted_token], skip_special_tokens=False)
             tokens_generated += 1
-            all_token_ids.append(next_token)
+            all_token_ids.append(emitted_token)
 
             offset = seq_len + tokens_generated - 1
             rec_toks = all_token_ids[-recent_window:]
@@ -475,7 +488,7 @@ class UniversalEngine:
 
             yield {
                 "type": "token",
-                "token_id": next_token,
+                "token_id": emitted_token,
                 "text": piece,
                 "step_time_ms": step_time * 1000,
                 "tokens_generated": tokens_generated,

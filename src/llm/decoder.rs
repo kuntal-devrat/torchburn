@@ -177,7 +177,16 @@ impl RustQwenDecoder {
         let emb_view = unsafe { dlpack::BorrowedTensor::from_capsule(embed_tokens)? };
         let vocab_size = emb_view.shape[0] as usize;
         let emb_slice = unsafe { typed_slice::<f32>(&emb_view) };
-        let embed_tokens_vec = emb_slice.to_vec();
+        let mut embed_tokens_vec = Vec::new();
+        embed_tokens_vec
+            .try_reserve_exact(emb_slice.len())
+            .map_err(|_| {
+                pyo3::exceptions::PyMemoryError::new_err(format!(
+                    "Out of memory allocating {} MB for Rust decoder embedding table",
+                    (emb_slice.len() * 4) / (1024 * 1024)
+                ))
+            })?;
+        embed_tokens_vec.extend_from_slice(emb_slice);
 
         let fnorm_view = unsafe { dlpack::BorrowedTensor::from_capsule(final_norm_w)? };
         let final_norm_vec = unsafe { typed_slice::<f32>(&fnorm_view) }.to_vec();

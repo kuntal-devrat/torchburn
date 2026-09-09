@@ -37,8 +37,18 @@ struct GpuBufferCache {
     /// Map from content hash -> GPU buffer, reference-counted so callers
     /// hold an owned `Arc` instead of a borrow into the pool (which would
     /// conflict with later `&mut` pool calls in the same function).
-    f32_buffers: HashMap<u64, Arc<CudaSlice<f32>>>,
-    u8_buffers: HashMap<u64, Arc<CudaSlice<u8>>>,
+    ///
+    /// Keys are blake3 256-bit hashes (truncated to 128-bit for storage
+    /// efficiency). blake3 is collision-resistant unlike the old FNV-1a that
+    /// had silent wrong-weight bugs at ~2^32 distinct inputs.
+    f32_buffers: HashMap<u128, Arc<CudaSlice<f32>>>,
+    u8_buffers: HashMap<u128, Arc<CudaSlice<u8>>>,
+    /// Secondary cache keyed by (data_ptr, byte_len). Weight tensors in
+    /// PyTorch storage are pointer-stable across inference calls, so this
+    /// gives O(1) lookup without hashing the full weight data. The blake3
+    /// path is the fallback for non-pointer-stable data.
+    ptr_cache_f32: HashMap<(usize, usize), u128>,
+    ptr_cache_u8: HashMap<(usize, usize), u128>,
     /// Reusable scratch buffers keyed by size (in elements).
     scratch_f32: Vec<(usize, CudaSlice<f32>)>,
 }
@@ -48,18 +58,29 @@ impl GpuBufferCache {
         Self {
             f32_buffers: HashMap::new(),
             u8_buffers: HashMap::new(),
+            ptr_cache_f32: HashMap::new(),
+            ptr_cache_u8: HashMap::new(),
             scratch_f32: Vec::new(),
         }
     }
 
-    /// Get or upload a f32 buffer. Uses a simple FNV-1a hash of the data.
-    /// Returns an owned `Arc` clone so no borrow into `self` escapes.
+    /// Get or upload a f32 buffer. Uses pointer+len identity for O(1) fast
+    /// path (weight pointers are stable between inference calls), falling
+    /// back to blake3 content hash for the cold path.
     fn get_or_upload_f32(
         &mut self,
         data: &[f32],
         dev: &Arc<CudaDevice>,
     ) -> Result<Arc<CudaSlice<f32>>, CudaError> {
-        let hash = fnv_hash(unsafe {
+        let ptr_key = (data.as_ptr() as usize, data.len());
+        // Fast path: pointer+len identity hit (no hashing needed)
+        if let Some(&hash) = self.ptr_cache_f32.get(&ptr_key) {
+            if let Some(buf) = self.f32_buffers.get(&hash) {
+                return Ok(buf.clone());
+            }
+        }
+        // Cold path: blake3 content hash for collision-resistant identity
+        let hash = blake3_hash_u128(unsafe {
             std::slice::from_raw_parts(data.as_ptr() as *const u8, data.len() * 4)
         });
         if !self.f32_buffers.contains_key(&hash) {
@@ -68,23 +89,31 @@ impl GpuBufferCache {
                 .map_err(|e| CudaError::MemoryError(e.to_string()))?;
             self.f32_buffers.insert(hash, Arc::new(buf));
         }
+        // Register pointer identity for future fast-path hits
+        self.ptr_cache_f32.insert(ptr_key, hash);
         Ok(self.f32_buffers[&hash].clone())
     }
 
     /// Get or upload a u8 buffer (for packed weights).
-    /// Returns an owned `Arc` clone so no borrow into `self` escapes.
     fn get_or_upload_u8(
         &mut self,
         data: &[u8],
         dev: &Arc<CudaDevice>,
     ) -> Result<Arc<CudaSlice<u8>>, CudaError> {
-        let hash = fnv_hash(data);
+        let ptr_key = (data.as_ptr() as usize, data.len());
+        if let Some(&hash) = self.ptr_cache_u8.get(&ptr_key) {
+            if let Some(buf) = self.u8_buffers.get(&hash) {
+                return Ok(buf.clone());
+            }
+        }
+        let hash = blake3_hash_u128(data);
         if !self.u8_buffers.contains_key(&hash) {
             let buf = dev
                 .htod_sync_copy(data)
                 .map_err(|e| CudaError::MemoryError(e.to_string()))?;
             self.u8_buffers.insert(hash, Arc::new(buf));
         }
+        self.ptr_cache_u8.insert(ptr_key, hash);
         Ok(self.u8_buffers[&hash].clone())
     }
 
@@ -119,14 +148,14 @@ impl GpuBufferCache {
     }
 }
 
-/// FNV-1a hash for content-addressable GPU buffer cache.
-fn fnv_hash(data: &[u8]) -> u64 {
-    let mut h: u64 = 0xcbf29ce484222325;
-    for &b in data {
-        h ^= b as u64;
-        h = h.wrapping_mul(0x100000001b3);
-    }
-    h
+/// Blake3 content hash for collision-resistant GPU buffer cache keys.
+/// Truncated to 128-bit (u128) for HashMap key storage efficiency;
+/// blake3's 128-bit collision resistance (2^64 birthday bound) is vastly
+/// superior to the previous FNV-1a 64-bit hash (2^32 birthday bound).
+fn blake3_hash_u128(data: &[u8]) -> u128 {
+    let h = blake3::hash(data);
+    let bytes = h.as_bytes();
+    u128::from_le_bytes(bytes[..16].try_into().unwrap())
 }
 
 /// CUDA backend state.
@@ -329,6 +358,12 @@ impl CudaBackend {
         let cfg = LaunchConfig {
             grid_dim: (blocks, 1, 1),
             block_dim: (threads_per_block, 1, 1),
+            // NOTE: shared_mem_bytes = 0 because the PTX kernel uses
+            // statically-declared `__shared__ float smem[8]` (32 bytes).
+            // Static shared memory is reserved by the driver from the PTX
+            // metadata, NOT from LaunchConfig. If blockDim.x changes from
+            // 256, the smem array size (blockDim.x / WARP_SIZE) must be
+            // updated in the PTX source to match.
             shared_mem_bytes: 0,
         };
         unsafe {
@@ -378,6 +413,8 @@ impl CudaBackend {
             let mut c = cache.lock().unwrap_or_else(|e| e.into_inner());
             c.f32_buffers.clear();
             c.u8_buffers.clear();
+            c.ptr_cache_f32.clear();
+            c.ptr_cache_u8.clear();
             c.scratch_f32.clear();
         }
     }

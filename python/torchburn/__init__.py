@@ -73,6 +73,7 @@ from .capture import TorchBurnModule, capture
 from .profiler import (
     profile,
     coverage_report,
+    profiling_stats,
     memory_stats,
     reset_stats,
     supported_ops,
@@ -162,6 +163,7 @@ __all__ = [
     "__version__",
     "profile",
     "coverage_report",
+    "profiling_stats",
     "memory_stats",
     "reset_stats",
     "supported_ops",

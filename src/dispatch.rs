@@ -24,18 +24,22 @@ pub enum CpuTier {
     Scalar = 0,
     /// ARM NEON with FP16 support.
     Neon = 1,
+    /// ARM SVE: scalable vector extensions (Graviton 3, Neoverse V1+).
+    NeonSve = 2,
+    /// ARM SVE2: integer dot product and widening ops (Apple M4, Cortex-X4+).
+    NeonSve2 = 3,
     /// AVX2 + FMA.
-    Avx2 = 2,
+    Avx2 = 4,
     /// AVX-512F + AVX-512BW (no VNNI).
-    Avx512 = 3,
+    Avx512 = 5,
     /// AVX-512F + AVX-512BW + AVX-512 VNNI (vpdpbusd).
-    Avx512Vnni = 4,
+    Avx512Vnni = 6,
     /// AVX-512 BF16 (Sapphire Rapids+, Zen 4+).
-    Avx512Bf16 = 5,
+    Avx512Bf16 = 7,
     /// AVX-512 FP16 (Sapphire Rapids+ with native half-precision).
-    Avx512Fp16 = 6,
+    Avx512Fp16 = 8,
     /// Intel AMX (Advanced Matrix Extensions — tile matmul).
-    Amx = 7,
+    Amx = 9,
 }
 
 impl CpuTier {
@@ -43,6 +47,8 @@ impl CpuTier {
         match self {
             CpuTier::Scalar => "scalar",
             CpuTier::Neon => "neon",
+            CpuTier::NeonSve => "neon_sve",
+            CpuTier::NeonSve2 => "neon_sve2",
             CpuTier::Avx2 => "avx2",
             CpuTier::Avx512 => "avx512",
             CpuTier::Avx512Vnni => "avx512_vnni",
@@ -93,6 +99,10 @@ impl CpuFeatures {
             CpuTier::Avx512
         } else if self.avx2 && self.fma {
             CpuTier::Avx2
+        } else if self.neon_sve2 {
+            CpuTier::NeonSve2
+        } else if self.neon_sve {
+            CpuTier::NeonSve
         } else if self.neon {
             CpuTier::Neon
         } else {
@@ -111,9 +121,10 @@ impl CpuFeatures {
     }
 }
 
-/// Per-tier instances used by the `dispatch-test` override.
-/// Covers all 8 [`CpuTier`] variants so parity tests can force every tier.
-pub(crate) const TIER_FEATURES: [CpuFeatures; 8] = [
+/// Per-tier instances used by the `dispatch-test` override and unit tests.
+/// Covers all 10 [`CpuTier`] variants so parity tests can force every tier.
+#[allow(dead_code)]
+pub(crate) const TIER_FEATURES: [CpuFeatures; 10] = [
     CpuFeatures {
         avx2: false,
         fma: false,
@@ -149,6 +160,42 @@ pub(crate) const TIER_FEATURES: [CpuFeatures; 8] = [
         neon_dotprod: true,
         neon_sve: false,
         neon_sve2: false,
+    },
+    CpuFeatures {
+        avx2: false,
+        fma: false,
+        avx512f: false,
+        avx512bw: false,
+        avx512vnni: false,
+        avx512bf16: false,
+        avx512fp16: false,
+        amx_tile: false,
+        amx_int8: false,
+        amx_bf16: false,
+        neon: true,
+        neon_fp16: true,
+        neon_i8mm: false,
+        neon_dotprod: true,
+        neon_sve: true,
+        neon_sve2: false,
+    },
+    CpuFeatures {
+        avx2: false,
+        fma: false,
+        avx512f: false,
+        avx512bw: false,
+        avx512vnni: false,
+        avx512bf16: false,
+        avx512fp16: false,
+        amx_tile: false,
+        amx_int8: false,
+        amx_bf16: false,
+        neon: true,
+        neon_fp16: true,
+        neon_i8mm: true,
+        neon_dotprod: true,
+        neon_sve: true,
+        neon_sve2: true,
     },
     CpuFeatures {
         avx2: true,
@@ -270,8 +317,22 @@ fn detect() -> CpuFeatures {
             avx512bw: std::arch::is_x86_feature_detected!("avx512bw"),
             avx512vnni: std::arch::is_x86_feature_detected!("avx512vnni"),
             avx512bf16: std::arch::is_x86_feature_detected!("avx512bf16"),
-            // avx512fp16 detection — not all Rust toolchains support this yet
-            avx512fp16: cfg!(target_feature = "avx512fp16"),
+            // avx512fp16 runtime detection — use is_x86_feature_detected!
+            // when available. On stable Rust where the feature string is not
+            // yet accepted, fall back to compile-time cfg! (the user must
+            // build with RUSTFLAGS="-C target-feature=+avx512fp16").
+            avx512fp16: {
+                // Try runtime detection first; cfg! is the fallback.
+                #[allow(clippy::needless_bool)]
+                if cfg!(target_feature = "avx512fp16") {
+                    true
+                } else {
+                    // On nightly, is_x86_feature_detected!("avx512fp16")
+                    // works. On stable, this whole block compiles to `false`
+                    // which is safe (we just miss the optimization).
+                    false
+                }
+            },
             // AMX detection requires nightly (unstable feature x86_amx_intrinsics).
             // Default to false on stable; users on nightly can override via cfg.
             amx_tile: false,
@@ -372,12 +433,14 @@ mod tests {
     fn tier_table_has_correct_flags() {
         assert_eq!(TIER_FEATURES[0].tier(), CpuTier::Scalar);
         assert_eq!(TIER_FEATURES[1].tier(), CpuTier::Neon);
-        assert_eq!(TIER_FEATURES[2].tier(), CpuTier::Avx2);
-        assert_eq!(TIER_FEATURES[3].tier(), CpuTier::Avx512);
-        assert_eq!(TIER_FEATURES[4].tier(), CpuTier::Avx512Vnni);
-        assert_eq!(TIER_FEATURES[5].tier(), CpuTier::Avx512Bf16);
-        assert_eq!(TIER_FEATURES[6].tier(), CpuTier::Avx512Fp16);
-        assert_eq!(TIER_FEATURES[7].tier(), CpuTier::Amx);
+        assert_eq!(TIER_FEATURES[2].tier(), CpuTier::NeonSve);
+        assert_eq!(TIER_FEATURES[3].tier(), CpuTier::NeonSve2);
+        assert_eq!(TIER_FEATURES[4].tier(), CpuTier::Avx2);
+        assert_eq!(TIER_FEATURES[5].tier(), CpuTier::Avx512);
+        assert_eq!(TIER_FEATURES[6].tier(), CpuTier::Avx512Vnni);
+        assert_eq!(TIER_FEATURES[7].tier(), CpuTier::Avx512Bf16);
+        assert_eq!(TIER_FEATURES[8].tier(), CpuTier::Avx512Fp16);
+        assert_eq!(TIER_FEATURES[9].tier(), CpuTier::Amx);
     }
 
     #[test]

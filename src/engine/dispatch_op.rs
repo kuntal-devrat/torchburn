@@ -586,6 +586,7 @@ pub(crate) fn dispatch_node(
 ) -> PyResult<()> {
     let table = dispatch_table();
     let target = node.target.as_str();
+    let _timer = crate::profiler::maybe_time_str(target);
 
     match table.get(target) {
         Some(&module_idx) => {

@@ -178,69 +178,111 @@ def _dequant_q8_0(data: bytes, n_elem: int) -> np.ndarray:
     return out
 
 
-def _dequant_q6_k(data: bytes, n_elem: int) -> np.ndarray:
-    """Q6_K: 64-element super-blocks. Best-effort scalar dequant."""
-    # Super-block layout: 128+64+128+64+64+2 = 210 bytes for 256 elements
+def _dequant_q8_1(data: bytes, n_elem: int) -> np.ndarray:
+    """Q8_1: 32-element groups, f16 scale + f16 sum + 32 int8 values."""
+    BLOCK = 36  # 2 + 2 + 32
+    n_blocks = n_elem // 32
+    out = np.empty(n_elem, dtype=np.float32)
+    for b in range(n_blocks):
+        off = b * BLOCK
+        scale = np.frombuffer(data[off:off+2], dtype=np.float16)[0].astype(np.float32)
+        vals = np.frombuffer(data[off+4:off+36], dtype=np.int8).astype(np.float32)
+        out[b*32:(b+1)*32] = vals * scale
+    return out
+
+
+def _dequant_q8_k(data: bytes, n_elem: int) -> np.ndarray:
+    """Q8_K: 256-element super-blocks, f32 scale (d) + 256 int8 values + 16 int16 sums."""
     SUPER = 256
-    n_super = n_elem // SUPER
-    out = np.zeros(n_elem, dtype=np.float32)
-    offset = 0
-    for s in range(n_super):
-        # q6 nibbles (low 4 bits) + high 2 bits
-        ql = np.frombuffer(data[offset:offset+128], dtype=np.uint8)   # lower nibbles
-        qh = np.frombuffer(data[offset+128:offset+192], dtype=np.uint8)  # high 2 bits
-        sc = np.frombuffer(data[offset+192:offset+256], dtype=np.int8)  # scales (16 per block)
-        d  = np.frombuffer(data[offset+256:offset+258], dtype=np.float16)[0].astype(np.float32)
-        offset += 210  # 128+64+16+2 with padding per ggml layout (approximate)
-        # Reconstruct 6-bit values
-        q = np.zeros(256, dtype=np.int32)
-        for i in range(128):
-            lo0 = int(ql[i]) & 0xF
-            lo1 = (int(ql[i]) >> 4) & 0xF
-            hi0 = (int(qh[i // 2]) >> (4 * (i % 2))) & 0x3
-            hi1 = (int(qh[i // 2]) >> (4 * (i % 2) + 2)) & 0x3
-            q[2*i]   = lo0 | (hi0 << 4)
-            q[2*i+1] = lo1 | (hi1 << 4)
-        q = q.astype(np.float32) - 32.0
-        scale_idx = np.repeat(np.arange(16), 16)
-        scales = sc[scale_idx].astype(np.float32)
-        out[s*SUPER:(s+1)*SUPER] = d * scales * q
+    BLOCK = 292  # 4 + 256 + 32
+    n_blocks = n_elem // SUPER
+    out = np.empty(n_elem, dtype=np.float32)
+    for b in range(n_blocks):
+        off = b * BLOCK
+        d = np.frombuffer(data[off:off+4], dtype=np.float32)[0]
+        qs = np.frombuffer(data[off+4:off+260], dtype=np.int8).astype(np.float32)
+        out[b*SUPER:(b+1)*SUPER] = qs * d
+    return out
+
+
+
+def _dequant_q6_k(data: bytes, n_elem: int) -> np.ndarray:
+    """Dequantize Q6_K super-blocks using the GGML 210-byte layout."""
+    SUPER = 256
+    BLOCK = 210
+    if n_elem % SUPER:
+        raise ValueError(f"Q6_K tensor length must be a multiple of {SUPER}, got {n_elem}")
+    expected = (n_elem // SUPER) * BLOCK
+    if len(data) != expected:
+        raise ValueError(f"Q6_K data has {len(data)} bytes; expected {expected}")
+
+    out = np.empty(n_elem, dtype=np.float32)
+    for block in range(n_elem // SUPER):
+        base = block * BLOCK
+        ql = np.frombuffer(data[base:base + 128], dtype=np.uint8)
+        qh = np.frombuffer(data[base + 128:base + 192], dtype=np.uint8)
+        scales = np.frombuffer(data[base + 192:base + 208], dtype=np.int8)
+        d = float(np.frombuffer(data[base + 208:base + 210], dtype=np.float16)[0])
+        block_out = out[block * SUPER:(block + 1) * SUPER]
+
+        for i in range(32):
+            high = int(qh[i])
+            values = (
+                (int(ql[i]) & 0x0F) | ((high & 0x03) << 4),
+                (int(ql[i + 32]) & 0x0F) | (((high >> 2) & 0x03) << 4),
+                (int(ql[i]) >> 4) | (((high >> 4) & 0x03) << 4),
+                (int(ql[i + 32]) >> 4) | (((high >> 6) & 0x03) << 4),
+            )
+            for group, value in enumerate(values):
+                position = group * 32 + i
+                block_out[position] = d * float(scales[position // 16]) * (value - 32)
+
+            high = int(qh[i + 32])
+            values = (
+                (int(ql[i + 64]) & 0x0F) | ((high & 0x03) << 4),
+                (int(ql[i + 96]) & 0x0F) | (((high >> 2) & 0x03) << 4),
+                (int(ql[i + 64]) >> 4) | (((high >> 4) & 0x03) << 4),
+                (int(ql[i + 96]) >> 4) | (((high >> 6) & 0x03) << 4),
+            )
+            for group, value in enumerate(values):
+                position = 128 + group * 32 + i
+                block_out[position] = d * float(scales[position // 16]) * (value - 32)
     return out
 
 
 def _dequant_q4_k(data: bytes, n_elem: int) -> np.ndarray:
-    """Q4_K (K-quant, medium): best-effort dequant — falls back to zeros on parse error."""
-    # Super-block: 256 values, 144 bytes total per ggml spec
+    """Dequantize Q4_K super-blocks using the GGML 144-byte layout."""
     SUPER = 256
     BLOCK_SIZE = 144
-    n_super = max(1, n_elem // SUPER)
-    out = np.zeros(n_elem, dtype=np.float32)
-    try:
-        for s in range(n_super):
-            off = s * BLOCK_SIZE
-            if off + BLOCK_SIZE > len(data):
-                break
-            d   = np.frombuffer(data[off:off+2],    dtype=np.float16)[0].astype(np.float32)
-            dmin= np.frombuffer(data[off+2:off+4],  dtype=np.float16)[0].astype(np.float32)
-            # 12 bytes of quantized scales (6-bit packed, 8 sub-blocks × 2 fields)
-            sc_raw = data[off+4:off+16]
-            # 128 nibble bytes → 256 values
-            qs = data[off+16:off+144]
-            scales = np.zeros(8, dtype=np.float32)
-            mins   = np.zeros(8, dtype=np.float32)
-            for i in range(8):
-                sc_byte = sc_raw[i]
-                scales[i] = (sc_byte & 0x3F) * d
-                mins[i]   = ((sc_byte >> 6) & 0x3) * dmin
-            for i in range(128):
-                b = qs[i]
-                lo = (b & 0x0F)
-                hi = (b >> 4) & 0x0F
-                gi = (i * 2) // 32
-                out[s*SUPER + i*2]   = lo * scales[min(gi, 7)] - mins[min(gi, 7)]
-                out[s*SUPER + i*2+1] = hi * scales[min((i*2+1)//32, 7)] - mins[min((i*2+1)//32, 7)]
-    except Exception:
-        pass  # Return zeros rather than crash on unsupported variant
+    if n_elem % SUPER:
+        raise ValueError(f"Q4_K tensor length must be a multiple of {SUPER}, got {n_elem}")
+    expected = (n_elem // SUPER) * BLOCK_SIZE
+    if len(data) != expected:
+        raise ValueError(f"Q4_K data has {len(data)} bytes; expected {expected}")
+
+    out = np.empty(n_elem, dtype=np.float32)
+    for block in range(n_elem // SUPER):
+        base = block * BLOCK_SIZE
+        d = float(np.frombuffer(data[base:base + 2], dtype=np.float16)[0])
+        dmin = float(np.frombuffer(data[base + 2:base + 4], dtype=np.float16)[0])
+        packed = np.frombuffer(data[base + 4:base + 16], dtype=np.uint8)
+        qs = np.frombuffer(data[base + 16:base + 144], dtype=np.uint8)
+
+        scales = np.empty(8, dtype=np.float32)
+        mins = np.empty(8, dtype=np.float32)
+        for i in range(4):
+            scales[i] = d * float(packed[i] & 0x3F)
+            mins[i] = dmin * float(packed[i + 4] & 0x3F)
+        for i in range(4, 8):
+            scales[i] = d * float((packed[i + 4] & 0x0F) | ((packed[i - 4] >> 6) << 4))
+            mins[i] = dmin * float((packed[i + 4] >> 4) | ((packed[i] >> 6) << 4))
+
+        block_out = out[block * SUPER:(block + 1) * SUPER]
+        for group in range(8):
+            q_group = qs[group * 16:(group + 1) * 16]
+            start = group * 32
+            block_out[start:start + 16] = (q_group & 0x0F) * scales[group] - mins[group]
+            block_out[start + 16:start + 32] = (q_group >> 4) * scales[group] - mins[group]
     return out
 
 
@@ -357,8 +399,36 @@ class GGUFLoader:
             GGML_TYPE_Q6_K: (n_elem // 256) * 210,
             GGML_TYPE_Q8_K: (n_elem // 256) * 292,
         }
-        n_bytes = byte_sizes.get(ggml_type, n_elem * 4)
+        block_sizes = {
+            GGML_TYPE_Q4_0: 32,
+            GGML_TYPE_Q4_1: 32,
+            GGML_TYPE_Q5_0: 32,
+            GGML_TYPE_Q5_1: 32,
+            GGML_TYPE_Q8_0: 32,
+            GGML_TYPE_Q8_1: 32,
+            GGML_TYPE_Q4_K: 256,
+            GGML_TYPE_Q6_K: 256,
+            GGML_TYPE_Q8_K: 256,
+        }
+        block_size = block_sizes.get(ggml_type)
+        if block_size is not None and n_elem % block_size:
+            raise ValueError(
+                f"GGUF tensor '{name}' has {n_elem} elements; "
+                f"{self._ggml_type_name(ggml_type)} requires multiples of {block_size}"
+            )
+        n_bytes = byte_sizes.get(ggml_type)
+        if n_bytes is None:
+            raise NotImplementedError(
+                f"GGUF tensor type {self._ggml_type_name(ggml_type)} is not supported; "
+                "refusing to fabricate tensor values"
+            )
+        if n_elem <= 0:
+            raise ValueError(f"GGUF tensor '{name}' has invalid element count {n_elem}")
         raw = self._raw[abs_offset : abs_offset + n_bytes]
+        if len(raw) != n_bytes:
+            raise ValueError(
+                f"GGUF tensor '{name}' is truncated: got {len(raw)} bytes, expected {n_bytes}"
+            )
 
         if ggml_type == GGML_TYPE_F32:
             arr = np.frombuffer(raw, dtype=np.float32).copy()
@@ -370,19 +440,23 @@ class GGUFLoader:
             arr = _dequant_q4_1(raw, n_elem)
         elif ggml_type == GGML_TYPE_Q8_0:
             arr = _dequant_q8_0(raw, n_elem)
+        elif ggml_type == GGML_TYPE_Q8_1:
+            arr = _dequant_q8_1(raw, n_elem)
         elif ggml_type == GGML_TYPE_Q4_K:
             arr = _dequant_q4_k(raw, n_elem)
         elif ggml_type == GGML_TYPE_Q6_K:
             arr = _dequant_q6_k(raw, n_elem)
+        elif ggml_type == GGML_TYPE_Q8_K:
+            arr = _dequant_q8_k(raw, n_elem)
         else:
-            # Unsupported type — return zeros with a warning
-            import warnings
-            warnings.warn(
-                f"GGUF type {self._ggml_type_name(ggml_type)} not yet dequantized; "
-                f"returning zeros for tensor '{name}'"
+            raise NotImplementedError(
+                f"GGUF tensor type {self._ggml_type_name(ggml_type)} is not supported"
             )
-            arr = np.zeros(n_elem, dtype=np.float32)
 
+        if arr.size != n_elem:
+            raise ValueError(
+                f"Dequantizer returned {arr.size} values for tensor '{name}', expected {n_elem}"
+            )
         return arr.reshape(info["shape"][::-1])  # GGUF stores shape col-major
 
     def list_tensors(self) -> list[str]:

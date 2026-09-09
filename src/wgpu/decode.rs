@@ -348,7 +348,15 @@ impl WgpuQwenDecoder {
             // Dummy 16-byte buffer keeps the embed bind-group valid; the
             // shader is skipped and x_buf is filled from host instead.
             let buf = create_storage_buffer(&device, 16, true);
-            (buf, Some(emb_slice.to_vec()))
+            let mut cpu_table = Vec::new();
+            cpu_table.try_reserve_exact(emb_slice.len()).map_err(|_| {
+                pyo3::exceptions::PyMemoryError::new_err(format!(
+                    "Failed to allocate {} MB for CPU embedding table (host memory exhausted)",
+                    (emb_slice.len() * 4) / (1024 * 1024)
+                ))
+            })?;
+            cpu_table.extend_from_slice(emb_slice);
+            (buf, Some(cpu_table))
         };
 
         let q_dim = num_heads * head_dim;

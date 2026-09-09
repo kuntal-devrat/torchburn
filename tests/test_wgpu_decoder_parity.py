@@ -92,7 +92,10 @@ def test_wgpu_cpu_logit_parity_floor(quantized_model):
         gpu = create_wgpu_qwen_decoder(quantized_model, max_seq_len=2048)
     except MemoryError as e:
         pytest.skip(f"wgpu OOM (low-VRAM iGPU): {e}")
-    cpu = create_rust_qwen_decoder(quantized_model, max_seq_len=2048)
+    try:
+        cpu = create_rust_qwen_decoder(quantized_model, max_seq_len=2048)
+    except MemoryError as e:
+        pytest.skip(f"Rust decoder OOM (low host RAM): {e}")
 
     matches = 0
     worst = 0.0

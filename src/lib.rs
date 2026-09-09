@@ -6,6 +6,7 @@
 //! unsupported operators are flagged so the Python interpreter can route them
 //! to native PyTorch eager execution (REQ-002).
 
+#![allow(dead_code)]
 #![warn(clippy::all)]
 // Kernel dispatch needs many params (tensor shapes, strides, dtypes)
 #![allow(clippy::too_many_arguments)]
@@ -25,8 +26,6 @@
 #![allow(clippy::manual_is_multiple_of)]
 // Thread-local lazy init can't be const in all cases.
 #![allow(clippy::missing_const_for_thread_local)]
-// Dead code in autograd module — these types are used via trait objects.
-#![allow(dead_code)]
 // Accessing first element via get(0) is clear in the context of node args.
 #![allow(clippy::get_first)]
 // Explicit into_iter() is clearer for intended ownership semantics.
@@ -69,6 +68,7 @@
 // Module declarations
 // ---------------------------------------------------------------------------
 
+#[allow(dead_code)]
 pub mod autograd;
 mod cache;
 mod dlpack;
@@ -86,6 +86,7 @@ pub mod dispatch;
 mod math_ops;
 mod memory_pool;
 mod nn;
+pub mod profiler;
 pub(crate) mod quantization;
 mod reductions;
 mod shape_ops;
@@ -219,6 +220,13 @@ fn _torchburn(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(ffi::gguf_ffi::gguf_info, m)?)?;
     m.add_function(wrap_pyfunction!(ffi::gguf_ffi::gguf_tensors, m)?)?;
     m.add_function(wrap_pyfunction!(ffi::gguf_ffi::gguf_metadata, m)?)?;
+
+    // Profiler FFI
+    m.add_function(wrap_pyfunction!(profiler::profiler_enable, m)?)?;
+    m.add_function(wrap_pyfunction!(profiler::profiler_disable, m)?)?;
+    m.add_function(wrap_pyfunction!(profiler::profiler_reset, m)?)?;
+    m.add_function(wrap_pyfunction!(profiler::profiler_report, m)?)?;
+    m.add_function(wrap_pyfunction!(profiler::profiler_print, m)?)?;
 
     Ok(())
 }

@@ -93,6 +93,7 @@ class ModelLoader:
                 if chosen_cache.endswith(".safetensors"):
                     import safetensors.torch
                     state_dict = safetensors.torch.load_file(chosen_cache, device=device)
+                    state_dict = {k: v.clone() for k, v in state_dict.items()}
                 else:
                     state_dict = torch.load(chosen_cache, map_location=device, weights_only=True)
                 if is_v2 and quant_lower == "int4":
@@ -253,6 +254,33 @@ class ModelLoader:
                     f"transformer.layers.{idx}.mlp.down_proj.weight",
                     f"model.layers.{idx}.mlp.w2.weight",
                 ])
+            elif key.startswith("layers.") and ".experts." in key:
+                # MoE checkpoints: layers.{l}.experts.{e}.{gate,up,down}_proj.weight
+                parts = key.split(".")
+                idx, expert_id, proj = parts[1], parts[3], parts[4]
+                cands.extend([
+                    f"model.layers.{idx}.mlp.experts.{expert_id}.{proj}.weight",
+                    f"model.layers.{idx}.block_sparse_moe.experts.{expert_id}.{proj}.weight",
+                    f"model.layers.{idx}.mlp.experts.{expert_id}.w1.weight"
+                    if proj == "gate_proj"
+                    else f"model.layers.{idx}.mlp.experts.{expert_id}.w3.weight"
+                    if proj == "up_proj"
+                    else f"model.layers.{idx}.mlp.experts.{expert_id}.w2.weight",
+                ])
+            elif key.startswith("layers.") and key.endswith(".moe.gate.weight"):
+                idx = key.split(".")[1]
+                cands.extend([
+                    f"model.layers.{idx}.block_sparse_moe.gate.weight",
+                    f"model.layers.{idx}.mlp.gate.weight",
+                    f"model.layers.{idx}.moe.gate.weight",
+                    f"model.layers.{idx}.mlp.router.weight",
+                ])
+            elif key.startswith("layers.") and ".attn." in key and ".bias" in key:
+                # GPT-2 fused Conv1D-style attention bias
+                idx = key.split(".")[1]
+                cands.extend([
+                    f"transformer.h.{idx}.attn.{key.split('.')[3]}.weight",
+                ])
 
             for c in cands:
                 if c in tensor_index:
@@ -260,17 +288,26 @@ class ModelLoader:
                         return sf.get_tensor(c)
             return None
 
+        def require_tensor(key: str) -> torch.Tensor:
+            tensor = get_tensor(key)
+            if tensor is None:
+                raise KeyError(
+                    f"Required tensor '{key}' is missing from the checkpoint; "
+                    "the model architecture is not compatible with TorchBurn's decoder"
+                )
+            return tensor
+
         model = UniversalTransformer(config, init_weights=False, quant=quant, fused_qkv=True).to(device=device)
 
         # 1. Embed tokens
-        emb = get_tensor("embed_tokens")
+        emb = require_tensor("embed_tokens")
         if emb is not None:
             model.embed_tokens.weight.data.copy_(emb.float())
             del emb
             gc.collect()
 
         # 2. Final norm
-        norm_w = get_tensor("norm")
+        norm_w = require_tensor("norm")
         if norm_w is not None:
             model.norm.weight.data.copy_(norm_w.float())
             del norm_w
@@ -282,15 +319,15 @@ class ModelLoader:
             layer = model.layers[l]
 
             # Input norm
-            in_norm = get_tensor(f"layers.{l}.input_layernorm.weight")
+            in_norm = require_tensor(f"layers.{l}.input_layernorm.weight")
             if in_norm is not None:
                 layer.input_layernorm.weight.data.copy_(in_norm.float())
                 del in_norm
 
             # Q, K, V
-            q_w = get_tensor(f"layers.{l}.self_attn.q_proj.weight")
-            k_w = get_tensor(f"layers.{l}.self_attn.k_proj.weight")
-            v_w = get_tensor(f"layers.{l}.self_attn.v_proj.weight")
+            q_w = require_tensor(f"layers.{l}.self_attn.q_proj.weight")
+            k_w = require_tensor(f"layers.{l}.self_attn.k_proj.weight")
+            v_w = require_tensor(f"layers.{l}.self_attn.v_proj.weight")
             if q_w is not None and k_w is not None and v_w is not None:
                 qkv_w = torch.cat([q_w.float(), k_w.float(), v_w.float()], dim=0)
                 del q_w, k_w, v_w
@@ -316,7 +353,7 @@ class ModelLoader:
                     del qkv_b
 
             # O proj
-            o_w = get_tensor(f"layers.{l}.self_attn.o_proj.weight")
+            o_w = require_tensor(f"layers.{l}.self_attn.o_proj.weight")
             if o_w is not None:
                 if quant == "int4":
                     qw, qs = quantize_weight_int4_grouped(o_w.float(), group_size=group_size)
@@ -333,18 +370,40 @@ class ModelLoader:
                 layer.post_attention_layernorm.weight.data.copy_(post_norm.float())
                 del post_norm
 
-            # MLP: gate, up, down
-            for proj_name, module in [("gate_proj", layer.mlp.gate_proj), ("up_proj", layer.mlp.up_proj), ("down_proj", layer.mlp.down_proj)]:
-                pw = get_tensor(f"layers.{l}.mlp.{proj_name}.weight")
-                if pw is not None:
-                    if quant == "int4":
-                        qw, qs = quantize_weight_int4_grouped(pw.float(), group_size=group_size)
-                    else:
-                        qw, qs = quantize_weight_int8(pw.float())
-                    del pw
-                    module.qweight.data.copy_(qw)
-                    module.scales.data.copy_(qs)
-                    del qw, qs
+            # MLP / MoE
+            if layer.moe is not None:
+                router_w = get_tensor(f"layers.{l}.moe.gate.weight")
+                if router_w is not None:
+                    layer.moe.gate.weight.data.copy_(router_w.float())
+                    del router_w
+                for expert_id, expert in enumerate(layer.moe.experts):
+                    for proj_name, module in [
+                        ("gate_proj", expert.gate_proj),
+                        ("up_proj", expert.up_proj),
+                        ("down_proj", expert.down_proj),
+                    ]:
+                        pw = get_tensor(f"layers.{l}.experts.{expert_id}.{proj_name}.weight")
+                        if pw is not None:
+                            if quant == "int4":
+                                qw, qs = quantize_weight_int4_grouped(pw.float(), group_size=group_size)
+                            else:
+                                qw, qs = quantize_weight_int8(pw.float())
+                            del pw
+                            module.qweight.data.copy_(qw)
+                            module.scales.data.copy_(qs)
+                            del qw, qs
+            else:
+                for proj_name, module in [("gate_proj", layer.mlp.gate_proj), ("up_proj", layer.mlp.up_proj), ("down_proj", layer.mlp.down_proj)]:
+                    pw = require_tensor(f"layers.{l}.mlp.{proj_name}.weight")
+                    if pw is not None:
+                        if quant == "int4":
+                            qw, qs = quantize_weight_int4_grouped(pw.float(), group_size=group_size)
+                        else:
+                            qw, qs = quantize_weight_int8(pw.float())
+                        del pw
+                        module.qweight.data.copy_(qw)
+                        module.scales.data.copy_(qs)
+                        del qw, qs
 
             # Free transient PyTorch memory immediately after each layer
             gc.collect()
@@ -363,7 +422,7 @@ class ModelLoader:
             model.lm_head.scales.data.copy_(qs)
             del qw, qs
         else:
-            lm_w = get_tensor("lm_head")
+            lm_w = require_tensor("lm_head")
             if lm_w is not None:
                 if quant == "int4":
                     qw, qs = quantize_weight_int4_grouped(lm_w, group_size=group_size)
@@ -480,6 +539,11 @@ class ModelLoader:
                 cfg_path = os.path.join(dir_name, "config.json")
                 if os.path.isfile(cfg_path):
                     return [cand], cfg_path, dir_name
+
+        if local_files_only:
+            raise FileNotFoundError(
+                f"Could not locate model '{model_id_or_path}' in local files only mode"
+            )
 
         # Otherwise, download via huggingface_hub
         try:

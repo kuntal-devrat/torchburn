@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.3] - 2026-09-09
+
+### Added
+- **Multi-ISA CPU Tiers**: Added `NeonSve` and `NeonSve2` tiers to microarchitecture dispatch (now 10 tiers total).
+- **Integer Reduction Kernels**: Added full `i64` and `i32` support for `sum`, `max`, `min`, `argmax`, `argmin`, `cumsum`, and `prod`.
+- **GGUF Dequantization**: Implemented complete mathematical dequantizers for `Q8_1` (36-byte blocks) and `Q8_K` (292-byte superblocks).
+- **Model Family Safeguards**: Added architectural validation and `UserWarning` notifications for unverified model families, plus fast-fail validation for unsupported MoE models.
+
+### Fixed
+- **Multi-Dim Reduction Ordering**: Sorted multi-dimensional reduction indices descending to prevent index invalidation across shrinking ranks.
+- **Argmin Correctness**: Replaced negation hack with direct minimum tracking, fixing NaN semantics and eliminating 2x memory copy overhead.
+- **CUDA Cache Integrity**: Replaced 64-bit FNV-1a with 256-bit BLAKE-3 hashing for kernel caching, incorporating pointer+length keys for weight buffers.
+- **Metal Graceful Fallback**: Handled non-Metal hosts gracefully without panicking on Apple Silicon assertion checks.
+- **Memory Safety in Decoders**: Mapped host memory exhaustion to catchable `MemoryError` using `try_reserve_exact` instead of process-aborting allocations.
+- **Test Suite RAM Leak**: Fixed model families test suite fixture to prevent high RAM consumption and freezing.
+
+### Changed
+- **Welford Variance Algorithm**: Implemented Welford's online single-pass algorithm for variance and standard deviation, reducing memory bandwidth by 50%.
+- **Native Profiler Exposure**: Exposed profiler methods to Python via PyO3 and integrated zero-overhead timers into native node dispatch.
+
 ## [0.6.2] - 2026-09-09
 
 ### Changed

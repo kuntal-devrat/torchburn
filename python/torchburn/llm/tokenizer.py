@@ -94,6 +94,10 @@ class UniversalTokenizer:
         except Exception:
             pass
 
+        if local_files_only:
+            raise FileNotFoundError(
+                f"Unable to load tokenizer for '{model_id_or_path}' from local files only"
+            )
 
         # 3. Fallback: HuggingFace hub download of tokenizer.json
         try:
@@ -122,15 +126,21 @@ class UniversalTokenizer:
                 return list(res.ids)
             elif isinstance(res, list):
                 return res
-        except Exception:
-            return []
-        return []
+        except Exception as exc:
+            raise RuntimeError("Tokenizer failed to encode input text") from exc
+        raise TypeError(
+            f"Tokenizer returned unsupported encode result type: {type(res).__name__}"
+        )
 
     def decode(self, token_ids: List[int], skip_special_tokens: bool = False) -> str:
         """Decodes token IDs into string text."""
-        if hasattr(self._tok, "decode"):
-            return self._tok.decode(token_ids, skip_special_tokens=skip_special_tokens)
-        return ""
+        decode = getattr(self._tok, "decode", None)
+        if decode is None:
+            raise TypeError("Tokenizer does not provide a decode method")
+        try:
+            return decode(token_ids, skip_special_tokens=skip_special_tokens)
+        except Exception as exc:
+            raise RuntimeError("Tokenizer failed to decode token IDs") from exc
 
     def apply_chat_template(
         self,
@@ -145,8 +155,8 @@ class UniversalTokenizer:
                     tokenize=False,
                     add_generation_prompt=add_generation_prompt,
                 )
-            except Exception:
-                pass
+            except Exception as exc:
+                raise RuntimeError("Tokenizer chat template failed") from exc
 
         # Standard ChatML fallback (<|im_start|>role\ncontent<|im_end|>)
         prompt_parts = []
