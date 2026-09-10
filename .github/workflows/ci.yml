@@ -434,10 +434,10 @@ jobs:
       # Native bench wheel exists only when build-native ran (self-hosted
       # bench runner, manual dispatch). Attach it best-effort when present.
       - uses: actions/download-artifact@v4
+        continue-on-error: true
         with:
           name: wheels-native
           path: dist
-          fail-on-error: false
       - name: Attach assets to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
