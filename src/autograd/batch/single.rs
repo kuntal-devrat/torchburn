@@ -1568,7 +1568,10 @@ pub fn backward_single(
                         std::slice::from_raw_parts(upstream.data.as_ptr() as *const f32, n)
                     };
                     let m = unsafe {
-                        std::slice::from_raw_parts(mask.data.as_ptr() as *const f32, elem_count(&mask.shape))
+                        std::slice::from_raw_parts(
+                            mask.data.as_ptr() as *const f32,
+                            elem_count(&mask.shape),
+                        )
                     };
                     let o = unsafe {
                         std::slice::from_raw_parts_mut(grad.data.as_mut_ptr() as *mut f32, n)
@@ -1584,7 +1587,10 @@ pub fn backward_single(
                         std::slice::from_raw_parts(upstream.data.as_ptr() as *const f64, n)
                     };
                     let m = unsafe {
-                        std::slice::from_raw_parts(mask.data.as_ptr() as *const f64, elem_count(&mask.shape))
+                        std::slice::from_raw_parts(
+                            mask.data.as_ptr() as *const f64,
+                            elem_count(&mask.shape),
+                        )
                     };
                     let o = unsafe {
                         std::slice::from_raw_parts_mut(grad.data.as_mut_ptr() as *mut f64, n)

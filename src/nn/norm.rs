@@ -25,12 +25,16 @@ pub fn layer_norm(
 ) -> PyResult<OwnedTensor> {
     if let Some(w) = weight {
         if input.dtype != w.dtype {
-            return Err(unsupported("layer_norm: dtype mismatch between input, weight"));
+            return Err(unsupported(
+                "layer_norm: dtype mismatch between input, weight",
+            ));
         }
     }
     if let Some(b) = bias {
         if input.dtype != b.dtype {
-            return Err(unsupported("layer_norm: dtype mismatch between input, bias"));
+            return Err(unsupported(
+                "layer_norm: dtype mismatch between input, bias",
+            ));
         }
     }
 

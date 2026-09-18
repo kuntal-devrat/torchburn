@@ -1112,12 +1112,10 @@ fn run_binary_f32_simd<
                 let n_simd = chunk.len() / 8;
                 for j in 0..n_simd {
                     let offset = j * 8;
-                    let g_v = f32x8::from(
-                        *<&[f32; 8]>::try_from(&g_slice[offset..offset + 8]).unwrap(),
-                    );
-                    let x_v = f32x8::from(
-                        *<&[f32; 8]>::try_from(&x_slice[offset..offset + 8]).unwrap(),
-                    );
+                    let g_v =
+                        f32x8::from(*<&[f32; 8]>::try_from(&g_slice[offset..offset + 8]).unwrap());
+                    let x_v =
+                        f32x8::from(*<&[f32; 8]>::try_from(&x_slice[offset..offset + 8]).unwrap());
                     let res = simd_op(g_v, x_v);
                     chunk[offset..offset + 8].copy_from_slice(&res.to_array());
                 }
@@ -1129,10 +1127,8 @@ fn run_binary_f32_simd<
         let n_simd = n / 8;
         for j in 0..n_simd {
             let offset = j * 8;
-            let g_v =
-                f32x8::from(*<&[f32; 8]>::try_from(&g_data[offset..offset + 8]).unwrap());
-            let x_v =
-                f32x8::from(*<&[f32; 8]>::try_from(&x_data[offset..offset + 8]).unwrap());
+            let g_v = f32x8::from(*<&[f32; 8]>::try_from(&g_data[offset..offset + 8]).unwrap());
+            let x_v = f32x8::from(*<&[f32; 8]>::try_from(&x_data[offset..offset + 8]).unwrap());
             let res = simd_op(g_v, x_v);
             out_data[offset..offset + 8].copy_from_slice(&res.to_array());
         }
@@ -1444,10 +1440,7 @@ pub fn silu_backward_f64(g: f64, x: f64) -> f64 {
     g * (s * (1.0 + x * (1.0 - s)))
 }
 
-pub fn silu_backward(
-    grad: &BorrowedTensor,
-    input: &BorrowedTensor,
-) -> PyResult<OwnedTensor> {
+pub fn silu_backward(grad: &BorrowedTensor, input: &BorrowedTensor) -> PyResult<OwnedTensor> {
     if grad.dtype != input.dtype {
         return Err(unsupported("silu_backward dtype mismatch"));
     }
@@ -1504,10 +1497,7 @@ pub fn sigmoid_backward_f64(g: f64, y: f64) -> f64 {
     g * y * (1.0 - y)
 }
 
-pub fn sigmoid_backward(
-    grad: &BorrowedTensor,
-    output: &BorrowedTensor,
-) -> PyResult<OwnedTensor> {
+pub fn sigmoid_backward(grad: &BorrowedTensor, output: &BorrowedTensor) -> PyResult<OwnedTensor> {
     if grad.dtype != output.dtype {
         return Err(unsupported("sigmoid_backward dtype mismatch"));
     }
@@ -1564,10 +1554,7 @@ pub fn tanh_backward_f64(g: f64, y: f64) -> f64 {
     g * (1.0 - y * y)
 }
 
-pub fn tanh_backward(
-    grad: &BorrowedTensor,
-    output: &BorrowedTensor,
-) -> PyResult<OwnedTensor> {
+pub fn tanh_backward(grad: &BorrowedTensor, output: &BorrowedTensor) -> PyResult<OwnedTensor> {
     if grad.dtype != output.dtype {
         return Err(unsupported("tanh_backward dtype mismatch"));
     }
@@ -1680,4 +1667,3 @@ pub fn leaky_relu_backward(
     }
     Ok(out)
 }
-

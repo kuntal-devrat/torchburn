@@ -805,7 +805,8 @@ pub fn wgpu_gemv_w4a32(
         Ok(res) => res,
         Err(payload) => {
             if let Some(ctx) = get_wgpu_int4_context() {
-                ctx.device_lost.store(true, std::sync::atomic::Ordering::SeqCst);
+                ctx.device_lost
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
             }
             let msg = if let Some(s) = payload.downcast_ref::<&str>() {
                 s.to_string()
@@ -949,7 +950,8 @@ fn wgpu_gemv_w4a32_inner(
                     let y_size = ((entry.num_rows * 4).max(16)) as u64;
                     let x_size = (((entry.num_cols * 4 + 15) & !15).max(16)) as u64;
                     let w_size = ((entry.num_rows * (entry.num_cols / 2) + 3) & !3).max(16) as u64;
-                    let s_size = (((entry.num_rows * entry.num_cols / entry.group_size) * 4).max(16)) as u64;
+                    let s_size =
+                        (((entry.num_rows * entry.num_cols / entry.group_size) * 4).max(16)) as u64;
                     pool.recycle(
                         entry.staging_buf,
                         y_size,

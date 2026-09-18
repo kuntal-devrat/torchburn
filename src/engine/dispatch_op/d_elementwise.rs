@@ -216,7 +216,10 @@ pub(crate) fn try_dispatch(
             let approx = if node.kwargs.contains_key("approximate") {
                 kw_str(node, "approximate", "none")
             } else if let Some(arg) = node.args.get(2) {
-                arg.value.as_ref().and_then(|v| v.as_str()).unwrap_or("none")
+                arg.value
+                    .as_ref()
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("none")
             } else {
                 "none"
             };
@@ -248,7 +251,9 @@ pub(crate) fn try_dispatch(
                 0.01
             };
             slots.push(Slot::Owned(activations::leaky_relu_backward(
-                &grad, &x, negative_slope,
+                &grad,
+                &x,
+                negative_slope,
             )?));
         }
         _ => return Ok(false),

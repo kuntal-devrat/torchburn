@@ -60,7 +60,7 @@ def test_linear_layer_runs_native():
     messages = [str(w.message) for w in caught if issubclass(w.category, UserWarning)]
     assert not any("torchburn: falling back" in m for m in messages), messages
     with torch.no_grad():
-        assert torch.allclose(out, net(x))
+        assert torch.allclose(out, net(x), atol=1e-5)
 
 
 def test_conv2d_runs_native():

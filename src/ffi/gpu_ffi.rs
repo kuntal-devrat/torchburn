@@ -83,4 +83,3 @@ pub fn wgpu_clear_buffer_pool() {
         crate::wgpu::backend::wgpu_clear_buffer_pool();
     }
 }
-

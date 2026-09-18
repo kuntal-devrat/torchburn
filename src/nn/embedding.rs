@@ -219,10 +219,14 @@ pub fn embedding_backward(
     scale_grad_by_freq: bool,
 ) -> PyResult<OwnedTensor> {
     if grad_output.dtype != DType::F32 && grad_output.dtype != DType::F64 {
-        return Err(unsupported("embedding_backward grad_output must be f32/f64"));
+        return Err(unsupported(
+            "embedding_backward grad_output must be f32/f64",
+        ));
     }
     if indices.dtype != DType::I64 && indices.dtype != DType::I32 {
-        return Err(unsupported("embedding_backward indices must be int64/int32"));
+        return Err(unsupported(
+            "embedding_backward indices must be int64/int32",
+        ));
     }
     let grad_shape = &grad_output.shape;
     if grad_shape.is_empty() {
@@ -293,45 +297,48 @@ pub fn embedding_backward(
             let gw = unsafe { typed_mut_slice::<f32>(&mut grad_weight) };
             if use_par {
                 const CHUNK_D: usize = 32;
-                (0..d).into_par_iter().step_by(CHUNK_D).for_each(|col_start| {
-                    let col_end = (col_start + CHUNK_D).min(d);
-                    let col_width = col_end - col_start;
-                    for i in 0..n_indices {
-                        let ix = get_idx(i);
-                        if ix < 0 || ix == padding_idx {
-                            continue;
-                        }
-                        let row = ix as usize;
-                        if row >= num_weights {
-                            continue;
-                        }
-                        let scale = if let Some(ref fr) = freqs {
-                            let cnt = fr[row];
-                            if cnt > 0 {
-                                1.0 / cnt as f32
+                (0..d)
+                    .into_par_iter()
+                    .step_by(CHUNK_D)
+                    .for_each(|col_start| {
+                        let col_end = (col_start + CHUNK_D).min(d);
+                        let col_width = col_end - col_start;
+                        for i in 0..n_indices {
+                            let ix = get_idx(i);
+                            if ix < 0 || ix == padding_idx {
+                                continue;
+                            }
+                            let row = ix as usize;
+                            if row >= num_weights {
+                                continue;
+                            }
+                            let scale = if let Some(ref fr) = freqs {
+                                let cnt = fr[row];
+                                if cnt > 0 {
+                                    1.0 / cnt as f32
+                                } else {
+                                    1.0
+                                }
                             } else {
                                 1.0
-                            }
-                        } else {
-                            1.0
-                        };
-                        let g_offset = i * d + col_start;
-                        let gw_offset = row * d + col_start;
-                        unsafe {
-                            let gw_ptr = gw.as_ptr().add(gw_offset) as *mut f32;
-                            let g_ptr = g.as_ptr().add(g_offset);
-                            if scale == 1.0 {
-                                for c in 0..col_width {
-                                    *gw_ptr.add(c) += *g_ptr.add(c);
-                                }
-                            } else {
-                                for c in 0..col_width {
-                                    *gw_ptr.add(c) += *g_ptr.add(c) * scale;
+                            };
+                            let g_offset = i * d + col_start;
+                            let gw_offset = row * d + col_start;
+                            unsafe {
+                                let gw_ptr = gw.as_ptr().add(gw_offset) as *mut f32;
+                                let g_ptr = g.as_ptr().add(g_offset);
+                                if scale == 1.0 {
+                                    for c in 0..col_width {
+                                        *gw_ptr.add(c) += *g_ptr.add(c);
+                                    }
+                                } else {
+                                    for c in 0..col_width {
+                                        *gw_ptr.add(c) += *g_ptr.add(c) * scale;
+                                    }
                                 }
                             }
                         }
-                    }
-                });
+                    });
             } else {
                 for i in 0..n_indices {
                     let ix = get_idx(i);
@@ -373,45 +380,48 @@ pub fn embedding_backward(
             let gw = unsafe { typed_mut_slice::<f64>(&mut grad_weight) };
             if use_par {
                 const CHUNK_D: usize = 32;
-                (0..d).into_par_iter().step_by(CHUNK_D).for_each(|col_start| {
-                    let col_end = (col_start + CHUNK_D).min(d);
-                    let col_width = col_end - col_start;
-                    for i in 0..n_indices {
-                        let ix = get_idx(i);
-                        if ix < 0 || ix == padding_idx {
-                            continue;
-                        }
-                        let row = ix as usize;
-                        if row >= num_weights {
-                            continue;
-                        }
-                        let scale = if let Some(ref fr) = freqs {
-                            let cnt = fr[row];
-                            if cnt > 0 {
-                                1.0 / cnt as f64
+                (0..d)
+                    .into_par_iter()
+                    .step_by(CHUNK_D)
+                    .for_each(|col_start| {
+                        let col_end = (col_start + CHUNK_D).min(d);
+                        let col_width = col_end - col_start;
+                        for i in 0..n_indices {
+                            let ix = get_idx(i);
+                            if ix < 0 || ix == padding_idx {
+                                continue;
+                            }
+                            let row = ix as usize;
+                            if row >= num_weights {
+                                continue;
+                            }
+                            let scale = if let Some(ref fr) = freqs {
+                                let cnt = fr[row];
+                                if cnt > 0 {
+                                    1.0 / cnt as f64
+                                } else {
+                                    1.0
+                                }
                             } else {
                                 1.0
-                            }
-                        } else {
-                            1.0
-                        };
-                        let g_offset = i * d + col_start;
-                        let gw_offset = row * d + col_start;
-                        unsafe {
-                            let gw_ptr = gw.as_ptr().add(gw_offset) as *mut f64;
-                            let g_ptr = g.as_ptr().add(g_offset);
-                            if scale == 1.0 {
-                                for c in 0..col_width {
-                                    *gw_ptr.add(c) += *g_ptr.add(c);
-                                }
-                            } else {
-                                for c in 0..col_width {
-                                    *gw_ptr.add(c) += *g_ptr.add(c) * scale;
+                            };
+                            let g_offset = i * d + col_start;
+                            let gw_offset = row * d + col_start;
+                            unsafe {
+                                let gw_ptr = gw.as_ptr().add(gw_offset) as *mut f64;
+                                let g_ptr = g.as_ptr().add(g_offset);
+                                if scale == 1.0 {
+                                    for c in 0..col_width {
+                                        *gw_ptr.add(c) += *g_ptr.add(c);
+                                    }
+                                } else {
+                                    for c in 0..col_width {
+                                        *gw_ptr.add(c) += *g_ptr.add(c) * scale;
+                                    }
                                 }
                             }
                         }
-                    }
-                });
+                    });
             } else {
                 for i in 0..n_indices {
                     let ix = get_idx(i);
@@ -453,4 +463,3 @@ pub fn embedding_backward(
 
     Ok(grad_weight)
 }
-

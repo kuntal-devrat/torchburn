@@ -124,7 +124,10 @@ pub(crate) fn try_dispatch(
             let scale_grad = if node.kwargs.contains_key("scale_grad_by_freq") {
                 kw_bool(node, "scale_grad_by_freq", false)
             } else if let Some(arg) = node.args.get(4) {
-                arg.value.as_ref().and_then(|v| v.as_bool()).unwrap_or(false)
+                arg.value
+                    .as_ref()
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false)
             } else {
                 false
             };

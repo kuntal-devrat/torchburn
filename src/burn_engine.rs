@@ -695,6 +695,19 @@ where
             } else {
                 None
             };
+            if R != 4 {
+                return Err(unsupported("conv2d: input must be 4-D (B,C,H,W)"));
+            }
+            let x_dims = x.dims();
+            let w_dims = weight.dims();
+            let cin = x_dims[1];
+            let cout = w_dims[0];
+            let cin_g = w_dims[1];
+            if groups == 0 || cin % groups != 0 || cout % groups != 0 || cin_g * groups != cin {
+                return Err(unsupported(&format!(
+                    "conv2d: groups={groups} must divide channels (C_in={cin}, C_out={cout})"
+                )));
+            }
             let options = ConvOptions::new(stride, padding, dilation, groups);
             x.do_conv2d(weight, bias, options)
         }
@@ -711,6 +724,16 @@ where
             } else {
                 None
             };
+            if R != 4 {
+                return Err(unsupported("conv_transpose2d: input must be 4-D (B,C,H,W)"));
+            }
+            let x_dims = x.dims();
+            let cin = x_dims[1];
+            if groups == 0 || cin % groups != 0 {
+                return Err(unsupported(&format!(
+                    "conv_transpose2d: groups={groups} must divide channels (C_in={cin})"
+                )));
+            }
             let options = ConvTransposeOptions::new(stride, padding, out_pad, dilation, groups);
             x.do_conv_transpose2d(weight, bias, options)
         }

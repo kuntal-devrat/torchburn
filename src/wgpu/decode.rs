@@ -346,8 +346,8 @@ impl WgpuQwenDecoder {
         let rows_per_wg = ctx.rows_per_wg;
         let has_subgroups = ctx.has_subgroups;
         let use_pipeline_cache = ctx.has_pipeline_cache;
-        let device = ctx.device.clone();  // Arc clone — shares the same underlying handle
-        let queue = ctx.queue.clone();    // Arc clone — same queue, guaranteed FIFO ordering
+        let device = ctx.device.clone(); // Arc clone — shares the same underlying handle
+        let queue = ctx.queue.clone(); // Arc clone — same queue, guaranteed FIFO ordering
         let pipelines = Arc::new(WgpuPipelines::new(
             &device,
             rows_per_wg,

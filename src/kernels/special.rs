@@ -600,9 +600,7 @@ pub fn repeat_interleave(
     let total: usize = if rep_n == 1 {
         dim_size * rep_data.first().copied().unwrap_or(1)
     } else {
-        (0..dim_size)
-            .map(|i| rep_data[i.min(rep_n - 1)])
-            .sum()
+        (0..dim_size).map(|i| rep_data[i.min(rep_n - 1)]).sum()
     };
 
     let mut out_shape = input.shape.clone();

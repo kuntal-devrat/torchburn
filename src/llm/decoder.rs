@@ -851,95 +851,95 @@ pub fn sample_logits(logits: &[f32], temperature: f32, top_k: usize, top_p: f32)
     // Top-k: NaN-safe, reuses a thread-local buffer to avoid per-token allocation.
     let k = top_k.min(vocab_size).max(1);
     THREAD_TOPK.with(|cell| {
-    let mut top_items = cell.borrow_mut();
-    top_items.clear();
-    if k >= vocab_size {
-        top_items.extend(
-            logits
+        let mut top_items = cell.borrow_mut();
+        top_items.clear();
+        if k >= vocab_size {
+            top_items.extend(
+                logits
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &v)| (i, if v.is_finite() { v } else { f32::NEG_INFINITY })),
+            );
+        } else if k > 1024 {
+            // Large k: partial select via nth_element (O(V) avg, no O(V*k) rescan)
+            let mut indexed: Vec<(usize, f32)> = logits
                 .iter()
                 .enumerate()
-                .map(|(i, &v)| (i, if v.is_finite() { v } else { f32::NEG_INFINITY })),
-        );
-    } else if k > 1024 {
-        // Large k: partial select via nth_element (O(V) avg, no O(V*k) rescan)
-        let mut indexed: Vec<(usize, f32)> = logits
-            .iter()
-            .enumerate()
-            .map(|(i, &v)| (i, if v.is_finite() { v } else { f32::NEG_INFINITY }))
-            .collect();
-        let nth = k.min(indexed.len() - 1);
-        indexed.select_nth_unstable_by(nth, |a, b| b.1.total_cmp(&a.1));
-        top_items.extend_from_slice(&indexed[..k]);
-    } else {
-        let mut min_val = f32::NEG_INFINITY;
-        let mut min_pos = 0;
-        for (i, &raw) in logits.iter().enumerate() {
-            let val = if raw.is_finite() {
-                raw
-            } else {
-                f32::NEG_INFINITY
-            };
-            if top_items.len() < k {
-                top_items.push((i, val));
-                if val < min_val || top_items.len() == 1 {
-                    min_val = val;
-                    min_pos = top_items.len() - 1;
-                }
-            } else if val > min_val {
-                top_items[min_pos] = (i, val);
-                let mut new_min = top_items[0].1;
-                let mut new_pos = 0;
-                for (idx, &(_, v)) in top_items.iter().enumerate() {
-                    if v < new_min {
-                        new_min = v;
-                        new_pos = idx;
+                .map(|(i, &v)| (i, if v.is_finite() { v } else { f32::NEG_INFINITY }))
+                .collect();
+            let nth = k.min(indexed.len() - 1);
+            indexed.select_nth_unstable_by(nth, |a, b| b.1.total_cmp(&a.1));
+            top_items.extend_from_slice(&indexed[..k]);
+        } else {
+            let mut min_val = f32::NEG_INFINITY;
+            let mut min_pos = 0;
+            for (i, &raw) in logits.iter().enumerate() {
+                let val = if raw.is_finite() {
+                    raw
+                } else {
+                    f32::NEG_INFINITY
+                };
+                if top_items.len() < k {
+                    top_items.push((i, val));
+                    if val < min_val || top_items.len() == 1 {
+                        min_val = val;
+                        min_pos = top_items.len() - 1;
                     }
+                } else if val > min_val {
+                    top_items[min_pos] = (i, val);
+                    let mut new_min = top_items[0].1;
+                    let mut new_pos = 0;
+                    for (idx, &(_, v)) in top_items.iter().enumerate() {
+                        if v < new_min {
+                            new_min = v;
+                            new_pos = idx;
+                        }
+                    }
+                    min_val = new_min;
+                    min_pos = new_pos;
                 }
-                min_val = new_min;
-                min_pos = new_pos;
             }
         }
-    }
 
-    let max_logit = top_items
-        .iter()
-        .map(|&(_, v)| v)
-        .fold(f32::NEG_INFINITY, f32::max);
-    let inv_temp = 1.0 / temperature;
-    for item in top_items.iter_mut() {
-        let p = ((item.1 - max_logit) * inv_temp).exp();
-        item.1 = p;
-    }
+        let max_logit = top_items
+            .iter()
+            .map(|&(_, v)| v)
+            .fold(f32::NEG_INFINITY, f32::max);
+        let inv_temp = 1.0 / temperature;
+        for item in top_items.iter_mut() {
+            let p = ((item.1 - max_logit) * inv_temp).exp();
+            item.1 = p;
+        }
 
-    // Optional nucleus (top-p) filtering on the temperature-scaled distribution.
-    // B8 fix: normalize probabilities before cumulative sum so top_p threshold
-    // is compared against actual probability mass (not unnormalized softmax).
-    let pre_sum: f32 = top_items.iter().map(|&(_, p)| p).sum();
-    let mut kept_end = top_items.len();
-    if top_p > 0.0 && top_p < 1.0 && kept_end > 1 && pre_sum > 0.0 {
-        let inv_sum = 1.0 / pre_sum;
-        top_items.sort_unstable_by(|a, b| b.1.total_cmp(&a.1));
-        let mut cum = 0.0f32;
-        for (i, &(_, p)) in top_items.iter().enumerate() {
-            if cum > top_p {
-                kept_end = i;
-                break;
+        // Optional nucleus (top-p) filtering on the temperature-scaled distribution.
+        // B8 fix: normalize probabilities before cumulative sum so top_p threshold
+        // is compared against actual probability mass (not unnormalized softmax).
+        let pre_sum: f32 = top_items.iter().map(|&(_, p)| p).sum();
+        let mut kept_end = top_items.len();
+        if top_p > 0.0 && top_p < 1.0 && kept_end > 1 && pre_sum > 0.0 {
+            let inv_sum = 1.0 / pre_sum;
+            top_items.sort_unstable_by(|a, b| b.1.total_cmp(&a.1));
+            let mut cum = 0.0f32;
+            for (i, &(_, p)) in top_items.iter().enumerate() {
+                if cum > top_p {
+                    kept_end = i;
+                    break;
+                }
+                cum += p * inv_sum;
             }
-            cum += p * inv_sum;
         }
-    }
 
-    let kept = &top_items[..kept_end];
-    let kept_sum: f32 = kept.iter().map(|&(_, p)| p).sum();
-    let r = rand::random::<f32>() * kept_sum;
-    let mut accum = 0.0f32;
-    for &(idx, p) in kept {
-        accum += p;
-        if accum >= r {
-            return idx;
+        let kept = &top_items[..kept_end];
+        let kept_sum: f32 = kept.iter().map(|&(_, p)| p).sum();
+        let r = rand::random::<f32>() * kept_sum;
+        let mut accum = 0.0f32;
+        for &(idx, p) in kept {
+            accum += p;
+            if accum >= r {
+                return idx;
+            }
         }
-    }
-    kept[0].0
+        kept[0].0
     }) // end THREAD_TOPK.with
 }
 

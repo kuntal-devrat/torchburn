@@ -408,7 +408,9 @@ pub fn execute_native(payload: &Payload, capsules: &[CapsuleRef]) -> PyResult<Ve
             }
         }
         if let Step::ConvBnRelu(spec) = step {
-            if requested.contains(&payload.nodes[spec.conv].id) || requested.contains(&payload.nodes[spec.bn].id) {
+            if requested.contains(&payload.nodes[spec.conv].id)
+                || requested.contains(&payload.nodes[spec.bn].id)
+            {
                 unsafe_output = true;
             }
         }
