@@ -1,16 +1,10 @@
-// Fused residual-add + RMSNorm with subgroup-based reduction.
+// Fused residual-add + RMSNorm compat fallback — no subgroup builtins.
 //
-// Replaces the previous 7-step barrier tree with subgroupAdd (one instruction
-// per subgroup) + a single inter-subgroup barrier.  Typical savings on Intel
-// Iris Xe (32-lane subgroups, 2 subgroups per WG): 5 barriers → 1 barrier.
-// On AMD RDNA (64-lane, 1 subgroup per WG): 7 barriers → 0 barriers.
-//
-// Bindings:
-//   0: x        (read_write) — residual stream, updated in-place
-//   1: residual (read)       — incoming residual to add
-//   2: weight   (read)       — RMSNorm gain
-//   3: y        (read_write) — normalized output
-//   4: params   (uniform)    — {n, eps}
+// Same interface as fused_add_rmsnorm.wgsl (bindings 0..4, AddRMSNormParams{n, eps},
+// @workgroup_size(64)) but uses a classic workgroup-memory barrier-tree
+// reduction so it compiles on adapters without WGSL subgroup support
+// (software/CPU fallbacks, older Vulkan drivers, WebGPU targets).
+// Peak-path: vec4 loads/stores (4x fewer instructions than scalar).
 
 struct AddRMSNormParams {
     n:   u32,
@@ -23,16 +17,11 @@ struct AddRMSNormParams {
 @group(0) @binding(3) var<storage, read_write> y:        array<vec4<f32>>;
 @group(0) @binding(4) var<uniform>             params:   AddRMSNormParams;
 
-// Sized for worst case 8-lane subgroups (64/8 = 8 subgroups).
-// Value of 2 caused OOB on GPUs with 16-lane subgroups (64/16 = 4).
-var<workgroup> sg_partial: array<f32, 8>;
-var<workgroup> s_inv_rms:  f32;
+var<workgroup> partial:   array<f32, 64>;
+var<workgroup> s_inv_rms: f32;
 
 @compute @workgroup_size(64)
-fn main(@builtin(local_invocation_id)  local_id: vec3<u32>,
-        @builtin(subgroup_invocation_id) sg_lane: u32,
-        @builtin(subgroup_id)            sg_id:   u32,
-        @builtin(num_subgroups)          num_sgs: u32) {
+fn main(@builtin(local_invocation_id) local_id: vec3<u32>) {
     let tid = local_id.x;
     let n   = params.n;
     let n4  = n / 4u;
@@ -56,20 +45,25 @@ fn main(@builtin(local_invocation_id)  local_id: vec3<u32>,
         sum_sq    = sum_sq + val * val;
         j         = j + 64u;
     }
+    partial[tid] = sum_sq;
+    workgroupBarrier();
 
-    // ── Phase 2: subgroup reduction + one cross-subgroup barrier ──────────
-    let sg_sum = subgroupAdd(sum_sq);
-    if (sg_lane == 0u) {
-        sg_partial[sg_id] = sg_sum;
-    }
+    // ── Phase 2: barrier-tree reduction 64 -> 32 -> 16 -> 8 -> 4 -> 2 -> 1 ──
+    if (tid < 32u) { partial[tid] = partial[tid] + partial[tid + 32u]; }
+    workgroupBarrier();
+    if (tid < 16u) { partial[tid] = partial[tid] + partial[tid + 16u]; }
+    workgroupBarrier();
+    if (tid < 8u) { partial[tid] = partial[tid] + partial[tid + 8u]; }
+    workgroupBarrier();
+    if (tid < 4u) { partial[tid] = partial[tid] + partial[tid + 4u]; }
+    workgroupBarrier();
+    if (tid < 2u) { partial[tid] = partial[tid] + partial[tid + 2u]; }
+    workgroupBarrier();
+    if (tid < 1u) { partial[tid] = partial[tid] + partial[tid + 1u]; }
     workgroupBarrier();
 
     if (tid == 0u) {
-        var total = 0.0f;
-        for (var s = 0u; s < num_sgs; s = s + 1u) {
-            total = total + sg_partial[s];
-        }
-        let mean  = total / f32(n);
+        let mean  = partial[0] / f32(n);
         s_inv_rms = inverseSqrt(mean + params.eps);
     }
     workgroupBarrier();

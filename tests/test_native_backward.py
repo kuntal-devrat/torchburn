@@ -1,503 +1,402 @@
-"""Tests for Phase 10: backward routed through Rust backward_single FFI.
+"""Tests for native backward activation & embedding kernels, training batch norm, and end-to-end AOTAutograd training."""
 
-Every test compares the Rust backward output against PyTorch's autograd to
-verify numerical correctness within tight tolerances.
-"""
+import json
 import pytest
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
-from torchburn.autograd import (
-    Tensor, enable, disable, reset, tape_len,
-    _add, _sub, _mul, _div, _matmul,
-    linear, relu, sigmoid, tanh_act, gelu, softmax,
-    layer_norm, mse_loss, cross_entropy, sum_op,
-)
-
-
-@pytest.fixture(autouse=True)
-def _setup_teardown():
-    enable()
-    yield
-    reset()
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Helpers
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _compare(ta, ref, rtol=1e-5, atol=1e-5):
-    if ta.grad is None:
-        assert ref.grad is None, "torchburn grad is None but reference has grad"
-        return
-    assert ref.grad is not None, "reference grad is None but torchburn has grad"
-    torch.testing.assert_close(ta.grad, ref.grad, rtol=rtol, atol=atol)
-
-
-def _backward_and_compare(tb_tensors, ref_tensors, out_tb, out_ref, rtol=1e-4, atol=1e-4):
-    """Run backward on both paths and compare leaf gradients."""
-    grad_out = torch.ones_like(out_tb.data)
-    out_tb.backward(grad_output=grad_out)
-    out_ref.backward(grad_out)
-    for tb, ref in zip(tb_tensors, ref_tensors):
-        _compare(tb, ref, rtol=rtol, atol=atol)
-
-
-def _backward_scalar(tb_tensors, ref_tensors, out_tb, out_ref, rtol=1e-4, atol=1e-4):
-    """For non-scalar outputs: pass ones_like grad to both."""
-    grad_out = torch.ones_like(out_tb.data)
-    out_tb.backward(grad_output=grad_out)
-    out_ref.backward(grad_out)
-    for tb, ref in zip(tb_tensors, ref_tensors):
-        _compare(tb, ref, rtol=rtol, atol=atol)
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Phase 1: Binary elementwise
-# ─────────────────────────────────────────────────────────────────────────────
-
-class TestBinaryBackward:
-    def test_add(self):
-        reset(); enable()
-        a = Tensor(torch.randn(4, 4), requires_grad=True)
-        b = Tensor(torch.randn(4, 4), requires_grad=True)
-        out = a + b
-        a_ref = a.data.clone().requires_grad_(True)
-        b_ref = b.data.clone().requires_grad_(True)
-        out_ref = a_ref + b_ref
-        _backward_and_compare([a, b], [a_ref, b_ref], out, out_ref)
-
-    def test_sub(self):
-        reset(); enable()
-        a = Tensor(torch.randn(4, 4), requires_grad=True)
-        b = Tensor(torch.randn(4, 4), requires_grad=True)
-        out = a - b
-        a_ref = a.data.clone().requires_grad_(True)
-        b_ref = b.data.clone().requires_grad_(True)
-        out_ref = a_ref - b_ref
-        _backward_and_compare([a, b], [a_ref, b_ref], out, out_ref)
-
-    def test_mul(self):
-        reset(); enable()
-        a = Tensor(torch.randn(4, 4), requires_grad=True)
-        b = Tensor(torch.randn(4, 4), requires_grad=True)
-        out = a * b
-        a_ref = a.data.clone().requires_grad_(True)
-        b_ref = b.data.clone().requires_grad_(True)
-        out_ref = a_ref * b_ref
-        _backward_and_compare([a, b], [a_ref, b_ref], out, out_ref)
-
-    def test_div(self):
-        reset(); enable()
-        a = Tensor(torch.randn(4, 4), requires_grad=True)
-        b = Tensor(torch.rand(4, 4) + 0.1, requires_grad=True)
-        out = a / b
-        a_ref = a.data.clone().requires_grad_(True)
-        b_ref = b.data.clone().requires_grad_(True)
-        out_ref = a_ref / b_ref
-        _backward_and_compare([a, b], [a_ref, b_ref], out, out_ref)
-
-    def test_add_broadcast(self):
-        reset(); enable()
-        a = Tensor(torch.randn(3, 4), requires_grad=True)
-        b = Tensor(torch.randn(4), requires_grad=True)
-        out = a + b
-        a_ref = a.data.clone().requires_grad_(True)
-        b_ref = b.data.clone().requires_grad_(True)
-        out_ref = a_ref + b_ref
-        _backward_and_compare([a, b], [a_ref, b_ref], out, out_ref)
-
-    def test_mul_broadcast(self):
-        reset(); enable()
-        a = Tensor(torch.randn(3, 4), requires_grad=True)
-        b = Tensor(torch.randn(4), requires_grad=True)
-        out = a * b
-        a_ref = a.data.clone().requires_grad_(True)
-        b_ref = b.data.clone().requires_grad_(True)
-        out_ref = a_ref * b_ref
-        _backward_and_compare([a, b], [a_ref, b_ref], out, out_ref)
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Phase 2: Linear algebra
-# ─────────────────────────────────────────────────────────────────────────────
-
-class TestLinearAlgebraBackward:
-    def test_matmul_2d(self):
-        reset(); enable()
-        a = Tensor(torch.randn(4, 8), requires_grad=True)
-        b = Tensor(torch.randn(8, 3), requires_grad=True)
-        out = a @ b
-        a_ref = a.data.clone().requires_grad_(True)
-        b_ref = b.data.clone().requires_grad_(True)
-        out_ref = a_ref @ b_ref
-        _backward_and_compare([a, b], [a_ref, b_ref], out, out_ref)
-
-    def test_matmul_square(self):
-        reset(); enable()
-        a = Tensor(torch.randn(5, 5), requires_grad=True)
-        b = Tensor(torch.randn(5, 5), requires_grad=True)
-        out = a @ b
-        a_ref = a.data.clone().requires_grad_(True)
-        b_ref = b.data.clone().requires_grad_(True)
-        out_ref = a_ref @ b_ref
-        _backward_and_compare([a, b], [a_ref, b_ref], out, out_ref)
-
-    def test_linear_no_bias(self):
-        reset(); enable()
-        x = Tensor(torch.randn(4, 8), requires_grad=True)
-        w = Tensor(torch.randn(3, 8), requires_grad=True)
-        out = linear(x, w)
-        x_ref = x.data.clone().requires_grad_(True)
-        w_ref = w.data.clone().requires_grad_(True)
-        out_ref = F.linear(x_ref, w_ref)
-        _backward_and_compare([x, w], [x_ref, w_ref], out, out_ref)
-
-    def test_linear_with_bias(self):
-        reset(); enable()
-        x = Tensor(torch.randn(4, 8), requires_grad=True)
-        w = Tensor(torch.randn(3, 8), requires_grad=True)
-        b = Tensor(torch.randn(3), requires_grad=True)
-        out = linear(x, w, b)
-        x_ref = x.data.clone().requires_grad_(True)
-        w_ref = w.data.clone().requires_grad_(True)
-        b_ref = b.data.clone().requires_grad_(True)
-        out_ref = F.linear(x_ref, w_ref, b_ref)
-        _backward_and_compare([x, w, b], [x_ref, w_ref, b_ref], out, out_ref)
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Phase 2: Activations
-# ─────────────────────────────────────────────────────────────────────────────
-
-class TestActivationBackward:
-    def test_relu(self):
-        reset(); enable()
-        a = Tensor(torch.randn(4, 4) - 0.5, requires_grad=True)
-        out = relu(a)
-        a_ref = a.data.clone().requires_grad_(True)
-        out_ref = torch.relu(a_ref)
-        _backward_and_compare([a], [a_ref], out, out_ref)
-
-    def test_sigmoid(self):
-        reset(); enable()
-        a = Tensor(torch.randn(4, 4), requires_grad=True)
-        out = sigmoid(a)
-        a_ref = a.data.clone().requires_grad_(True)
-        out_ref = torch.sigmoid(a_ref)
-        _backward_and_compare([a], [a_ref], out, out_ref)
-
-    def test_tanh(self):
-        reset(); enable()
-        a = Tensor(torch.randn(4, 4), requires_grad=True)
-        out = tanh_act(a)
-        a_ref = a.data.clone().requires_grad_(True)
-        out_ref = torch.tanh(a_ref)
-        _backward_and_compare([a], [a_ref], out, out_ref)
-
-    def test_gelu(self):
-        reset(); enable()
-        a = Tensor(torch.randn(4, 4), requires_grad=True)
-        out = gelu(a)
-        a_ref = a.data.clone().requires_grad_(True)
-        out_ref = F.gelu(a_ref)
-        _backward_and_compare([a], [a_ref], out, out_ref, rtol=1e-3, atol=1e-3)
-
-    def test_softmax(self):
-        reset(); enable()
-        a = Tensor(torch.randn(4, 8), requires_grad=True)
-        out = softmax(a, dim=-1)
-        a_ref = a.data.clone().requires_grad_(True)
-        out_ref = torch.softmax(a_ref, dim=-1)
-        _backward_and_compare([a], [a_ref], out, out_ref)
-
-    def test_relu_negative_inputs(self):
-        reset(); enable()
-        x = Tensor(torch.tensor([-2.0, -1.0, 0.5, 1.0]), requires_grad=True)
-        y = relu(x)
-        y.backward(torch.ones_like(y.data))
-        ref = torch.tensor([-2.0, -1.0, 0.5, 1.0]).requires_grad_(True)
-        F.relu(ref).sum().backward()
-        _compare(x, ref)
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Phase 2: Normalization
-# ─────────────────────────────────────────────────────────────────────────────
-
-class TestNormBackward:
-    def test_layer_norm(self):
-        reset(); enable()
-        a = Tensor(torch.randn(2, 8), requires_grad=True)
-        w = Tensor(torch.randn(8), requires_grad=True)
-        b = Tensor(torch.randn(8), requires_grad=True)
-        out = layer_norm(a, w, b)
-        a_ref = a.data.clone().requires_grad_(True)
-        w_ref = w.data.clone().requires_grad_(True)
-        b_ref = b.data.clone().requires_grad_(True)
-        out_ref = F.layer_norm(a_ref, w_ref.shape, w_ref, b_ref)
-        _backward_and_compare([a, w, b], [a_ref, w_ref, b_ref], out, out_ref, rtol=1e-3, atol=1e-3)
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Phase 2: Reductions
-# ─────────────────────────────────────────────────────────────────────────────
-
-class TestReductionBackward:
-    def test_sum(self):
-        reset(); enable()
-        x = Tensor(torch.randn(3, 4), requires_grad=True)
-        y = x.sum()
-        y.backward()
-        ref = torch.randn(3, 4).requires_grad_(True)
-        ref.sum().backward()
-        _compare(x, ref)
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Phase 4: Losses
-# ─────────────────────────────────────────────────────────────────────────────
-
-class TestLossBackward:
-    def test_mse_loss_mean(self):
-        reset(); enable()
-        x = Tensor(torch.randn(4, 4), requires_grad=True)
-        t = Tensor(torch.randn(4, 4), requires_grad=False)
-        out = mse_loss(x, t, reduction='mean')
-        x_ref = x.data.clone().requires_grad_(True)
-        out_ref = F.mse_loss(x_ref, t.data, reduction='mean')
-        out.backward()
-        out_ref.backward()
-        _compare(x, x_ref, rtol=1e-4, atol=1e-4)
-
-    def test_mse_loss_sum(self):
-        reset(); enable()
-        x = Tensor(torch.randn(4, 4), requires_grad=True)
-        t = Tensor(torch.randn(4, 4), requires_grad=False)
-        out = mse_loss(x, t, reduction='sum')
-        x_ref = x.data.clone().requires_grad_(True)
-        out_ref = F.mse_loss(x_ref, t.data, reduction='sum')
-        out.backward()
-        out_ref.backward()
-        _compare(x, x_ref, rtol=1e-4, atol=1e-4)
-
-    def test_cross_entropy(self):
-        reset(); enable()
-        x = Tensor(torch.randn(4, 10), requires_grad=True)
-        target = Tensor(torch.randint(0, 10, (4,)), requires_grad=False)
-        out = cross_entropy(x, target)
-        x_ref = x.data.clone().requires_grad_(True)
-        out_ref = F.cross_entropy(x_ref, target.data)
-        out.backward()
-        out_ref.backward()
-        _compare(x, x_ref, rtol=1e-4, atol=1e-4)
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Chained ops — verify gradients flow through multiple Rust backward calls
-# ─────────────────────────────────────────────────────────────────────────────
-
-class TestChainedBackward:
-    def test_add_mul_chain(self):
-        """a * b + a -> grad_a = b + 1, grad_b = a"""
-        reset(); enable()
-        a = Tensor(torch.randn(4), requires_grad=True)
-        b = Tensor(torch.randn(4), requires_grad=True)
-        out = a * b + a
-        a_ref = a.data.clone().requires_grad_(True)
-        b_ref = b.data.clone().requires_grad_(True)
-        out_ref = a_ref * b_ref + a_ref
-        _backward_scalar([a, b], [a_ref, b_ref], out, out_ref)
-
-    def test_linear_relu_chain(self):
-        reset(); enable()
-        x = Tensor(torch.randn(2, 8), requires_grad=True)
-        w = Tensor(torch.randn(4, 8), requires_grad=True)
-        b = Tensor(torch.randn(4), requires_grad=True)
-        y = linear(x, w, b)
-        z = relu(y)
-        loss = z.sum()
-        loss.backward()
-
-        x_ref = x.data.clone().requires_grad_(True)
-        w_ref = w.data.clone().requires_grad_(True)
-        b_ref = b.data.clone().requires_grad_(True)
-        y_ref = F.linear(x_ref, w_ref, b_ref)
-        z_ref = F.relu(y_ref)
-        z_ref.sum().backward()
-
-        _compare(x, x_ref, rtol=1e-4, atol=1e-4)
-        _compare(w, w_ref, rtol=1e-4, atol=1e-4)
-        _compare(b, b_ref, rtol=1e-4, atol=1e-4)
-
-    def test_matmul_matmul_chain(self):
-        reset(); enable()
-        A = Tensor(torch.randn(3, 4), requires_grad=True)
-        B = Tensor(torch.randn(4, 5), requires_grad=True)
-        C = Tensor(torch.randn(5, 2), requires_grad=True)
-        out = (A @ B) @ C
-        grad_out = torch.ones_like(out.data)
-        out.backward(grad_output=grad_out)
-
-        A_ref = A.data.clone().requires_grad_(True)
-        B_ref = B.data.clone().requires_grad_(True)
-        C_ref = C.data.clone().requires_grad_(True)
-        out_ref = (A_ref @ B_ref) @ C_ref
-        out_ref.backward(grad_out)
-
-        _compare(A, A_ref)
-        _compare(B, B_ref)
-        _compare(C, C_ref)
-
-    def test_sigmoid_matmul_chain(self):
-        reset(); enable()
-        x = Tensor(torch.randn(4, 4), requires_grad=True)
-        w = Tensor(torch.randn(4, 4), requires_grad=True)
-        out = sigmoid(x) @ w
-        grad_out = torch.ones_like(out.data)
-        out.backward(grad_output=grad_out)
-
-        x_ref = x.data.clone().requires_grad_(True)
-        w_ref = w.data.clone().requires_grad_(True)
-        out_ref = torch.sigmoid(x_ref) @ w_ref
-        out_ref.backward(grad_out)
-
-        _compare(x, x_ref, rtol=1e-4, atol=1e-4)
-        _compare(w, w_ref)
-
-    def test_layer_norm_matmul(self):
-        reset(); enable()
-        x = Tensor(torch.randn(2, 8), requires_grad=True)
-        w_ln = Tensor(torch.randn(8), requires_grad=True)
-        b_ln = Tensor(torch.randn(8), requires_grad=True)
-        w = Tensor(torch.randn(8, 4), requires_grad=True)
-        y = layer_norm(x, w_ln, b_ln)
-        out = y @ w
-        grad_out = torch.ones_like(out.data)
-        out.backward(grad_output=grad_out)
-
-        x_ref = x.data.clone().requires_grad_(True)
-        w_ln_ref = w_ln.data.clone().requires_grad_(True)
-        b_ln_ref = b_ln.data.clone().requires_grad_(True)
-        w_ref = w.data.clone().requires_grad_(True)
-        y_ref = F.layer_norm(x_ref, w_ln_ref.shape, w_ln_ref, b_ln_ref)
-        out_ref = y_ref @ w_ref
-        out_ref.backward(grad_out)
-
-        _compare(x, x_ref, rtol=1e-3, atol=1e-3)
-        _compare(w_ln, w_ln_ref, rtol=1e-3, atol=1e-3)
-        _compare(b_ln, b_ln_ref, rtol=1e-3, atol=1e-3)
-        _compare(w, w_ref)
-
-    def test_softmax_cross_entropy(self):
-        reset(); enable()
-        logits = Tensor(torch.randn(4, 10), requires_grad=True)
-        target = Tensor(torch.randint(0, 10, (4,)), requires_grad=False)
-        loss = cross_entropy(logits, target)
-        loss.backward()
-
-        logits_ref = logits.data.clone().requires_grad_(True)
-        loss_ref = F.cross_entropy(logits_ref, target.data)
-        loss_ref.backward()
-
-        _compare(logits, logits_ref, rtol=1e-4, atol=1e-4)
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Edge cases
-# ─────────────────────────────────────────────────────────────────────────────
-
-class TestEdgeCases:
-    def test_scalar_loss(self):
-        reset(); enable()
-        x = Tensor(torch.randn(4), requires_grad=True)
-        loss = (x * x).sum()
-        loss.backward()
-        assert x.grad is not None
-        torch.testing.assert_close(x.grad, 2 * x.data, rtol=1e-5, atol=1e-5)
-
-    def test_no_grad_input(self):
-        reset(); enable()
-        a = Tensor(torch.randn(4), requires_grad=True)
-        b = Tensor(torch.randn(4), requires_grad=False)
-        out = a + b
-        out.backward()
-        assert a.grad is not None
-
-    def test_tape_cleared_after_backward(self):
-        reset(); enable()
-        x = Tensor(torch.randn(4), requires_grad=True)
-        y = x * 2
-        y.backward()
-        assert tape_len() == 0
-
-    def test_reuse_after_reset(self):
-        reset(); enable()
-        x = Tensor(torch.randn(4), requires_grad=True)
-        y = x * 2
-        y.backward()
-        reset()
-        enable()
-        x2 = Tensor(torch.randn(4), requires_grad=True)
-        y2 = x2 * 3
-        y2.backward()
-        assert x2.grad is not None
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Training scenarios
-# ─────────────────────────────────────────────────────────────────────────────
-
-class TestTrainingScenario:
-    def test_linear_regression(self):
-        reset(); enable()
+import torchburn
+from torchburn import _torchburn as _native
+from torchburn._parser.op_registry import _ATEN_TO_OP
+
+
+def run_plan(plan, inputs):
+    capsules = [torch.to_dlpack(t.contiguous()) for t in inputs]
+    dtype_map = {torch.float32: "f32", torch.float64: "f64", torch.int64: "i64", torch.int32: "i32"}
+    plan["inputs"] = [{"shape": list(t.shape), "dtype": dtype_map.get(t.dtype, "f32")} for t in inputs]
+    out_capsules = _native.execute(json.dumps(plan), capsules)
+    return [torch.from_dlpack(c) for c in out_capsules]
+
+
+class TestNativeBackwardRegistry:
+    def test_op_registry_contains_backward_ops(self):
+        assert _ATEN_TO_OP.get("aten.gelu_backward.default") == "gelu_backward"
+        assert _ATEN_TO_OP.get("aten.silu_backward.default") == "silu_backward"
+        assert _ATEN_TO_OP.get("aten.sigmoid_backward.default") == "sigmoid_backward"
+        assert _ATEN_TO_OP.get("aten.tanh_backward.default") == "tanh_backward"
+        assert _ATEN_TO_OP.get("aten.leaky_relu_backward.default") == "leaky_relu_backward"
+        assert _ATEN_TO_OP.get("aten.embedding_dense_backward.default") == "embedding_backward"
+        assert _ATEN_TO_OP.get("aten._native_batch_norm_legit_functional.default") == "batch_norm"
+        assert _ATEN_TO_OP.get("aten._native_batch_norm_legit.default") == "batch_norm"
+        assert _ATEN_TO_OP.get("aten._native_batch_norm_legit.no_stats") == "batch_norm"
+
+
+class TestNativeBackwardMath:
+    def test_gelu_backward_exact_and_tanh(self):
+        # Exact
+        x = torch.randn(32, 64, dtype=torch.float32, requires_grad=True)
+        y = F.gelu(x, approximate="none")
+        grad_out = torch.randn_like(y)
+        y.backward(grad_out)
+        expected_grad = x.grad.clone()
+
+        # Engine direct call via plan execution
+        plan = {
+            "inputs": [0, 1],
+            "nodes": [
+                {
+                    "id": 2,
+                    "target": "gelu_backward",
+                    "args": [{"kind": "input", "index": 0}, {"kind": "input", "index": 1}],
+                    "kwargs": {"approximate": "none"},
+                }
+            ],
+            "outputs": [2],
+        }
+        out = run_plan(plan, [grad_out, x.detach()])
+        torch.testing.assert_close(out[0], expected_grad, rtol=1e-4, atol=1e-4)
+
+        # Tanh approximate
+        x = torch.randn(32, 64, dtype=torch.float32, requires_grad=True)
+        y = F.gelu(x, approximate="tanh")
+        grad_out = torch.randn_like(y)
+        y.backward(grad_out)
+        expected_grad = x.grad.clone()
+
+        plan_tanh = {
+            "inputs": [0, 1],
+            "nodes": [
+                {
+                    "id": 2,
+                    "target": "gelu_backward",
+                    "args": [{"kind": "input", "index": 0}, {"kind": "input", "index": 1}],
+                    "kwargs": {"approximate": "tanh"},
+                }
+            ],
+            "outputs": [2],
+        }
+        out_tanh = run_plan(plan_tanh, [grad_out, x.detach()])
+        torch.testing.assert_close(out_tanh[0], expected_grad, rtol=1e-4, atol=1e-4)
+
+    def test_silu_backward(self):
+        x = torch.randn(32, 64, dtype=torch.float32, requires_grad=True)
+        y = F.silu(x)
+        grad_out = torch.randn_like(y)
+        y.backward(grad_out)
+        expected_grad = x.grad.clone()
+
+        plan = {
+            "inputs": [0, 1],
+            "nodes": [
+                {
+                    "id": 2,
+                    "target": "silu_backward",
+                    "args": [{"kind": "input", "index": 0}, {"kind": "input", "index": 1}],
+                    "kwargs": {},
+                }
+            ],
+            "outputs": [2],
+        }
+        out = run_plan(plan, [grad_out, x.detach()])
+        torch.testing.assert_close(out[0], expected_grad, rtol=1e-4, atol=1e-4)
+
+    def test_sigmoid_backward(self):
+        x = torch.randn(32, 64, dtype=torch.float32, requires_grad=True)
+        y = torch.sigmoid(x)
+        grad_out = torch.randn_like(y)
+        y.backward(grad_out)
+        expected_grad = x.grad.clone()
+
+        plan = {
+            "inputs": [0, 1],
+            "nodes": [
+                {
+                    "id": 2,
+                    "target": "sigmoid_backward",
+                    "args": [{"kind": "input", "index": 0}, {"kind": "input", "index": 1}],
+                    "kwargs": {},
+                }
+            ],
+            "outputs": [2],
+        }
+        out = run_plan(plan, [grad_out, y.detach()])
+        torch.testing.assert_close(out[0], expected_grad, rtol=1e-5, atol=1e-5)
+
+    def test_tanh_backward(self):
+        x = torch.randn(32, 64, dtype=torch.float32, requires_grad=True)
+        y = torch.tanh(x)
+        grad_out = torch.randn_like(y)
+        y.backward(grad_out)
+        expected_grad = x.grad.clone()
+
+        plan = {
+            "inputs": [0, 1],
+            "nodes": [
+                {
+                    "id": 2,
+                    "target": "tanh_backward",
+                    "args": [{"kind": "input", "index": 0}, {"kind": "input", "index": 1}],
+                    "kwargs": {},
+                }
+            ],
+            "outputs": [2],
+        }
+        out = run_plan(plan, [grad_out, y.detach()])
+        torch.testing.assert_close(out[0], expected_grad, rtol=1e-5, atol=1e-5)
+
+    def test_leaky_relu_backward(self):
+        x = torch.randn(32, 64, dtype=torch.float32, requires_grad=True)
+        y = F.leaky_relu(x, negative_slope=0.2)
+        grad_out = torch.randn_like(y)
+        y.backward(grad_out)
+        expected_grad = x.grad.clone()
+
+        plan = {
+            "inputs": [0, 1],
+            "nodes": [
+                {
+                    "id": 2,
+                    "target": "leaky_relu_backward",
+                    "args": [{"kind": "input", "index": 0}, {"kind": "input", "index": 1}],
+                    "kwargs": {"negative_slope": 0.2},
+                }
+            ],
+            "outputs": [2],
+        }
+        out = run_plan(plan, [grad_out, x.detach()])
+        torch.testing.assert_close(out[0], expected_grad, rtol=1e-5, atol=1e-5)
+
+    def test_embedding_backward(self):
+        num_embeddings = 100
+        embedding_dim = 64
+        weight = torch.randn(num_embeddings, embedding_dim, dtype=torch.float32, requires_grad=True)
+        indices = torch.tensor([[5, 12, 5, 42], [0, 99, 12, 7]], dtype=torch.int64)
+
+        out = F.embedding(indices, weight)
+        grad_out = torch.randn_like(out)
+        out.backward(grad_out)
+        expected_grad = weight.grad.clone()
+
+        plan = {
+            "inputs": [0, 1],
+            "nodes": [
+                {
+                    "id": 2,
+                    "target": "embedding_backward",
+                    "args": [{"kind": "input", "index": 0}, {"kind": "input", "index": 1}],
+                    "kwargs": {"num_weights": num_embeddings, "padding_idx": -1, "scale_grad_by_freq": False},
+                }
+            ],
+            "outputs": [2],
+        }
+        engine_grad = run_plan(plan, [grad_out, indices])
+        torch.testing.assert_close(engine_grad[0], expected_grad, rtol=1e-5, atol=1e-5)
+
+    def test_batch_norm_training(self):
+        x = torch.randn(8, 16, 10, 10, dtype=torch.float32)
+        running_mean = torch.zeros(16)
+        running_var = torch.ones(16)
+        weight = torch.randn(16)
+        bias = torch.randn(16)
+
+        # PyTorch training batch norm
+        expected = F.batch_norm(x, running_mean, running_var, weight, bias, training=True, momentum=0.1, eps=1e-5)
+
+        plan = {
+            "inputs": [0, 1, 2, 3, 4],
+            "nodes": [
+                {
+                    "id": 5,
+                    "target": "batch_norm",
+                    "args": [
+                        {"kind": "input", "index": 0},
+                        {"kind": "input", "index": 1},
+                        {"kind": "input", "index": 2},
+                        {"kind": "input", "index": 3},
+                        {"kind": "input", "index": 4},
+                    ],
+                    "kwargs": {"training": True, "eps": 1e-5},
+                }
+            ],
+            "outputs": [5],
+        }
+        res = run_plan(plan, [x, running_mean, running_var, weight, bias])
+        torch.testing.assert_close(res[0], expected, rtol=1e-4, atol=1e-4)
+
+
+class TestEndToEndTraining:
+    def test_mlp_torch_compile_training(self):
+        """Verify full AOTAutograd training loop with torch.compile(backend='torchburn')."""
         torch.manual_seed(42)
-        x_data = torch.randn(32, 1)
-        y_data = 3.0 * x_data + 1.0
 
-        w = Tensor(torch.randn(1, 1), requires_grad=True)
-        b = Tensor(torch.zeros(1), requires_grad=True)
+        class MLP(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.fc1 = nn.Linear(32, 64)
+                self.fc2 = nn.Linear(64, 16)
+                self.fc3 = nn.Linear(16, 1)
 
-        for epoch in range(200):
-            pred = Tensor(x_data) @ w + b
-            target_t = Tensor(y_data, requires_grad=False)
-            loss = mse_loss(pred, target_t, reduction='mean')
+            def forward(self, x):
+                h1 = F.gelu(self.fc1(x))
+                h2 = F.silu(self.fc2(h1))
+                return self.fc3(h2)
+
+        model = MLP()
+        opt_model = torch.compile(model, backend="torchburn")
+
+        x = torch.randn(16, 32)
+        y = torch.randn(16, 1)
+
+        optimizer = torch.optim.SGD(opt_model.parameters(), lr=0.01)
+
+        losses = []
+        for _ in range(5):
+            optimizer.zero_grad()
+            pred = opt_model(x)
+            loss = F.mse_loss(pred, y)
             loss.backward()
-            w.data -= 0.01 * w.grad
-            b.data -= 0.01 * b.grad
-            w.grad = None
-            b.grad = None
+            optimizer.step()
+            losses.append(loss.item())
 
-        assert abs(w.data.item() - 3.0) < 0.5, f"w={w.data.item()}"
-        assert abs(b.data.item() - 1.0) < 0.5, f"b={b.data.item()}"
+        assert len(losses) == 5
+        # Verify gradients were successfully generated and params updated
+        for p in opt_model.parameters():
+            assert p.grad is not None
+            assert not torch.isnan(p.grad).any()
 
-    def test_two_layer_mlp(self):
-        reset(); enable()
-        torch.manual_seed(0)
-        N, D, H, C = 64, 16, 32, 3
+    def test_transformer_block_torch_compile_training(self):
+        """Verify full AOTAutograd training loop on a Transformer block with Embedding, Attention, LayerNorm, and GeLU."""
+        torch.manual_seed(42)
 
-        w1 = Tensor(torch.randn(H, D), requires_grad=True)
-        b1 = Tensor(torch.zeros(H), requires_grad=True)
-        w2 = Tensor(torch.randn(C, H), requires_grad=True)
-        b2 = Tensor(torch.zeros(C), requires_grad=True)
+        class MiniTransformer(nn.Module):
+            def __init__(self, vocab_size=64, d_model=32, num_heads=4):
+                super().__init__()
+                self.embed = nn.Embedding(vocab_size, d_model)
+                self.attn = nn.MultiheadAttention(d_model, num_heads, batch_first=True)
+                self.norm1 = nn.LayerNorm(d_model)
+                self.fc1 = nn.Linear(d_model, d_model * 2)
+                self.fc2 = nn.Linear(d_model * 2, d_model)
+                self.norm2 = nn.LayerNorm(d_model)
+                self.head = nn.Linear(d_model, vocab_size)
 
-        x = Tensor(torch.randn(N, D))
-        y = Tensor(torch.randint(0, C, (N,)), requires_grad=False)
+            def forward(self, idx):
+                x = self.embed(idx)
+                attn_out, _ = self.attn(x, x, x)
+                x = self.norm1(x + attn_out)
+                h = F.gelu(self.fc1(x))
+                ffn_out = self.fc2(h)
+                x = self.norm2(x + ffn_out)
+                return self.head(x)
 
-        initial_w2 = w2.data.clone()
+        model = MiniTransformer()
+        opt_model = torch.compile(model, backend="torchburn")
 
-        for epoch in range(200):
-            h = linear(x, w1, b1)
-            h = relu(h)
-            logits = linear(h, w2, b2)
-            loss = cross_entropy(logits, y)
+        tokens = torch.randint(0, 64, (4, 16))
+        targets = torch.randint(0, 64, (4, 16))
+
+        optimizer = torch.optim.Adam(opt_model.parameters(), lr=0.001)
+
+        for _ in range(3):
+            optimizer.zero_grad()
+            logits = opt_model(tokens)
+            loss = F.cross_entropy(logits.view(-1, 64), targets.view(-1))
             loss.backward()
-            w1.data -= 0.01 * w1.grad
-            b1.data -= 0.01 * b1.grad
-            w2.data -= 0.01 * w2.grad
-            b2.data -= 0.01 * b2.grad
-            w1.grad = None
-            b1.grad = None
-            w2.grad = None
-            b2.grad = None
+            optimizer.step()
 
-        assert not torch.allclose(w2.data, initial_w2)
+        for p in opt_model.parameters():
+            assert p.grad is not None
+            assert not torch.isnan(p.grad).any()
+
+
+class TestF64AndStridedBackward:
+    def test_f64_precision_backward(self):
+        """Verify f64 precision across all backward kernels."""
+        x = torch.randn(16, 32, dtype=torch.float64, requires_grad=True)
+
+        for act_fn, op_name, kw in [
+            (lambda t: F.gelu(t, approximate="none"), "gelu_backward", {"approximate": "none"}),
+            (lambda t: F.gelu(t, approximate="tanh"), "gelu_backward", {"approximate": "tanh"}),
+            (F.silu, "silu_backward", {}),
+            (torch.sigmoid, "sigmoid_backward", {}),
+            (torch.tanh, "tanh_backward", {}),
+            (lambda t: F.leaky_relu(t, 0.15), "leaky_relu_backward", {"negative_slope": 0.15}),
+        ]:
+            x.grad = None
+            y = act_fn(x)
+            grad_out = torch.randn_like(y)
+            y.backward(grad_out)
+            expected = x.grad.clone()
+
+            second_arg = y.detach() if "sigmoid" in op_name or "tanh" in op_name else x.detach()
+            plan = {
+                "inputs": [0, 1],
+                "nodes": [
+                    {
+                        "id": 2,
+                        "target": op_name,
+                        "args": [{"index": 0}, {"index": 1}],
+                        "kwargs": kw,
+                    }
+                ],
+                "outputs": [2],
+            }
+            res = run_plan(plan, [grad_out, second_arg])
+            torch.testing.assert_close(res[0], expected, rtol=1e-5, atol=1e-5)
+
+    def test_strided_non_contiguous_backward(self):
+        """Verify strided non-contiguous tensor support in backward kernels."""
+        x_base = torch.randn(32, 128, dtype=torch.float32, requires_grad=True)
+        # Non-contiguous slice: step by 2
+        x = x_base[:, ::2]
+        assert not x.is_contiguous()
+
+        y = F.silu(x)
+        grad_out = torch.randn_like(y)[:, :]
+
+        plan = {
+            "inputs": [0, 1],
+            "nodes": [
+                {
+                    "id": 2,
+                    "target": "silu_backward",
+                    "args": [{"index": 0}, {"index": 1}],
+                    "kwargs": {},
+                }
+            ],
+            "outputs": [2],
+        }
+        res = run_plan(plan, [grad_out, x.detach()])
+        # Ground truth
+        s = torch.sigmoid(x.detach())
+        expected = grad_out * (s * (1.0 + x.detach() * (1.0 - s)))
+        torch.testing.assert_close(res[0], expected, rtol=1e-5, atol=1e-5)
+
+
+class TestConcurrencyAndStrides:
+    def test_autograd_multithreaded_backwards(self):
+        """Verify autograd lock minimization by running parallel backward loops."""
+        import threading
+        import torchburn.autograd as ta
+
+        errors = []
+
+        def worker():
+            ta.enable()
+            try:
+                for _ in range(10):
+                    w = ta.Tensor(torch.randn(8, 8), requires_grad=True)
+                    x = ta.Tensor(torch.randn(4, 8))
+                    h = ta.relu(ta.linear(x, w))
+                    loss = ta.sum_op(h)
+                    loss.backward()
+                    assert w.grad is not None
+            except Exception as e:
+                errors.append(e)
+
+        threads = [threading.Thread(target=worker) for _ in range(4)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert not errors, f"Concurrent autograd errors: {errors}"

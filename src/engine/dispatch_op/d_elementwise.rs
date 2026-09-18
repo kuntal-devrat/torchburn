@@ -134,6 +134,10 @@ pub(crate) fn try_dispatch(
             let a = slot_view(slots, capsules, arg_index(node, 0)?)?;
             slots.push(Slot::Owned(math_ops::cos(&a)?));
         }
+        "tan" => {
+            let a = slot_view(slots, capsules, arg_index(node, 0)?)?;
+            slots.push(Slot::Owned(math_ops::tan(&a)?));
+        }
         "round" => {
             let a = slot_view(slots, capsules, arg_index(node, 0)?)?;
             slots.push(Slot::Owned(math_ops::round(&a)?));
@@ -204,6 +208,47 @@ pub(crate) fn try_dispatch(
             let threshold = kw_f64(node, "threshold", 0.0);
             slots.push(Slot::Owned(activations::threshold_backward(
                 &grad, &x, threshold,
+            )?));
+        }
+        "gelu_backward" => {
+            let grad = slot_view(slots, capsules, arg_index(node, 0)?)?;
+            let x = slot_view(slots, capsules, arg_index(node, 1)?)?;
+            let approx = if node.kwargs.contains_key("approximate") {
+                kw_str(node, "approximate", "none")
+            } else if let Some(arg) = node.args.get(2) {
+                arg.value.as_ref().and_then(|v| v.as_str()).unwrap_or("none")
+            } else {
+                "none"
+            };
+            slots.push(Slot::Owned(activations::gelu_backward(&grad, &x, approx)?));
+        }
+        "silu_backward" => {
+            let grad = slot_view(slots, capsules, arg_index(node, 0)?)?;
+            let x = slot_view(slots, capsules, arg_index(node, 1)?)?;
+            slots.push(Slot::Owned(activations::silu_backward(&grad, &x)?));
+        }
+        "sigmoid_backward" => {
+            let grad = slot_view(slots, capsules, arg_index(node, 0)?)?;
+            let out = slot_view(slots, capsules, arg_index(node, 1)?)?;
+            slots.push(Slot::Owned(activations::sigmoid_backward(&grad, &out)?));
+        }
+        "tanh_backward" => {
+            let grad = slot_view(slots, capsules, arg_index(node, 0)?)?;
+            let out = slot_view(slots, capsules, arg_index(node, 1)?)?;
+            slots.push(Slot::Owned(activations::tanh_backward(&grad, &out)?));
+        }
+        "leaky_relu_backward" => {
+            let grad = slot_view(slots, capsules, arg_index(node, 0)?)?;
+            let x = slot_view(slots, capsules, arg_index(node, 1)?)?;
+            let negative_slope = if node.kwargs.contains_key("negative_slope") {
+                kw_f64(node, "negative_slope", 0.01)
+            } else if let Some(arg) = node.args.get(2) {
+                arg.value.as_ref().and_then(|v| v.as_f64()).unwrap_or(0.01)
+            } else {
+                0.01
+            };
+            slots.push(Slot::Owned(activations::leaky_relu_backward(
+                &grad, &x, negative_slope,
             )?));
         }
         _ => return Ok(false),

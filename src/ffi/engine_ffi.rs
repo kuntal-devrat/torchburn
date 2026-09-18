@@ -124,10 +124,7 @@ pub fn dropout_forward(
         let n = dlpack::elem_count(&shape);
         let mut out = dlpack::OwnedTensor::new(dtype, shape);
         let scale = 1.0 / (1.0 - p);
-        let seed = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.subsec_nanos() as u64 ^ (n as u64).wrapping_mul(0x9E3779B97F4A7C15))
-            .unwrap_or(0x1234_5678_9ABC_DEF0);
+        let seed: u64 = rand::Rng::gen(&mut rand::thread_rng());
         match dtype {
             DType::F32 => {
                 let src =
@@ -181,6 +178,7 @@ pub fn memory_pool_stats(py: Python<'_>) -> PyResult<PyObject> {
     dict.set_item("recycle_count", stats.recycle_count)?;
     dict.set_item("cached_buffers", stats.cached_buffers)?;
     dict.set_item("cached_words", stats.cached_words)?;
+    dict.set_item("peak_cached_words", stats.peak_cached_words)?;
     let hit_rate = if stats.alloc_count > 0 {
         stats.hit_count as f64 / stats.alloc_count as f64
     } else {

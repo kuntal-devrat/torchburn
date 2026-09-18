@@ -296,7 +296,7 @@ class UniversalMLP(nn.Module):
             and hasattr(self.gate_proj, "qweight")
             and hasattr(self.up_proj, "qweight")
             and hasattr(self.down_proj, "qweight")
-            and getattr(self.gate_proj, "backend", "cpu") != "igpu"
+            and getattr(self.gate_proj, "backend", "cpu") not in ("igpu", "gpu", "dgpu", "wgpu", "burn-wgpu")
         ):
             import torchburn
             return torchburn.fused_swiglu_mlp(x, self.gate_proj, self.up_proj, self.down_proj)

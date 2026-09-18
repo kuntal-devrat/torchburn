@@ -734,3 +734,46 @@ def visualize(
 
     return viz
 
+
+def export_telemetry() -> dict[str, Any]:
+    """Export complete runtime telemetry metrics for production observability.
+
+    Returns a dict with:
+        - memory_pool: allocation counts, hits, recycles, cached buffers/words
+        - cache: structural graph cache hits, misses, sizes, hit_ratio
+        - engine: profiling invocation counts, wall time, fallbacks, native_ratio
+        - hardware: active engine, GPU info, Rayon threads
+    """
+    from ._cache import cache_stats
+    p_stats = profiling_stats()
+    m_stats = memory_pool_stats()
+    c_stats = cache_stats()
+    total_cache = c_stats.get("hits", 0) + c_stats.get("misses", 0)
+    hit_ratio = c_stats["hits"] / total_cache if total_cache > 0 else 0.0
+
+    gpu_details = {}
+    try:
+        gpu_details = _native.gpu_info()
+    except Exception:
+        pass
+
+    return {
+        "memory_pool": m_stats,
+        "cache": {
+            **c_stats,
+            "hit_ratio": hit_ratio,
+        },
+        "engine": {
+            "total_calls": p_stats.get("calls", 0),
+            "total_ms": p_stats.get("total_ms", 0.0),
+            "avg_ms_per_call": p_stats.get("avg_ms_per_call", 0.0),
+            "native_ratio": p_stats.get("native_ratio", 0.0),
+            "fallbacks": p_stats.get("fallbacks", 0),
+        },
+        "hardware": {
+            "active_engine": active_engine(),
+            "gpu": gpu_details,
+            "rayon_threads": _native.rayon_threads(),
+        },
+    }
+

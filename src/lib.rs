@@ -145,6 +145,8 @@ fn _torchburn(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(ffi::gpu_ffi::gpu_info, m)?)?;
     m.add_function(wrap_pyfunction!(ffi::gpu_ffi::gpu_backend, m)?)?;
     m.add_function(wrap_pyfunction!(ffi::gpu_ffi::gpu_available, m)?)?;
+    m.add_function(wrap_pyfunction!(ffi::gpu_ffi::wgpu_clear_weight_cache, m)?)?;
+    m.add_function(wrap_pyfunction!(ffi::gpu_ffi::wgpu_clear_buffer_pool, m)?)?;
 
     // Debug FFI
     m.add_function(wrap_pyfunction!(ffi::debug_ffi::cpu_features_report, m)?)?;

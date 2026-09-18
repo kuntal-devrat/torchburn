@@ -619,11 +619,14 @@ impl WgpuPipelines {
         });
 
         // 7. Fused Residual Add + RMSNorm pipeline & layout
+        let fused_add_rmsnorm_src = if has_subgroups {
+            include_str!("../shaders/fused_add_rmsnorm.wgsl")
+        } else {
+            include_str!("../shaders/fused_add_rmsnorm_compat.wgsl")
+        };
         let fused_add_rmsnorm_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("fused_add_rmsnorm.wgsl"),
-            source: wgpu::ShaderSource::Wgsl(
-                include_str!("../shaders/fused_add_rmsnorm.wgsl").into(),
-            ),
+            source: wgpu::ShaderSource::Wgsl(fused_add_rmsnorm_src.into()),
         });
         let fused_add_rmsnorm_bgl =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {

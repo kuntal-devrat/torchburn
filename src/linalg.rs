@@ -173,6 +173,7 @@ fn gemm_f32_into(a: &[f32], b: &[f32], out: &mut [f32], m: usize, k: usize, n: u
                     })
                     .collect();
                 // Reduce partials (serial; n is small in this branch).
+                out[..n].fill(0.0);
                 for partial in &partials {
                     let chunks = n / 8;
                     let o_ptr = out.as_mut_ptr();
@@ -1117,6 +1118,9 @@ pub fn addmm(
         )));
     }
     let mut out = OwnedTensor::new(mat1.dtype, vec![mat1.shape[0], mat2.shape[1]]);
+    if m == 0 || n == 0 {
+        return Ok(out);
+    }
     let k = mat1.shape[1] as usize;
     match mat1.dtype {
         DType::F32 => {
@@ -1246,6 +1250,9 @@ pub fn linear(
         .iter()
         .map(|&d| d.max(0) as usize)
         .product();
+    if n_batch == 0 || o == 0 || i == 0 {
+        return Ok(out);
+    }
     let input_contig = input.is_contiguous();
 
     // linear(x, w, b) == x @ w^T + b.

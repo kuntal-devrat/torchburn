@@ -147,8 +147,8 @@ class GenerationConfig:
 class EngineConfig:
     """Settings controlling backend execution and device dispatch."""
 
-    # "auto" (cuda>metal>igpu>cpu), "cpu", "igpu", "dgpu", "gpu",
-    # "cuda" (needs torchburn-cuda), "metal" (macOS only).
+    # "auto" (metal>wgpu/igpu/dgpu>cpu), "cpu", "igpu", "dgpu", "gpu",
+    # "vulkan", "dx12", "metal" (macOS only).
     device: str = "auto"
     quantization: str = "int4"  # "int4", "int8", "none"
     num_threads: Optional[int] = None

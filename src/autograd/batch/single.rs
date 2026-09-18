@@ -4,6 +4,35 @@
 use super::super::*;
 use rayon::prelude::*;
 
+#[inline]
+pub(crate) fn broadcast_index(mut flat_idx: usize, out_shape: &[i64], leaf_shape: &[i64]) -> usize {
+    if out_shape == leaf_shape {
+        return flat_idx;
+    }
+    let leaf_count: usize = leaf_shape.iter().map(|&d| d.max(0) as usize).product();
+    if leaf_count <= 1 {
+        return 0;
+    }
+    let out_rank = out_shape.len();
+    let leaf_rank = leaf_shape.len();
+    let mut leaf_idx = 0;
+    let mut leaf_stride = 1;
+    for d in (0..out_rank).rev() {
+        let dim_size = out_shape[d].max(1) as usize;
+        let coord = flat_idx % dim_size;
+        flat_idx /= dim_size;
+        if d + leaf_rank >= out_rank {
+            let ld = d + leaf_rank - out_rank;
+            let ldim = leaf_shape[ld].max(1) as usize;
+            if ldim > 1 {
+                leaf_idx += coord * leaf_stride;
+            }
+            leaf_stride *= ldim;
+        }
+    }
+    leaf_idx
+}
+
 /// Convenience: execute backward for a single op given saved inputs.
 /// This is used by the compiled callable's backward method.
 pub fn backward_single(
@@ -78,11 +107,11 @@ pub fn backward_single(
                     let gb = unsafe {
                         std::slice::from_raw_parts_mut(grad_b.data.as_mut_ptr() as *mut f32, n)
                     };
-                    let an = elem_count(&a.shape);
-                    let bn = elem_count(&b.shape);
                     for i in 0..n {
-                        ga[i] = g[i] * bd[if bn == 1 { 0 } else { i % bn }];
-                        gb[i] = g[i] * ad[if an == 1 { 0 } else { i % an }];
+                        let bi = broadcast_index(i, &upstream.shape, &b.shape);
+                        let ai = broadcast_index(i, &upstream.shape, &a.shape);
+                        ga[i] = g[i] * bd[bi];
+                        gb[i] = g[i] * ad[ai];
                     }
                 }
                 DType::F64 => {
@@ -107,11 +136,11 @@ pub fn backward_single(
                     let gb = unsafe {
                         std::slice::from_raw_parts_mut(grad_b.data.as_mut_ptr() as *mut f64, n)
                     };
-                    let an = elem_count(&a.shape);
-                    let bn = elem_count(&b.shape);
                     for i in 0..n {
-                        ga[i] = g[i] * bd[if bn == 1 { 0 } else { i % bn }];
-                        gb[i] = g[i] * ad[if an == 1 { 0 } else { i % an }];
+                        let bi = broadcast_index(i, &upstream.shape, &b.shape);
+                        let ai = broadcast_index(i, &upstream.shape, &a.shape);
+                        ga[i] = g[i] * bd[bi];
+                        gb[i] = g[i] * ad[ai];
                     }
                 }
                 _ => {}
@@ -137,9 +166,8 @@ pub fn backward_single(
                     let o = unsafe {
                         std::slice::from_raw_parts_mut(grad.data.as_mut_ptr() as *mut f32, n)
                     };
-                    let xn = elem_count(&x.shape);
                     for i in 0..n {
-                        let xi = if xn == 1 { 0 } else { i % xn };
+                        let xi = broadcast_index(i, &upstream.shape, &x.shape);
                         o[i] = if xd[xi] > 0.0 { g[i] } else { 0.0 };
                     }
                 }
@@ -156,9 +184,8 @@ pub fn backward_single(
                     let o = unsafe {
                         std::slice::from_raw_parts_mut(grad.data.as_mut_ptr() as *mut f64, n)
                     };
-                    let xn = elem_count(&x.shape);
                     for i in 0..n {
-                        let xi = if xn == 1 { 0 } else { i % xn };
+                        let xi = broadcast_index(i, &upstream.shape, &x.shape);
                         o[i] = if xd[xi] > 0.0 { g[i] } else { 0.0 };
                     }
                 }
@@ -623,11 +650,9 @@ pub fn backward_single(
                     let gb = unsafe {
                         std::slice::from_raw_parts_mut(grad_b.data.as_mut_ptr() as *mut f32, n)
                     };
-                    let an = elem_count(&a.shape);
-                    let bn = elem_count(&b.shape);
                     for i in 0..n {
-                        let ai = if an == 1 { 0 } else { i % an };
-                        let bi = if bn == 1 { 0 } else { i % bn };
+                        let ai = broadcast_index(i, &upstream.shape, &a.shape);
+                        let bi = broadcast_index(i, &upstream.shape, &b.shape);
                         ga[i] = g[i] / bd[bi];
                         gb[i] = -g[i] * ad[ai] / (bd[bi] * bd[bi]);
                     }
@@ -654,11 +679,9 @@ pub fn backward_single(
                     let gb = unsafe {
                         std::slice::from_raw_parts_mut(grad_b.data.as_mut_ptr() as *mut f64, n)
                     };
-                    let an = elem_count(&a.shape);
-                    let bn = elem_count(&b.shape);
                     for i in 0..n {
-                        let ai = if an == 1 { 0 } else { i % an };
-                        let bi = if bn == 1 { 0 } else { i % bn };
+                        let ai = broadcast_index(i, &upstream.shape, &a.shape);
+                        let bi = broadcast_index(i, &upstream.shape, &b.shape);
                         ga[i] = g[i] / bd[bi];
                         gb[i] = -g[i] * ad[ai] / (bd[bi] * bd[bi]);
                     }
@@ -910,6 +933,58 @@ pub fn backward_single(
                         let sech2 = 1.0 - tanh_inner * tanh_inner;
                         let d_inner = c * (1.0 + 3.0 * b * v * v);
                         o[i] = g[i] * (0.5 * (1.0 + tanh_inner) + 0.5 * v * sech2 * d_inner);
+                    }
+                }
+                _ => {}
+            }
+            vec![grad]
+        }
+        "silu" => {
+            assert!(!saved_inputs.is_empty());
+            let x = saved_inputs[0];
+            let n = elem_count(&upstream.shape);
+            let mut grad = OwnedTensor::new(upstream.dtype, upstream.shape.clone());
+            match upstream.dtype {
+                DType::F32 => {
+                    let g = unsafe {
+                        std::slice::from_raw_parts(upstream.data.as_ptr() as *const f32, n)
+                    };
+                    let xd = unsafe {
+                        std::slice::from_raw_parts(
+                            x.data.as_ptr() as *const f32,
+                            elem_count(&x.shape),
+                        )
+                    };
+                    let o = unsafe {
+                        std::slice::from_raw_parts_mut(grad.data.as_mut_ptr() as *mut f32, n)
+                    };
+                    let xn = elem_count(&x.shape);
+                    for i in 0..n {
+                        let xi = if xn == 1 { 0 } else { i % xn };
+                        let v = xd[xi];
+                        let s = 1.0f32 / (1.0f32 + (-v).exp());
+                        o[i] = g[i] * (s * (1.0f32 + v * (1.0f32 - s)));
+                    }
+                }
+                DType::F64 => {
+                    let g = unsafe {
+                        std::slice::from_raw_parts(upstream.data.as_ptr() as *const f64, n)
+                    };
+                    let xd = unsafe {
+                        std::slice::from_raw_parts(
+                            x.data.as_ptr() as *const f64,
+                            elem_count(&x.shape),
+                        )
+                    };
+                    let o = unsafe {
+                        std::slice::from_raw_parts_mut(grad.data.as_mut_ptr() as *mut f64, n)
+                    };
+                    let xn = elem_count(&x.shape);
+                    for i in 0..n {
+                        let xi = if xn == 1 { 0 } else { i % xn };
+                        let v = xd[xi];
+                        let s = 1.0f64 / (1.0f64 + (-v).exp());
+                        o[i] = g[i] * (s * (1.0f64 + v * (1.0f64 - s)));
                     }
                 }
                 _ => {}
@@ -1481,6 +1556,157 @@ pub fn backward_single(
                 _ => {}
             }
             vec![grad]
+        }
+        "dropout" => {
+            assert!(!saved_inputs.is_empty());
+            let mask = saved_inputs[0];
+            let n = elem_count(&upstream.shape);
+            let mut grad = OwnedTensor::new(upstream.dtype, upstream.shape.clone());
+            match upstream.dtype {
+                DType::F32 => {
+                    let g = unsafe {
+                        std::slice::from_raw_parts(upstream.data.as_ptr() as *const f32, n)
+                    };
+                    let m = unsafe {
+                        std::slice::from_raw_parts(mask.data.as_ptr() as *const f32, elem_count(&mask.shape))
+                    };
+                    let o = unsafe {
+                        std::slice::from_raw_parts_mut(grad.data.as_mut_ptr() as *mut f32, n)
+                    };
+                    let mn = elem_count(&mask.shape);
+                    for i in 0..n {
+                        let mi = if mn == 1 { 0 } else { i % mn };
+                        o[i] = g[i] * m[mi];
+                    }
+                }
+                DType::F64 => {
+                    let g = unsafe {
+                        std::slice::from_raw_parts(upstream.data.as_ptr() as *const f64, n)
+                    };
+                    let m = unsafe {
+                        std::slice::from_raw_parts(mask.data.as_ptr() as *const f64, elem_count(&mask.shape))
+                    };
+                    let o = unsafe {
+                        std::slice::from_raw_parts_mut(grad.data.as_mut_ptr() as *mut f64, n)
+                    };
+                    let mn = elem_count(&mask.shape);
+                    for i in 0..n {
+                        let mi = if mn == 1 { 0 } else { i % mn };
+                        o[i] = g[i] * m[mi];
+                    }
+                }
+                _ => {}
+            }
+            vec![grad]
+        }
+        "embedding" => {
+            assert!(saved_inputs.len() >= 2);
+            let indices = saved_inputs[0];
+            let weight = saved_inputs[1];
+            let grad_indices = OwnedTensor::new(indices.dtype, indices.shape.clone());
+            let mut grad_weight = OwnedTensor::new(weight.dtype, weight.shape.clone());
+            let n_indices = elem_count(&indices.shape);
+            let num_embeddings = if !weight.shape.is_empty() {
+                weight.shape[0] as usize
+            } else {
+                1
+            };
+            let embedding_dim = *weight.shape.last().unwrap_or(&1) as usize;
+
+            match weight.dtype {
+                DType::F32 => {
+                    let g = unsafe {
+                        std::slice::from_raw_parts(
+                            upstream.data.as_ptr() as *const f32,
+                            n_indices * embedding_dim,
+                        )
+                    };
+                    let gw = unsafe {
+                        std::slice::from_raw_parts_mut(
+                            grad_weight.data.as_mut_ptr() as *mut f32,
+                            num_embeddings * embedding_dim,
+                        )
+                    };
+                    gw.fill(0.0);
+                    let idx_slice: Vec<usize> = match indices.dtype {
+                        DType::I64 => {
+                            let s = unsafe {
+                                std::slice::from_raw_parts(
+                                    indices.data.as_ptr() as *const i64,
+                                    n_indices,
+                                )
+                            };
+                            s.iter().map(|&x| x.max(0) as usize).collect()
+                        }
+                        DType::I32 => {
+                            let s = unsafe {
+                                std::slice::from_raw_parts(
+                                    indices.data.as_ptr() as *const i32,
+                                    n_indices,
+                                )
+                            };
+                            s.iter().map(|&x| x.max(0) as usize).collect()
+                        }
+                        _ => vec![0; n_indices],
+                    };
+                    for (i, &idx) in idx_slice.iter().enumerate() {
+                        if idx < num_embeddings {
+                            let src = &g[i * embedding_dim..(i + 1) * embedding_dim];
+                            let dst = &mut gw[idx * embedding_dim..(idx + 1) * embedding_dim];
+                            for d in 0..embedding_dim {
+                                dst[d] += src[d];
+                            }
+                        }
+                    }
+                }
+                DType::F64 => {
+                    let g = unsafe {
+                        std::slice::from_raw_parts(
+                            upstream.data.as_ptr() as *const f64,
+                            n_indices * embedding_dim,
+                        )
+                    };
+                    let gw = unsafe {
+                        std::slice::from_raw_parts_mut(
+                            grad_weight.data.as_mut_ptr() as *mut f64,
+                            num_embeddings * embedding_dim,
+                        )
+                    };
+                    gw.fill(0.0);
+                    let idx_slice: Vec<usize> = match indices.dtype {
+                        DType::I64 => {
+                            let s = unsafe {
+                                std::slice::from_raw_parts(
+                                    indices.data.as_ptr() as *const i64,
+                                    n_indices,
+                                )
+                            };
+                            s.iter().map(|&x| x.max(0) as usize).collect()
+                        }
+                        DType::I32 => {
+                            let s = unsafe {
+                                std::slice::from_raw_parts(
+                                    indices.data.as_ptr() as *const i32,
+                                    n_indices,
+                                )
+                            };
+                            s.iter().map(|&x| x.max(0) as usize).collect()
+                        }
+                        _ => vec![0; n_indices],
+                    };
+                    for (i, &idx) in idx_slice.iter().enumerate() {
+                        if idx < num_embeddings {
+                            let src = &g[i * embedding_dim..(i + 1) * embedding_dim];
+                            let dst = &mut gw[idx * embedding_dim..(idx + 1) * embedding_dim];
+                            for d in 0..embedding_dim {
+                                dst[d] += src[d];
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+            vec![grad_indices, grad_weight]
         }
         _ => {
             // Unsupported backward: return zero gradients

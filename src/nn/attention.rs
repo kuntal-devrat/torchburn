@@ -323,6 +323,54 @@ pub fn scaled_dot_product_attention(
     if q.dtype != DType::F32 && q.dtype != DType::F64 {
         return Err(unsupported("attention requires f32/f64 tensors"));
     }
+    // Support 3D [B, T, D] tensors by promoting to 4D [B, 1, T, D]
+    if q.shape.len() == 3 && k.shape.len() == 3 && v.shape.len() == 3 {
+        let q4 = BorrowedTensor {
+            data: q.data,
+            shape: vec![q.shape[0], 1, q.shape[1], q.shape[2]],
+            strides: vec![q.strides[0], q.strides[0], q.strides[1], q.strides[2]],
+            dtype: q.dtype,
+        };
+        let k4 = BorrowedTensor {
+            data: k.data,
+            shape: vec![k.shape[0], 1, k.shape[1], k.shape[2]],
+            strides: vec![k.strides[0], k.strides[0], k.strides[1], k.strides[2]],
+            dtype: k.dtype,
+        };
+        let v4 = BorrowedTensor {
+            data: v.data,
+            shape: vec![v.shape[0], 1, v.shape[1], v.shape[2]],
+            strides: vec![v.strides[0], v.strides[0], v.strides[1], v.strides[2]],
+            dtype: v.dtype,
+        };
+        let m4_owned;
+        let m4_ref = if let Some(m) = mask {
+            if m.shape.len() == 3 {
+                m4_owned = Some(BorrowedTensor {
+                    data: m.data,
+                    shape: vec![m.shape[0], 1, m.shape[1], m.shape[2]],
+                    strides: vec![m.strides[0], m.strides[0], m.strides[1], m.strides[2]],
+                    dtype: m.dtype,
+                });
+                m4_owned.as_ref()
+            } else if m.shape.len() == 2 {
+                m4_owned = Some(BorrowedTensor {
+                    data: m.data,
+                    shape: vec![1, 1, m.shape[0], m.shape[1]],
+                    strides: vec![m.strides[0], m.strides[0], m.strides[0], m.strides[1]],
+                    dtype: m.dtype,
+                });
+                m4_owned.as_ref()
+            } else {
+                Some(m)
+            }
+        } else {
+            None
+        };
+        let mut out = scaled_dot_product_attention(&q4, &k4, &v4, m4_ref, is_causal)?;
+        out.shape = vec![q.shape[0], q.shape[1], q.shape[2]];
+        return Ok(out);
+    }
     if q.shape.len() != 4 || k.shape.len() != 4 || v.shape.len() != 4 {
         return Err(unsupported("attention requires 4D [B, H, T, D] tensors"));
     }

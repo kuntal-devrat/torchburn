@@ -6,6 +6,7 @@ import sys
 import time
 from typing import Optional, List, Dict, Any, Generator, Tuple, Union
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 
 import torchburn
@@ -33,6 +34,8 @@ class UniversalEngine:
         # 1. Device and Threading Setup
         threads = self.config.num_threads or max(1, os.cpu_count() or 4)
         torch.set_num_threads(threads)
+        if self.config.num_threads is not None:
+            os.environ["RAYON_NUM_THREADS"] = str(self.config.num_threads)
 
         # 2. Hardware and Quantization Dispatch
         self._setup_acceleration()
@@ -45,43 +48,29 @@ class UniversalEngine:
             target_device = env_override
 
         if target_device == "auto":
-            # Auto-detect: CUDA (torchburn-cuda only) > Metal (mac) > iGPU > CPU.
+            # Auto-detect: Metal (macOS) > WGPU (Vulkan/DX12) > CPU
             try:
-                from . import _torchburn as _native_check
-                if hasattr(_native_check, "CudaQwenDecoder"):
-                    import cudarc  # noqa: F401 — presence check
-                    target_device = "cuda"
-                elif sys.platform == "darwin" and hasattr(_native_check, "MetalBackend"):
+                from .. import _torchburn as _native_check
+                if sys.platform == "darwin" and hasattr(_native_check, "MetalBackend"):
                     target_device = "metal"
                 else:
                     gpu_info = torchburn._torchburn.gpu_info()
-                    target_device = "igpu" if gpu_info.get("available", False) else "cpu"
+                    target_device = "gpu" if gpu_info.get("available", False) else "cpu"
             except Exception:
                 try:
                     gpu_info = torchburn._torchburn.gpu_info()
-                    target_device = "igpu" if gpu_info.get("available", False) else "cpu"
+                    target_device = "gpu" if gpu_info.get("available", False) else "cpu"
                 except Exception:
                     target_device = "cpu"
-
-        # Explicit, supported selection only — no silent fallbacks on a
-        # user-requested backend that isn't compiled in.
-        if target_device == "cuda":
-            from . import _torchburn as _native_check
-            if not hasattr(_native_check, "CudaQwenDecoder"):
-                raise RuntimeError(
-                    "TORCHBURN_DEVICE=cuda requires the `torchburn-cuda` wheel "
-                    "(`pip install torchburn-cuda`). The installed `torchburn` "
-                    "build is CPU/iGPU only."
-                )
         elif target_device == "metal":
-            from . import _torchburn as _native_check
+            from .. import _torchburn as _native_check
             if sys.platform != "darwin" or not hasattr(_native_check, "MetalBackend"):
                 raise RuntimeError(
                     "TORCHBURN_DEVICE=metal requires macOS/iOS and the `torchburn` "
                     "wheel compiled with the `metal-native` feature."
                 )
 
-        if target_device in ("igpu", "dgpu", "gpu", "metal"):
+        if target_device in ("igpu", "dgpu", "gpu", "wgpu", "vulkan", "dx12", "metal"):
             os.environ["TORCHBURN_DEVICE"] = target_device
 
         quant = self.config.quantization.lower()
@@ -93,7 +82,7 @@ class UniversalEngine:
         )
         if quant in ("int4", "int8"):
             bits = 4 if quant == "int4" else 8
-            backend = "igpu" if target_device in ("igpu", "gpu", "dgpu", "vulkan") else "cpu"
+            backend = "igpu" if target_device in ("igpu", "gpu", "wgpu", "dgpu", "vulkan", "dx12", "metal") else "cpu"
 
             # Check if model is already quantized (e.g. from streaming loader or disk cache)
             first_layer = self.raw_model.layers[0] if hasattr(self.raw_model, "layers") and len(self.raw_model.layers) > 0 else None
@@ -115,15 +104,7 @@ class UniversalEngine:
                 torchburn.quantize_model(self.raw_model, bits=bits, exclude_modules=[], backend=backend)
 
 
-            if bits == 4 and native_decoder_supported and target_device in ("cuda",):
-                # Priority 1: NVIDIA CUDA dGPU
-                try:
-                    print("[\033[93mCUDA dGPU\033[0m] Initializing CUDA INT4 Decoder...")
-                    self._rust_decoder = torchburn.create_cuda_qwen_decoder(self.raw_model)
-                    print("[\033[93mCUDA dGPU\033[0m] CUDA decoder active.")
-                except Exception as cuda_err:
-                    print(f"[\033[93mWarning\033[0m] CUDA decoder init failed ({cuda_err}); trying iGPU/CPU.")
-                    target_device = "igpu"
+
 
             if self._rust_decoder is None and bits == 4 and native_decoder_supported and backend == "cpu":
                 try:
@@ -256,6 +237,7 @@ class UniversalEngine:
         config: Optional[GenerationConfig] = None,
         kv_caches: Optional[Any] = None,
         cached_token_ids: Optional[List[int]] = None,
+        stream: bool = True,
     ) -> Generator[Dict[str, Any], None, None]:
         """Streams generated tokens with performance metadata and multi-turn KV-cache consistency."""
         cfg = config or GenerationConfig()
@@ -334,19 +316,23 @@ class UniversalEngine:
             else:
                 logits, kv_caches, prefill_time = self.prefill(input_tensor)
 
-        # Native path: obtain sampler logits via cheap single-token Python
-        # forward (does not disturb native KV which already holds the prompt).
+        # Native path: obtain sampler logits directly from native decoder
+        # without disturbing native KV or executing redundant Python passes.
         if native_prefilled:
-            try:
-                last_t = torch.tensor([[input_ids_list[-1]]], dtype=torch.long)
-                if kv_caches_native is not None:
-                    logits, kv_caches, _ = self.prefill(last_t, kv_caches=kv_caches_native, offset=max(0, seq_len - 1))
-                else:
-                    logits, kv_caches, _ = self.prefill(last_t)
-            except Exception as exc:
-                raise RuntimeError(
-                    "Native prefill completed but the model could not produce sampling logits"
-                ) from exc
+            if hasattr(decoder, "get_logits"):
+                raw_logits = decoder.get_logits()
+                logits = torch.tensor([raw_logits], dtype=torch.float32)
+            else:
+                try:
+                    last_t = torch.tensor([[input_ids_list[-1]]], dtype=torch.long)
+                    if kv_caches_native is not None:
+                        logits, kv_caches, _ = self.prefill(last_t, kv_caches=kv_caches_native, offset=max(0, seq_len - 1))
+                    else:
+                        logits, kv_caches, _ = self.prefill(last_t)
+                except Exception as exc:
+                    raise RuntimeError(
+                        "Native prefill completed but the model could not produce sampling logits"
+                    ) from exc
 
         prefill_tok_sec = (seq_len - prefix_len) / max(prefill_time, 1e-6)
 
@@ -385,11 +371,10 @@ class UniversalEngine:
 
         decode_times: List[float] = []
 
-        # 4a. Phase 2.3 fast path: run the whole decode loop in Rust — one FFI
-        # crossing per generation instead of one per token. Produces identical
-        # token ids to the per-token path (same sampler, same penalty window).
+        # 4a. Fast path for non-streaming generation: run the whole decode loop in Rust —
+        # one FFI crossing per generation instead of one per token.
         native_decoder = self._rust_decoder or self._wgpu_decoder
-        if native_decoder is not None:
+        if not stream and native_decoder is not None:
             t0 = time.perf_counter()
             eos_id_opt = eos_id if eos_id is not None else None
             try:
@@ -427,6 +412,7 @@ class UniversalEngine:
                     "type": "summary",
                     "tokens_generated": tokens_generated,
                     "total_decode_time_ms": rust_elapsed * 1000,
+                    "decode_latency_sec": rust_elapsed,
                     "avg_ms_per_token": avg_ms,
                     "decode_tok_sec": decode_tok_sec,
                     "is_compiled": self._is_compiled,
@@ -443,6 +429,16 @@ class UniversalEngine:
             piece = self.tokenizer.decode([emitted_token], skip_special_tokens=False)
             tokens_generated += 1
             all_token_ids.append(emitted_token)
+
+            if tokens_generated >= cfg.max_new_tokens:
+                yield {
+                    "type": "token",
+                    "token_id": emitted_token,
+                    "text": piece,
+                    "step_time_ms": (decode_times[-1] * 1000.0) if decode_times else 0.0,
+                    "tokens_generated": tokens_generated,
+                }
+                break
 
             offset = seq_len + tokens_generated - 1
             rec_toks = all_token_ids[-recent_window:]
@@ -490,20 +486,22 @@ class UniversalEngine:
                 "type": "token",
                 "token_id": emitted_token,
                 "text": piece,
-                "step_time_ms": step_time * 1000,
+                "step_time_ms": step_time * 1000.0,
                 "tokens_generated": tokens_generated,
             }
 
         total_decode_time = sum(decode_times)
-        avg_decode_ms = (total_decode_time / tokens_generated * 1000) if tokens_generated > 0 else 0
-        decode_tok_sec = (tokens_generated / total_decode_time) if total_decode_time > 0 else 0
+        num_decode_steps = len(decode_times)
+        avg_decode_ms = (total_decode_time / num_decode_steps * 1000.0) if num_decode_steps > 0 else 0.0
+        decode_tok_sec = (tokens_generated / total_decode_time) if total_decode_time > 0 else 0.0
 
         # 5. Multi-Turn State Synchronization Fix:
         # If running with Rust decoder, update Python KV-cache reference so future turns don't desynchronize
         yield {
             "type": "summary",
             "tokens_generated": tokens_generated,
-            "total_decode_time_ms": total_decode_time * 1000,
+            "total_decode_time_ms": total_decode_time * 1000.0,
+            "decode_latency_sec": total_decode_time,
             "avg_ms_per_token": avg_decode_ms,
             "decode_tok_sec": decode_tok_sec,
             "is_compiled": self._is_compiled,
@@ -520,7 +518,7 @@ class UniversalEngine:
     ) -> str:
         """Non-streaming generation helper."""
         parts = []
-        for packet in self.generate_stream(prompt, config, kv_caches=kv_caches, cached_token_ids=cached_token_ids):
+        for packet in self.generate_stream(prompt, config, kv_caches=kv_caches, cached_token_ids=cached_token_ids, stream=False):
             if packet["type"] == "token":
                 parts.append(packet["text"])
         return "".join(parts)

@@ -493,6 +493,7 @@ _FUNCTION_TO_OP: dict[str, str] = {
     "torch.as_strided": "as_strided",
     "torch.broadcast_to": "broadcast_to",
     "torch.broadcast_tensors": "broadcast_tensors",
+    "torch.chunk": "chunk",
     "torch.split": "split",
     "torch.vsplit": "vsplit",
     "torch.hsplit": "hsplit",
@@ -537,9 +538,22 @@ _ATEN_TO_OP: dict[str, str] = {
     "aten.div.Tensor": "div",
     "aten.relu": "relu",
     "aten.relu.default": "relu",
+    "aten.detach": "contiguous",
     "aten.detach.default": "contiguous",
+    "aten.clone": "contiguous",
     "aten.clone.default": "contiguous",
+    "aten.alias": "contiguous",
+    "aten.alias.default": "contiguous",
+    "aten.lift.default": "contiguous",
+    "aten.lift_fresh.default": "contiguous",
+    "aten.lift_fresh_copy.default": "contiguous",
     "aten.threshold_backward.default": "threshold_backward",
+    "aten.gelu_backward.default": "gelu_backward",
+    "aten.silu_backward.default": "silu_backward",
+    "aten.sigmoid_backward.default": "sigmoid_backward",
+    "aten.tanh_backward.default": "tanh_backward",
+    "aten.leaky_relu_backward.default": "leaky_relu_backward",
+    "aten.embedding_dense_backward.default": "embedding_backward",
     # Phase 2: math/comparison
     "aten.eq.Tensor": "eq",
     "aten.ne.Tensor": "ne",
@@ -574,12 +588,22 @@ _ATEN_TO_OP: dict[str, str] = {
     "aten.scatter.src": "scatter",
     "aten.scatter_add.src": "scatter_add",
     "aten.topk.default": "topk",
+    "aten.topk": "topk",
     "aten.sort.default": "sort",
+    "aten.sort": "sort",
     "aten.argsort.default": "argsort",
+    "aten.argsort": "argsort",
     "aten.repeat_interleave.Tensor": "repeat_interleave",
     "aten.repeat_interleave.self_Tensor": "repeat_interleave",
+    "aten.repeat_interleave.self_int": "repeat_interleave",
+    "aten.repeat_interleave.default": "repeat_interleave",
+    "aten.repeat_interleave": "repeat_interleave",
+    "aten.repeat.default": "repeat",
+    "aten.repeat": "repeat",
     "aten.prelu.default": "prelu",
     "aten.prelu.ndarray": "prelu",
+    "aten._prelu_kernel.default": "prelu",
+    "aten._prelu_kernel": "prelu",
     "aten.nonzero.default": "nonzero",
     "aten.nonzero_numpy.default": "nonzero",
     "aten.einsum.default": "einsum",
@@ -661,7 +685,9 @@ _ATEN_TO_OP: dict[str, str] = {
     "aten.bmm.default": "bmm",
     "aten.dot.default": "dot",
     # Phase 2: norm
+    "aten.layer_norm": "layer_norm",
     "aten.layer_norm.default": "layer_norm",
+    "aten.native_layer_norm": "layer_norm",
     "aten.native_layer_norm.default": "layer_norm",
     "aten.native_batch_norm.default": "batch_norm",
     "aten.batch_norm.default": "batch_norm",
@@ -714,6 +740,8 @@ _ATEN_TO_OP: dict[str, str] = {
     "aten._unsafe_view.default": "reshape",
     "aten.reshape.default": "reshape",
     # contiguous() — layout-only, treated as reshape in the engine
+    "aten.contiguous": "contiguous",
+    "aten.contiguous.default": "contiguous",
     "aten.contiguous.memory_format": "contiguous",
     # Phase 13: shape ops for model coverage
     "aten.squeeze.dim": "squeeze",
@@ -721,6 +749,8 @@ _ATEN_TO_OP: dict[str, str] = {
     "aten.unsqueeze.default": "unsqueeze",
     "aten.unsqueeze.dim": "unsqueeze",
     "aten.unflatten.int": "unflatten",
+    "aten.unbind": "unbind",
+    "aten.unbind.default": "unbind",
     "aten.unbind.int": "unbind",
     "aten.unflatten.default": "unflatten",
     "aten.dropout.default": "dropout",
@@ -846,7 +876,16 @@ _ATEN_TO_OP: dict[str, str] = {
     "aten.as_strided.default": "as_strided",
     "aten.broadcast_to.default": "broadcast_to",
     "aten.broadcast_tensors.default": "broadcast_tensors",
+    "aten.chunk": "chunk",
+    "aten.chunk.default": "chunk",
+    "aten.select_scatter": "select_scatter",
+    "aten.select_scatter.default": "select_scatter",
+    "aten.slice_scatter": "slice_scatter",
+    "aten.slice_scatter.default": "slice_scatter",
+    "aten.split": "split",
+    "aten.split.default": "split",
     "aten.split.Tensor": "split",
+    "aten.split_with_sizes": "split",
     "aten.split_with_sizes.default": "split",
     "aten.vsplit.default": "vsplit",
     "aten.hsplit.default": "hsplit",
@@ -892,6 +931,9 @@ _ATEN_TO_OP: dict[str, str] = {
     # — see the parse_graph normalisation below.
     "aten._native_batch_norm_legit_no_training.default": "batch_norm",
     "aten._native_batch_norm_legit_no_training.training": "batch_norm",
+    "aten._native_batch_norm_legit_functional.default": "batch_norm",
+    "aten._native_batch_norm_legit.default": "batch_norm",
+    "aten._native_batch_norm_legit.no_stats": "batch_norm",
     "aten.div.Scalar": "div",
 }
 
@@ -941,7 +983,9 @@ _METHOD_TO_OP: dict[str, str] = {
     "unbind": "unbind",
     "chunk": "chunk",
     "repeat": "repeat",
+    "repeat_interleave": "repeat_interleave",
     "sort": "sort",
+    "argsort": "argsort",
     "scatter": "scatter",
     "scatter_add": "scatter_add",
     "squeeze": "squeeze",
@@ -976,6 +1020,7 @@ _METHOD_TO_OP: dict[str, str] = {
     "isreal": "isreal",
     "is_complex": "is_complex",
     "is_nonzero": "is_nonzero",
+    "chunk": "chunk",
     "split": "split",
     "vsplit": "vsplit",
     "hsplit": "hsplit",
@@ -1015,8 +1060,13 @@ def canonical_op(node: torch.fx.Node) -> tuple[str, str] | None:
 # Engine ops whose aten counterpart returns a TUPLE (see the parser pre-pass):
 # the engine produces element 0 natively; getitem(0) aliases it, a consumed
 # getitem(1) forces eager.
-_TUPLE_OUTPUT_OPS = frozenset({"max_reduce", "min_reduce", "nll_loss_forward", "scaled_dot_product_attention", "sort", "unbind", "chunk",
-"var_mean","std_mean","linalg_cholesky_ex","linalg_inv_ex","linalg_solve_ex","linalg_lu_factor","split","vsplit","hsplit","dsplit","tensor_split","broadcast_tensors","qr","svd","eig","eigh","lu","linalg_slogdet","linalg_cholesky","lstm_cell","batch_norm","max_pool2d","adaptive_max_pool2d"})
+_TUPLE_OUTPUT_OPS = frozenset({
+    "max_reduce", "min_reduce", "nll_loss_forward", "scaled_dot_product_attention", "sort",
+    "var_mean", "std_mean", "linalg_cholesky_ex", "linalg_inv_ex", "linalg_solve_ex", "linalg_lu_factor",
+    "split", "vsplit", "hsplit", "dsplit", "tensor_split", "broadcast_tensors", "qr", "svd", "eig", "eigh", "lu",
+    "linalg_slogdet", "linalg_cholesky", "lstm_cell", "batch_norm", "layer_norm", "group_norm",
+    "topk", "mode", "kthvalue", "cummax", "cummin", "max_pool2d", "adaptive_max_pool2d",
+})
 
 
 def _is_tuple_source(node: torch.fx.Node) -> bool:
@@ -1034,13 +1084,13 @@ def _is_tuple_source(node: torch.fx.Node) -> bool:
             if len(args) >= 2 and isinstance(args[1], str) and args[1] in ("shape", "device", "dtype", "layout"):
                 return True
             return False
-        if key in ("torch.Tensor.size", "torch.size", "_operator.getitem", "operator.getitem"):
+        if key in ("torch.Tensor.size", "torch.size", "torch.chunk", "torch.unbind", "_operator.getitem", "operator.getitem"):
             return True
         # aten ops producing a tuple
         if "aten." in key and any(s in key for s in ("_shape_as_tensor", "max", "min", "sort", "topk", "unbind", "chunk")):
             return True
         mapped = canonical_op(node)
-        if mapped is not None and mapped[0] in _TUPLE_OUTPUT_OPS:
+        if mapped is not None and (mapped[0] in _TUPLE_OUTPUT_OPS or mapped[0] in ("chunk", "unbind")):
             return True
         return False
     if node.op == "call_method":

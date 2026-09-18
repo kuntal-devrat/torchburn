@@ -20,6 +20,52 @@ pub struct Payload {
     pub outputs: Vec<u32>,
 }
 
+impl Payload {
+    /// Validate structural invariants of the payload graph.
+    pub fn validate(&self) -> PyResult<()> {
+        let mut node_ids = std::collections::HashSet::with_capacity(self.nodes.len());
+        let total_inputs = self.inputs.len();
+
+        for (i, node) in self.nodes.iter().enumerate() {
+            if !node_ids.insert(node.id) {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "duplicate node id {} in payload",
+                    node.id
+                )));
+            }
+
+            // Available slots up to this step: total_inputs + preceding nodes
+            let available_slots = total_inputs + i;
+            for arg in &node.args {
+                if let Some(slot) = arg.index {
+                    if slot >= available_slots {
+                        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                            "node {} references future or out-of-bounds slot {slot} (available: {available_slots})",
+                            node.id
+                        )));
+                    }
+                }
+            }
+        }
+
+        // Validate that requested outputs reference known node IDs or encoded tuple outputs
+        for &out_id in &self.outputs {
+            let base_id = if node_ids.contains(&out_id) {
+                out_id
+            } else {
+                out_id >> 16
+            };
+            if !node_ids.contains(&base_id) {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "output references unknown node id {out_id}"
+                )));
+            }
+        }
+
+        Ok(())
+    }
+}
+
 #[derive(Deserialize, Clone)]
 pub struct InputSpec {
     pub shape: Vec<i64>,
@@ -134,6 +180,7 @@ static SUPPORTED_TARGETS_LIST: &[&str] = &[
     "pow",
     "sin",
     "cos",
+    "tan",
     "round",
     // Phase 2: logical + dtype cast
     "logical_and",
@@ -154,6 +201,11 @@ static SUPPORTED_TARGETS_LIST: &[&str] = &[
     "softmax",
     "log_softmax",
     "threshold_backward",
+    "gelu_backward",
+    "silu_backward",
+    "sigmoid_backward",
+    "tanh_backward",
+    "leaky_relu_backward",
     // Phase 2: reductions
     "sum",
     "mean",
@@ -226,6 +278,7 @@ static SUPPORTED_TARGETS_LIST: &[&str] = &[
     // Phase 4: transformer stack
     "scalar_tensor",
     "embedding",
+    "embedding_backward",
     "scaled_dot_product_attention",
     "rope",
     "nll_loss_forward",
@@ -548,6 +601,7 @@ static SUPPORTED_TARGETS_LIST: &[&str] = &[
     "broadcast_to",
     "broadcast_tensors",
     "split",
+    "split_with_sizes",
     "vsplit",
     "hsplit",
     "dsplit",
@@ -744,11 +798,13 @@ pub fn dict_to_payload(dict: &Bound<'_, PyDict>) -> PyResult<Payload> {
         )));
     }
 
-    Ok(Payload {
+    let payload = Payload {
         inputs,
         nodes,
         outputs,
-    })
+    };
+    payload.validate()?;
+    Ok(payload)
 }
 
 /// Recursively convert a Python object to a serde_json::Value.

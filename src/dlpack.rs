@@ -112,6 +112,23 @@ impl DType {
         }
     }
 
+    pub const NUM_DTYPES: usize = 9;
+
+    #[inline(always)]
+    pub const fn index(self) -> usize {
+        match self {
+            DType::F16 => 0,
+            DType::BF16 => 1,
+            DType::F32 => 2,
+            DType::F64 => 3,
+            DType::I64 => 4,
+            DType::I32 => 5,
+            DType::I8 => 6,
+            DType::U8 => 7,
+            DType::Bool => 8,
+        }
+    }
+
     pub fn dl_code(self) -> u8 {
         match self {
             DType::F16 | DType::F32 | DType::F64 => DL_DTYPE_FLOAT,
@@ -211,8 +228,19 @@ pub fn is_contiguous_shape_strides(shape: &[i64], strides: &[i64]) -> bool {
     true
 }
 
+#[inline(always)]
 pub fn elem_count(shape: &[i64]) -> usize {
-    shape.iter().map(|&d| d.max(0) as usize).product()
+    let mut count: usize = 1;
+    for &d in shape {
+        if d <= 0 {
+            return 0;
+        }
+        count = match count.checked_mul(d as usize) {
+            Some(c) => c,
+            None => usize::MAX,
+        };
+    }
+    count
 }
 
 // ---------------------------------------------------------------------------
@@ -369,24 +397,9 @@ impl BorrowedTensor {
         }
     }
 
+    #[inline(always)]
     pub fn is_contiguous(&self) -> bool {
-        if self.shape.is_empty() {
-            return true;
-        }
-        let mut expected_stride: i64 = 1;
-        for (&dim, &stride) in self.shape.iter().zip(self.strides.iter()).rev() {
-            if dim == 0 {
-                return true;
-            }
-            if dim == 1 {
-                continue;
-            }
-            if stride != expected_stride {
-                return false;
-            }
-            expected_stride = expected_stride.saturating_mul(dim);
-        }
-        true
+        is_contiguous_shape_strides(&self.shape, &self.strides)
     }
 
     #[allow(dead_code)]
@@ -437,10 +450,20 @@ impl Default for OwnedTensor {
 
 impl OwnedTensor {
     pub fn new(dtype: DType, shape: Vec<i64>) -> Self {
-        let bytes = elem_count(&shape) * dtype.elem_size();
+        let n = elem_count(&shape);
+        let bytes = n
+            .checked_mul(dtype.elem_size())
+            .expect("tensor byte size overflow");
         let words = bytes.div_ceil(8);
         let data = crate::memory_pool::take_buffer(dtype, words);
         OwnedTensor { data, shape, dtype }
+    }
+
+    /// Allocate an OwnedTensor with zeroed memory (safe for accumulation/scatter).
+    pub fn new_zeroed(dtype: DType, shape: Vec<i64>) -> Self {
+        let mut t = Self::new(dtype, shape);
+        t.data.fill(0);
+        t
     }
 
     pub fn elem_count(&self) -> usize {
@@ -454,7 +477,10 @@ impl OwnedTensor {
 
     /// Create from a pooled buffer (avoids allocation).
     pub fn from_pool(dtype: DType, shape: Vec<i64>, mut data: Vec<u64>) -> Self {
-        let bytes = elem_count(&shape) * dtype.elem_size();
+        let n = elem_count(&shape);
+        let bytes = n
+            .checked_mul(dtype.elem_size())
+            .expect("tensor byte size overflow");
         let words = bytes.div_ceil(8);
         if data.capacity() >= words {
             unsafe {
@@ -479,6 +505,7 @@ struct ManagedBuffer {
     dl: DLManagedTensor,
     data: Vec<u64>,
     shape: Vec<i64>,
+    strides: Vec<i64>,
     /// Logical dtype for the process-wide recycle list; pooling is keyed on
     /// it so differently-typed buffers never alias.
     dtype: DType,
@@ -522,57 +549,10 @@ unsafe extern "C" fn dlpack_capsule_destructor(capsule: *mut pyo3::ffi::PyObject
 }
 
 /// Wrap an owned tensor in a fresh `PyCapsule` named `"dltensor"` that
-/// PyTorch's `torch.from_dlpack` can consume.
-///
-/// Created via the raw C API (not `PyCapsule::new_with_destructor`) so the
-/// destructor can implement the DLPack name-check protocol above.
+/// Wrap an OwnedTensor reference into a DLPack capsule (clones the tensor).
+/// Prefer `owned_to_capsule_owned` whenever the source tensor can be moved/consumed.
 pub fn owned_to_capsule(py: Python<'_>, tensor: &OwnedTensor) -> PyResult<Py<PyCapsule>> {
-    let data = tensor.data.clone();
-    let shape = tensor.shape.clone();
-    let dtype = tensor.dtype;
-    // Raw pointers taken before moving the Vecs into the box remain valid:
-    // moving a `Vec` never moves its heap allocation.
-    let data_ptr = data.as_ptr() as *mut c_void;
-    let shape_ptr = shape.as_ptr() as *mut i64;
-    let buffer = ManagedBuffer {
-        dl: DLManagedTensor {
-            dl_tensor: DLTensor {
-                data: data_ptr,
-                device: DLDevice {
-                    device_type: DL_DEVICE_CPU,
-                    device_id: 0,
-                },
-                ndim: shape.len() as i32,
-                dtype: DLDataType {
-                    code: dtype.dl_code(),
-                    bits: dtype.dl_bits(),
-                    lanes: 1,
-                },
-                shape: shape_ptr,
-                strides: std::ptr::null_mut(),
-                byte_offset: 0,
-            },
-            manager_ctx: std::ptr::null_mut(),
-            deleter: Some(managed_buffer_deleter),
-        },
-        data,
-        shape,
-        dtype,
-        poolable: true,
-    };
-    let raw = Box::into_raw(Box::new(buffer)) as *mut DLManagedTensor;
-    // SAFETY: PyCapsule_New either returns a valid owned reference or null;
-    // the capsule owns `raw` and frees it via the destructor above.
-    let capsule_ptr = unsafe {
-        pyo3::ffi::PyCapsule_New(
-            raw as *mut c_void,
-            c"dltensor".as_ptr(),
-            Some(dlpack_capsule_destructor),
-        )
-    };
-    let capsule: Bound<'_, PyCapsule> =
-        unsafe { Bound::from_owned_ptr_or_err(py, capsule_ptr)?.downcast_into_unchecked() };
-    Ok(capsule.unbind())
+    owned_to_capsule_owned(py, tensor.clone())
 }
 
 /// Zero-copy variant that takes ownership of the tensor (avoids clone).
@@ -580,12 +560,11 @@ pub fn owned_to_capsule_owned(py: Python<'_>, tensor: OwnedTensor) -> PyResult<P
     let dtype = tensor.dtype;
     let data = tensor.data;
     let shape = tensor.shape;
-    let data_ptr = data.as_ptr() as *mut c_void;
-    let shape_ptr = shape.as_ptr() as *mut i64;
-    let buffer = ManagedBuffer {
+    let strides = contiguous_strides(&shape);
+    let mut boxed = Box::new(ManagedBuffer {
         dl: DLManagedTensor {
             dl_tensor: DLTensor {
-                data: data_ptr,
+                data: std::ptr::null_mut(),
                 device: DLDevice {
                     device_type: DL_DEVICE_CPU,
                     device_id: 0,
@@ -596,7 +575,7 @@ pub fn owned_to_capsule_owned(py: Python<'_>, tensor: OwnedTensor) -> PyResult<P
                     bits: dtype.dl_bits(),
                     lanes: 1,
                 },
-                shape: shape_ptr,
+                shape: std::ptr::null_mut(),
                 strides: std::ptr::null_mut(),
                 byte_offset: 0,
             },
@@ -605,10 +584,16 @@ pub fn owned_to_capsule_owned(py: Python<'_>, tensor: OwnedTensor) -> PyResult<P
         },
         data,
         shape,
+        strides,
         dtype,
         poolable: true,
-    };
-    let raw = Box::into_raw(Box::new(buffer)) as *mut DLManagedTensor;
+    });
+    // SAFETY: boxed is pinned in its heap allocation. data, shape, and strides heap pointers
+    // remain stable and valid until managed_buffer_deleter frees boxed.
+    boxed.dl.dl_tensor.data = boxed.data.as_ptr() as *mut c_void;
+    boxed.dl.dl_tensor.shape = boxed.shape.as_ptr() as *mut i64;
+    boxed.dl.dl_tensor.strides = boxed.strides.as_ptr() as *mut i64;
+    let raw = Box::into_raw(boxed) as *mut DLManagedTensor;
     let capsule_ptr = unsafe {
         pyo3::ffi::PyCapsule_New(
             raw as *mut c_void,
@@ -631,12 +616,11 @@ pub fn owned_to_capsule_typed(
     let data = tensor.data;
     let shape = tensor.shape;
     let dtype = tensor.dtype;
-    let data_ptr = data.as_ptr() as *mut c_void;
-    let shape_ptr = shape.as_ptr() as *mut i64;
-    let buffer = ManagedBuffer {
+    let strides = contiguous_strides(&shape);
+    let mut boxed = Box::new(ManagedBuffer {
         dl: DLManagedTensor {
             dl_tensor: DLTensor {
-                data: data_ptr,
+                data: std::ptr::null_mut(),
                 device: DLDevice {
                     device_type: DL_DEVICE_CPU,
                     device_id: 0,
@@ -647,7 +631,7 @@ pub fn owned_to_capsule_typed(
                     bits,
                     lanes: 1,
                 },
-                shape: shape_ptr,
+                shape: std::ptr::null_mut(),
                 strides: std::ptr::null_mut(),
                 byte_offset: 0,
             },
@@ -656,10 +640,16 @@ pub fn owned_to_capsule_typed(
         },
         data,
         shape,
+        strides,
         dtype,
         poolable: false,
-    };
-    let raw = Box::into_raw(Box::new(buffer)) as *mut DLManagedTensor;
+    });
+    // SAFETY: boxed is pinned in its heap allocation. data, shape, and strides heap pointers
+    // remain stable and valid until managed_buffer_deleter frees boxed.
+    boxed.dl.dl_tensor.data = boxed.data.as_ptr() as *mut c_void;
+    boxed.dl.dl_tensor.shape = boxed.shape.as_ptr() as *mut i64;
+    boxed.dl.dl_tensor.strides = boxed.strides.as_ptr() as *mut i64;
+    let raw = Box::into_raw(boxed) as *mut DLManagedTensor;
     let capsule_ptr = unsafe {
         pyo3::ffi::PyCapsule_New(
             raw as *mut c_void,

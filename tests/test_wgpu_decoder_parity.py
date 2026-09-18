@@ -116,3 +116,27 @@ def test_wgpu_cpu_logit_parity_floor(quantized_model):
     # everywhere or drops a layer).
     assert matches >= 4, f"argmax agreement too low: {matches}/{samples}"
     assert worst < 25.0, f"logits diverged too far from CPU: max |Δ| = {worst}"
+
+
+def test_wgpu_prefill_and_kv_len(quantized_model):
+    from torchburn.quantization import create_wgpu_qwen_decoder
+    from torchburn.llm.speculative import SpeculativeDecoder
+
+    try:
+        gpu = create_wgpu_qwen_decoder(quantized_model, max_seq_len=256)
+    except MemoryError as e:
+        pytest.skip(f"wgpu OOM: {e}")
+
+    gpu.reset_kv_cache()
+    assert gpu.kv_len() == 0
+
+    prompt = [15, 30, 45]
+    logits = gpu.prefill(prompt)
+    assert len(logits) == gpu.vocab_size
+    assert gpu.kv_len() == len(prompt)
+    assert gpu.get_logits() == logits
+
+    # SpeculativeDecoder test using WgpuQwenDecoder
+    spec = SpeculativeDecoder(draft=gpu, target=gpu, K=2)
+    toks = spec.generate(prompt_ids=prompt, max_new_tokens=4)
+    assert len(toks) == 4

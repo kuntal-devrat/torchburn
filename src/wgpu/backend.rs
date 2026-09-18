@@ -42,7 +42,7 @@ fn wgpu_backend_name() -> &'static str {
     }
     #[cfg(target_os = "windows")]
     {
-        "Vulkan"
+        "DirectX 12"
     }
     #[cfg(target_os = "linux")]
     {
@@ -70,7 +70,10 @@ fn backend_to_str(backend: wgpu::Backend) -> &'static str {
 /// Check if user forced a specific wgpu backend via TORCHBURN_WGPU_BACKEND.
 #[cfg(feature = "burn-wgpu")]
 fn forced_wgpu_backend() -> Option<wgpu::Backend> {
-    let s = std::env::var("TORCHBURN_WGPU_BACKEND").ok()?.to_lowercase();
+    let s = std::env::var("TORCHBURN_WGPU_BACKEND")
+        .or_else(|_| std::env::var("TORCHBURN_DEVICE"))
+        .ok()?
+        .to_lowercase();
     match s.as_str() {
         "vulkan" => Some(wgpu::Backend::Vulkan),
         "metal" => Some(wgpu::Backend::Metal),
@@ -88,12 +91,23 @@ fn forced_wgpu_backend() -> Option<wgpu::Backend> {
 /// wgpu panics; we catch that and report unavailability so the caller can
 /// fall back to the CPU backend instead of crashing.
 pub fn gpu_available() -> bool {
+    if force_cpu() {
+        return false;
+    }
     GPU_INFO.get_or_init(probe_gpu).available
 }
 
 /// Get detailed GPU information as a tuple:
 /// (available, adapter_name, backend_name, vram_bytes).
 pub fn gpu_info() -> (bool, String, String, u64) {
+    if force_cpu() {
+        return (
+            false,
+            "CPU forced via TORCHBURN_DEVICE=cpu".to_string(),
+            "none".to_string(),
+            0,
+        );
+    }
     let info = GPU_INFO.get_or_init(probe_gpu);
     (
         info.available,
@@ -112,23 +126,47 @@ pub fn device_override() -> Option<String> {
 
 /// Should we force CPU execution?
 pub fn force_cpu() -> bool {
-    matches!(device_override().as_deref(), Some("cpu"))
+    matches!(
+        device_override().as_deref(),
+        Some("cpu") | Some("native_cpu")
+    )
 }
 
 /// Should we force GPU execution (fail if unavailable)?
 pub fn force_gpu() -> bool {
     matches!(
         device_override().as_deref(),
-        Some("gpu") | Some("auto") | Some("cuda") | Some("metal") | Some("vulkan")
+        Some("gpu")
+            | Some("wgpu")
+            | Some("burn-wgpu")
+            | Some("burn_gpu")
+            | Some("auto")
+            | Some("igpu")
+            | Some("dgpu")
+            | Some("metal")
+            | Some("vulkan")
+            | Some("dx12")
     )
 }
 
+/// Ensure the CubeCL shader cache directory exists.  Runs exactly once
+/// per process via `OnceLock`; the `set_var` is wrapped in `unsafe` because
+/// Rust ≥1.83 treats environment mutation as unsafe (other threads may read).
+/// Safety: this is called inside `init_wgpu_runtime`'s own `OnceLock::get_or_init`,
+/// so it executes at most once before any wgpu work begins.
 fn ensure_shader_cache() {
-    if std::env::var("CUBECL_CACHE_DIR").is_err() {
-        let cache_dir = std::env::temp_dir().join("torchburn_shader_cache");
-        let _ = std::fs::create_dir_all(&cache_dir);
-        std::env::set_var("CUBECL_CACHE_DIR", cache_dir);
-    }
+    static SHADER_CACHE_INIT: OnceLock<()> = OnceLock::new();
+    SHADER_CACHE_INIT.get_or_init(|| {
+        if std::env::var("CUBECL_CACHE_DIR").is_err() {
+            let cache_dir = std::env::temp_dir().join("torchburn_shader_cache");
+            if let Err(e) = std::fs::create_dir_all(&cache_dir) {
+                eprintln!("torchburn: failed to create shader cache dir: {e}");
+            }
+            // SAFETY: executed exactly once via OnceLock before any wgpu work;
+            // no concurrent readers of CUBECL_CACHE_DIR at this point.
+            unsafe { std::env::set_var("CUBECL_CACHE_DIR", cache_dir) };
+        }
+    });
 }
 
 #[cfg(feature = "burn-wgpu")]
@@ -150,16 +188,6 @@ pub fn init_wgpu_runtime() {
 }
 
 fn probe_gpu() -> GPUInfo {
-    // First, respect explicit CPU override.
-    if force_cpu() {
-        return GPUInfo {
-            available: false,
-            adapter_name: "CPU forced via TORCHBURN_DEVICE=cpu".to_string(),
-            backend_name: "none".to_string(),
-            vram_bytes: 0,
-        };
-    }
-
     // Try to enumerate adapters via wgpu crate for real info (when available).
     #[cfg(feature = "burn-wgpu")]
     {
@@ -256,8 +284,13 @@ fn probe_via_wgpu() -> Option<GPUInfo> {
     })
 }
 
+/// Minimal async executor for wgpu adapter/device requests.
+/// Uses a noop waker + yield loop — wgpu's adapter/device futures resolve
+/// after the driver completes its internal work, which `yield_now` allows.
+/// A bounded iteration count prevents infinite loops on broken drivers.
+/// Uses progressive backoff (0→1→10→100μs) to avoid wasting time on fast ops.
 #[cfg(feature = "burn-wgpu")]
-fn block_on<F: std::future::Future>(mut future: F) -> F::Output {
+fn block_on<F: std::future::Future>(mut future: F) -> Option<F::Output> {
     use std::pin::Pin;
     use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
     fn noop_clone(_: *const ()) -> RawWaker {
@@ -269,18 +302,51 @@ fn block_on<F: std::future::Future>(mut future: F) -> F::Output {
     let waker = unsafe { Waker::from_raw(raw_waker) };
     let mut cx = Context::from_waker(&waker);
     let mut pinned = unsafe { Pin::new_unchecked(&mut future) };
-    loop {
+    // Progressive backoff: yield → 1µs → 10µs → 100µs → 1000µs (1ms).
+    // B4 fix: use threshold-based tier selection instead of `iter.min(4)`
+    // which jumped to 1ms at iteration 5 instead of 1000.
+    const BACKOFF_US: [u64; 5] = [0, 1, 10, 100, 1000];
+    for iter in 0..100_000u32 {
         match pinned.as_mut().poll(&mut cx) {
-            Poll::Ready(val) => return val,
-            Poll::Pending => std::thread::yield_now(),
+            Poll::Ready(val) => return Some(val),
+            Poll::Pending => {
+                let tier = if iter < 1 {
+                    0
+                } else if iter < 10 {
+                    1
+                } else if iter < 100 {
+                    2
+                } else if iter < 1000 {
+                    3
+                } else {
+                    4
+                };
+                let delay_us = BACKOFF_US[tier];
+                if delay_us > 0 {
+                    std::thread::sleep(std::time::Duration::from_micros(delay_us));
+                } else {
+                    std::thread::yield_now();
+                }
+            }
+        }
+    }
+    // If we get here, the future never resolved — this is a driver bug.
+    // Poll one last time and return None if still pending (prevents process crash).
+    match pinned.as_mut().poll(&mut cx) {
+        Poll::Ready(val) => Some(val),
+        Poll::Pending => {
+            eprintln!("torchburn: wgpu adapter/device request timed out after 10s");
+            None
         }
     }
 }
 
 #[cfg(feature = "burn-wgpu")]
 pub struct WgpuInt4Context {
-    pub device: wgpu::Device,
-    pub queue: wgpu::Queue,
+    /// Shared device handle — consumers `Arc::clone()` this instead of
+    /// `Device::clone()` to guarantee command ordering on the same queue.
+    pub device: std::sync::Arc<wgpu::Device>,
+    pub queue: std::sync::Arc<wgpu::Queue>,
     pub pipeline: wgpu::ComputePipeline,
     pub bind_group_layout: wgpu::BindGroupLayout,
     pub rows_per_wg: u32,
@@ -292,6 +358,9 @@ pub struct WgpuInt4Context {
     /// Whether PIPELINE_CACHE was granted at device creation. Pipeline cache
     /// creation panics without it, so decoder pipelines must check this flag.
     pub has_pipeline_cache: bool,
+    /// Flag indicating if the GPU device has entered an unrecoverable error
+    /// or device-lost state.
+    pub device_lost: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 #[cfg(feature = "burn-wgpu")]
@@ -299,6 +368,9 @@ static WGPU_INT4_CTX: OnceLock<Option<WgpuInt4Context>> = OnceLock::new();
 
 #[cfg(feature = "burn-wgpu")]
 pub fn get_wgpu_int4_context() -> Option<&'static WgpuInt4Context> {
+    if force_cpu() {
+        return None;
+    }
     WGPU_INT4_CTX.get_or_init(|| {
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
             backends: wgpu::Backends::all(),
@@ -307,17 +379,29 @@ pub fn get_wgpu_int4_context() -> Option<&'static WgpuInt4Context> {
         });
 
         let pref_device = std::env::var("TORCHBURN_DEVICE").ok().map(|s| s.trim().to_lowercase());
-        let adapter = if let Some(ref pref) = pref_device {
-            let adapters: Vec<_> = instance.enumerate_adapters(wgpu::Backends::all());
-            let target_type = match pref.as_str() {
+        let forced_backend = forced_wgpu_backend();
+        let adapter = if pref_device.is_some() || forced_backend.is_some() {
+            let mut candidates: Vec<_> = instance.enumerate_adapters(wgpu::Backends::all());
+            if let Some(fb) = forced_backend {
+                candidates.retain(|a| a.get_info().backend == fb);
+            }
+            let target_type = pref_device.as_deref().and_then(|pref| match pref {
                 "dgpu" => Some(wgpu::DeviceType::DiscreteGpu),
                 "igpu" => Some(wgpu::DeviceType::IntegratedGpu),
                 _ => None,
+            });
+            let type_rank = |t: wgpu::DeviceType| match t {
+                wgpu::DeviceType::DiscreteGpu => 0,
+                wgpu::DeviceType::IntegratedGpu => 1,
+                wgpu::DeviceType::VirtualGpu => 2,
+                wgpu::DeviceType::Cpu => 3,
+                wgpu::DeviceType::Other => 4,
             };
+            candidates.sort_by_key(|a| type_rank(a.get_info().device_type));
             if let Some(dev_type) = target_type {
-                adapters.into_iter().find(|a| a.get_info().device_type == dev_type)
+                candidates.into_iter().find(|a| a.get_info().device_type == dev_type)
             } else {
-                None
+                candidates.into_iter().next()
             }
         } else {
             None
@@ -333,7 +417,8 @@ pub fn get_wgpu_int4_context() -> Option<&'static WgpuInt4Context> {
                 },
                 compatible_surface: None,
                 force_fallback_adapter: false,
-            })).ok()?,
+            }))?
+            .ok()?,
         };
 
         let info = adapter.get_info();
@@ -394,7 +479,7 @@ pub fn get_wgpu_int4_context() -> Option<&'static WgpuInt4Context> {
                 memory_hints: wgpu::MemoryHints::Performance,
                 ..Default::default()
             },
-        ))
+        ))?
         .ok()?;
 
         let shader_raw = include_str!("../shaders/gemv_w4a32.wgsl");
@@ -478,25 +563,35 @@ pub fn get_wgpu_int4_context() -> Option<&'static WgpuInt4Context> {
             cache: None,
         });
 
+        let device_lost = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let dl = device_lost.clone();
+        device.on_uncaptured_error(Box::new(move |error| {
+            eprintln!("torchburn: uncaptured wgpu error (device loss / OOM): {error}");
+            dl.store(true, std::sync::atomic::Ordering::SeqCst);
+        }));
+
         Some(WgpuInt4Context {
-            device,
-            queue,
+            device: std::sync::Arc::new(device),
+            queue: std::sync::Arc::new(queue),
             pipeline,
             bind_group_layout,
             rows_per_wg,
             has_subgroups,
             has_pipeline_cache,
+            device_lost,
         })
     }).as_ref()
 }
 
 #[cfg(feature = "burn-wgpu")]
 struct PersistentWeightBuffers {
+    x_buf: wgpu::Buffer,
     w_buf: wgpu::Buffer,
     s_buf: wgpu::Buffer,
     params_buf: wgpu::Buffer,
     y_buf: wgpu::Buffer,
     staging_buf: wgpu::Buffer,
+    bind_group: wgpu::BindGroup,
     num_rows: usize,
     num_cols: usize,
     group_size: usize,
@@ -506,24 +601,34 @@ struct PersistentWeightBuffers {
     /// buffers are transparently re-uploaded instead of silently reusing stale
     /// weights.
     tag: u64,
-    /// Monotonic insertion counter, used to evict the oldest entry when the
-    /// cache grows past its bound.
-    seq: u64,
+    /// Monotonic counter used for LRU eviction.  Updated on every access
+    /// (not just insertion) so frequently-used weights survive eviction.
+    /// Uses AtomicU64 so we can update through an Arc without reconstructing.
+    seq: std::sync::atomic::AtomicU64,
+    /// Execution mutex to ensure serialized dispatch and readback when multiple
+    /// threads invoke GEMV on the same weight matrix with GIL released.
+    exec_lock: std::sync::Mutex<()>,
 }
 
 #[cfg(feature = "burn-wgpu")]
 static PERSISTENT_WEIGHTS: OnceLock<
-    std::sync::Mutex<std::collections::HashMap<usize, PersistentWeightBuffers>>,
+    std::sync::Mutex<std::collections::HashMap<usize, std::sync::Arc<PersistentWeightBuffers>>>,
 > = OnceLock::new();
 
 #[cfg(feature = "burn-wgpu")]
 static WEIGHT_CACHE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-/// Maximum number of distinct weight matrices cached on the GPU. Bounding the
-/// map keeps the pointer-keyed cache from growing without limit when many
-/// models (or dynamically created tensors) share one process.
+/// Maximum number of distinct weight matrices cached on the GPU. Configurable
+/// via `TORCHBURN_WEIGHT_CACHE_CAP` env var. Default 256 (large models like
+/// Qwen-7B have ~200 unique weight matrices; the previous cap of 64 caused
+/// thrashing on every decode step).
 #[cfg(feature = "burn-wgpu")]
-const WEIGHT_CACHE_CAP: usize = 64;
+fn weight_cache_cap() -> usize {
+    std::env::var("TORCHBURN_WEIGHT_CACHE_CAP")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .unwrap_or(256)
+}
 
 /// Cheap, deterministic fingerprint over `data`: FNV-1a over a strided sample
 /// (>=64 words) plus the first and last bytes. Deliberately not a cryptographic
@@ -536,7 +641,9 @@ fn content_tag(data: &[u8]) -> u64 {
     if n == 0 {
         return h;
     }
-    let step = ((n / 64).max(1)) as usize;
+    // Sample 256 strided positions (up from 64) for stronger collision resistance
+    // when multiple weight matrices are hot-swapped at the same memory address.
+    let step = (n / 256).max(1);
     let mut i = 0usize;
     while i < n {
         h ^= data[i] as u64;
@@ -554,9 +661,116 @@ fn content_tag(data: &[u8]) -> u64 {
     h
 }
 
+/// Thread-safe GPU buffer pool that caches and reuses wgpu buffers across
+/// dispatches to reduce driver allocation overhead.
 #[cfg(feature = "burn-wgpu")]
-fn get_persistent_weights(
-) -> &'static std::sync::Mutex<std::collections::HashMap<usize, PersistentWeightBuffers>> {
+pub struct WgpuBufferPool {
+    pool: std::sync::Mutex<std::collections::HashMap<(u64, wgpu::BufferUsages), Vec<wgpu::Buffer>>>,
+    total_cached: std::sync::atomic::AtomicUsize,
+}
+
+#[cfg(feature = "burn-wgpu")]
+impl Default for WgpuBufferPool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(feature = "burn-wgpu")]
+impl WgpuBufferPool {
+    pub fn new() -> Self {
+        Self {
+            pool: std::sync::Mutex::new(std::collections::HashMap::new()),
+            total_cached: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+
+    /// Round buffer size up to reduce churn across nearby sizes.
+    fn round_size(size: u64) -> u64 {
+        if size <= 256 {
+            256
+        } else if size <= 65536 {
+            size.next_power_of_two()
+        } else {
+            (size + 65535) & !65535
+        }
+    }
+
+    /// Acquire a buffer of at least `size` bytes with the specified `usage`.
+    /// Reuses a previously recycled buffer if available; otherwise allocates a new one.
+    pub fn acquire(
+        &self,
+        device: &wgpu::Device,
+        size: u64,
+        usage: wgpu::BufferUsages,
+        label: Option<&str>,
+    ) -> wgpu::Buffer {
+        let rounded = Self::round_size(size);
+        let key = (rounded, usage);
+        if let Ok(mut map) = self.pool.lock() {
+            if let Some(bufs) = map.get_mut(&key) {
+                if let Some(buf) = bufs.pop() {
+                    self.total_cached
+                        .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                    return buf;
+                }
+            }
+        }
+        device.create_buffer(&wgpu::BufferDescriptor {
+            label,
+            size: rounded,
+            usage,
+            mapped_at_creation: false,
+        })
+    }
+
+    /// Recycle a buffer back into the pool for future reuse.
+    pub fn recycle(&self, buffer: wgpu::Buffer, size: u64, usage: wgpu::BufferUsages) {
+        // Limit total pool capacity to 128 buffers to avoid excessive VRAM retention.
+        if self.total_cached.load(std::sync::atomic::Ordering::Relaxed) >= 128 {
+            return;
+        }
+        let rounded = Self::round_size(size);
+        let key = (rounded, usage);
+        if let Ok(mut map) = self.pool.lock() {
+            let entry = map.entry(key).or_default();
+            if entry.len() < 16 {
+                entry.push(buffer);
+                self.total_cached
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+    }
+
+    /// Clear all pooled buffers, releasing GPU driver memory.
+    pub fn clear(&self) {
+        if let Ok(mut map) = self.pool.lock() {
+            map.clear();
+            self.total_cached
+                .store(0, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+}
+
+#[cfg(feature = "burn-wgpu")]
+static WGPU_BUFFER_POOL: OnceLock<WgpuBufferPool> = OnceLock::new();
+
+#[cfg(feature = "burn-wgpu")]
+pub fn get_wgpu_buffer_pool() -> &'static WgpuBufferPool {
+    WGPU_BUFFER_POOL.get_or_init(WgpuBufferPool::new)
+}
+
+#[cfg(feature = "burn-wgpu")]
+pub fn wgpu_clear_buffer_pool() {
+    if let Some(pool) = WGPU_BUFFER_POOL.get() {
+        pool.clear();
+    }
+}
+
+#[cfg(feature = "burn-wgpu")]
+fn get_persistent_weights() -> &'static std::sync::Mutex<
+    std::collections::HashMap<usize, std::sync::Arc<PersistentWeightBuffers>>,
+> {
     PERSISTENT_WEIGHTS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
 }
 
@@ -567,8 +781,13 @@ pub fn wgpu_clear_weight_cache() {
             map.clear();
         }
     }
+    wgpu_clear_buffer_pool();
 }
 
+/// Dispatches an INT4 quantized GEMV operation to the WGPU compute queue.
+///
+/// Wrapped in `catch_unwind` so GPU device loss, validation errors, or OOM
+/// conditions fail cleanly with an `Err` instead of terminating the process.
 #[cfg(feature = "burn-wgpu")]
 pub fn wgpu_gemv_w4a32(
     x: &[f32],
@@ -579,7 +798,42 @@ pub fn wgpu_gemv_w4a32(
     num_cols: usize,
     group_size: usize,
 ) -> Result<(), String> {
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        wgpu_gemv_w4a32_inner(x, w_bytes, scales, out, num_rows, num_cols, group_size)
+    }));
+    match result {
+        Ok(res) => res,
+        Err(payload) => {
+            if let Some(ctx) = get_wgpu_int4_context() {
+                ctx.device_lost.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+            let msg = if let Some(s) = payload.downcast_ref::<&str>() {
+                s.to_string()
+            } else if let Some(s) = payload.downcast_ref::<String>() {
+                s.clone()
+            } else {
+                "wgpu_gemv_w4a32 panicked (GPU device loss, validation error, or OOM)".to_string()
+            };
+            eprintln!("torchburn: wgpu GEMV panic caught ({msg}), falling back to CPU");
+            Err(format!("wgpu panic: {msg}"))
+        }
+    }
+}
+
+#[cfg(feature = "burn-wgpu")]
+fn wgpu_gemv_w4a32_inner(
+    x: &[f32],
+    w_bytes: &[u8],
+    scales: &[f32],
+    out: &mut [f32],
+    num_rows: usize,
+    num_cols: usize,
+    group_size: usize,
+) -> Result<(), String> {
     let ctx = get_wgpu_int4_context().ok_or_else(|| "WGPU device unavailable".to_string())?;
+    if ctx.device_lost.load(std::sync::atomic::Ordering::SeqCst) {
+        return Err("WGPU device is in a lost/error state; falling back to CPU".to_string());
+    }
     let device = &ctx.device;
     let queue = &ctx.queue;
 
@@ -587,142 +841,212 @@ pub fn wgpu_gemv_w4a32(
     let key = w_bytes.as_ptr() as usize;
     let tag = content_tag(w_bytes);
 
-    let mut weight_map = get_persistent_weights().lock().map_err(|e| e.to_string())?;
-    let stale = weight_map.get(&key).map_or(true, |e| {
-        e.num_rows != num_rows
-            || e.num_cols != num_cols
-            || e.group_size != group_size
-            || e.tag != tag
-    });
-    if stale {
-        // Allocate and populate persistent weight buffers ONCE on GPU
-        // (re-uploaded when dims or content change at the same address).
-        let w_size = ((w_bytes.len() + 3) & !3).max(16) as u64;
-        let w_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("wgpu_persistent_w_buf"),
-            size: w_size,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        queue.write_buffer(&w_buf, 0, w_bytes);
+    // ── Phase 1: Acquire weight buffers (lock held briefly) ────────────────
+    // Clone the Arc to release the Mutex *before* any GPU work, so concurrent
+    // GEMV calls on other weights are not blocked during submission/readback.
+    let p: std::sync::Arc<PersistentWeightBuffers> =
+        {
+            let mut weight_map = get_persistent_weights().lock().map_err(|e| e.to_string())?;
+            let stale = weight_map.get(&key).map_or(true, |e| {
+                e.num_rows != num_rows
+                    || e.num_cols != num_cols
+                    || e.group_size != group_size
+                    || e.tag != tag
+            });
+            if stale {
+                // Allocate and populate persistent weight buffers ONCE on GPU
+                // (re-uploaded when dims or content change at the same address).
+                let pool = get_wgpu_buffer_pool();
+                let w_size = ((w_bytes.len() + 3) & !3).max(16) as u64;
+                let w_buf = pool.acquire(
+                    device,
+                    w_size,
+                    wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                    Some("wgpu_persistent_w_buf"),
+                );
+                queue.write_buffer(&w_buf, 0, w_bytes);
 
-        let s_size = ((scales.len() * 4).max(16)) as u64;
-        let s_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("wgpu_persistent_s_buf"),
-            size: s_size,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let s_bytes =
-            unsafe { std::slice::from_raw_parts(scales.as_ptr() as *const u8, scales.len() * 4) };
-        queue.write_buffer(&s_buf, 0, s_bytes);
+                let s_size = ((scales.len() * 4).max(16)) as u64;
+                let s_buf = pool.acquire(
+                    device,
+                    s_size,
+                    wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                    Some("wgpu_persistent_s_buf"),
+                );
+                let s_bytes = unsafe {
+                    std::slice::from_raw_parts(scales.as_ptr() as *const u8, scales.len() * 4)
+                };
+                queue.write_buffer(&s_buf, 0, s_bytes);
 
-        let y_size = ((num_rows * 4).max(16)) as u64;
-        let y_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("wgpu_persistent_y_buf"),
-            size: y_size,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-            mapped_at_creation: false,
-        });
+                let y_size = ((num_rows * 4).max(16)) as u64;
+                let y_buf = pool.acquire(
+                    device,
+                    y_size,
+                    wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+                    Some("wgpu_persistent_y_buf"),
+                );
 
-        let params: [u32; 4] = [
-            num_rows as u32,
-            num_cols as u32,
-            group_size as u32,
-            num_groups as u32,
-        ];
-        let params_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("wgpu_persistent_params_buf"),
-            size: 16,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let params_bytes = unsafe { std::slice::from_raw_parts(params.as_ptr() as *const u8, 16) };
-        queue.write_buffer(&params_buf, 0, params_bytes);
+                let params: [u32; 4] = [
+                    num_rows as u32,
+                    num_cols as u32,
+                    group_size as u32,
+                    num_groups as u32,
+                ];
+                let params_buf = pool.acquire(
+                    device,
+                    16,
+                    wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                    Some("wgpu_persistent_params_buf"),
+                );
+                let params_bytes =
+                    unsafe { std::slice::from_raw_parts(params.as_ptr() as *const u8, 16) };
+                queue.write_buffer(&params_buf, 0, params_bytes);
 
-        let staging_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("wgpu_persistent_staging_buf"),
-            size: y_size,
-            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
+                let staging_buf = pool.acquire(
+                    device,
+                    y_size,
+                    wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                    Some("wgpu_persistent_staging_buf"),
+                );
 
-        let seq = WEIGHT_CACHE_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        weight_map.insert(
-            key,
-            PersistentWeightBuffers {
-                w_buf,
-                s_buf,
-                params_buf,
-                y_buf,
-                staging_buf,
-                num_rows,
-                num_cols,
-                group_size,
-                tag,
-                seq,
-            },
-        );
+                let x_size = (((num_cols * 4 + 15) & !15).max(16)) as u64;
+                let x_buf = pool.acquire(
+                    device,
+                    x_size,
+                    wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                    Some("wgpu_persistent_x_buf"),
+                );
 
-        // Evict the oldest entries once the cache exceeds its bound.
-        while weight_map.len() > WEIGHT_CACHE_CAP {
-            if let Some((oldest_key, oldest_seq)) = weight_map
-                .iter()
-                .min_by_key(|(_, e)| e.seq)
-                .map(|(k, e)| (*k, e.seq))
-            {
-                if oldest_seq == seq {
-                    break; // never evict the entry we just inserted
+                let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("wgpu_gemv_bg"),
+                    layout: &ctx.bind_group_layout,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: x_buf.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: w_buf.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: s_buf.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 3,
+                            resource: y_buf.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 4,
+                            resource: params_buf.as_entire_binding(),
+                        },
+                    ],
+                });
+
+                let seq = WEIGHT_CACHE_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let recycle_entry = |pool: &WgpuBufferPool, entry: PersistentWeightBuffers| {
+                    let y_size = ((entry.num_rows * 4).max(16)) as u64;
+                    let x_size = (((entry.num_cols * 4 + 15) & !15).max(16)) as u64;
+                    let w_size = ((entry.num_rows * (entry.num_cols / 2) + 3) & !3).max(16) as u64;
+                    let s_size = (((entry.num_rows * entry.num_cols / entry.group_size) * 4).max(16)) as u64;
+                    pool.recycle(
+                        entry.staging_buf,
+                        y_size,
+                        wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                    );
+                    pool.recycle(
+                        entry.y_buf,
+                        y_size,
+                        wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+                    );
+                    pool.recycle(
+                        entry.x_buf,
+                        x_size,
+                        wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                    );
+                    pool.recycle(
+                        entry.w_buf,
+                        w_size,
+                        wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                    );
+                    pool.recycle(
+                        entry.s_buf,
+                        s_size,
+                        wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                    );
+                    pool.recycle(
+                        entry.params_buf,
+                        16,
+                        wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                    );
+                };
+
+                let old_entry = weight_map.insert(
+                    key,
+                    std::sync::Arc::new(PersistentWeightBuffers {
+                        x_buf,
+                        w_buf,
+                        s_buf,
+                        params_buf,
+                        y_buf,
+                        staging_buf,
+                        bind_group,
+                        num_rows,
+                        num_cols,
+                        group_size,
+                        tag,
+                        seq: std::sync::atomic::AtomicU64::new(seq),
+                        exec_lock: std::sync::Mutex::new(()),
+                    }),
+                );
+                if let Some(evicted) = old_entry {
+                    if let Ok(entry) = std::sync::Arc::try_unwrap(evicted) {
+                        recycle_entry(pool, entry);
+                    }
                 }
-                weight_map.remove(&oldest_key);
+
+                // Evict the least-recently-used entries once the cache exceeds its bound.
+                while weight_map.len() > weight_cache_cap() {
+                    if let Some((oldest_key, oldest_seq)) = weight_map
+                        .iter()
+                        .min_by_key(|(_, e)| e.seq.load(std::sync::atomic::Ordering::Relaxed))
+                        .map(|(k, e)| (*k, e.seq.load(std::sync::atomic::Ordering::Relaxed)))
+                    {
+                        if oldest_seq == seq {
+                            break; // never evict the entry we just inserted
+                        }
+                        if let Some(evicted) = weight_map.remove(&oldest_key) {
+                            if let Ok(entry) = std::sync::Arc::try_unwrap(evicted) {
+                                recycle_entry(pool, entry);
+                            }
+                        }
+                    } else {
+                        break;
+                    }
+                }
             } else {
-                break;
+                // Cache hit — update the access counter for LRU eviction.
+                // AtomicU64 allows in-place update through the Arc.
+                if let Some(entry) = weight_map.get(&key) {
+                    let new_seq =
+                        WEIGHT_CACHE_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    entry
+                        .seq
+                        .store(new_seq, std::sync::atomic::Ordering::Relaxed);
+                }
             }
-        }
-    }
 
-    let p = weight_map.get(&key).ok_or_else(|| {
-        "wgpu: weight buffer was evicted from cache during the same call (this is a bug)"
-            .to_string()
-    })?;
+            weight_map.get(&key).ok_or_else(|| {
+            "wgpu: weight buffer was evicted from cache during the same call (this is a bug)"
+                .to_string()
+        })?.clone() // Arc clone — cheap reference count bump
+        }; // ← Mutex dropped here, BEFORE any GPU work
 
-    // 1. x buffer: only 3.5 KB upload per projection instead of 260 MB!
-    let x_size = (((num_cols * 4 + 15) & !15).max(16)) as u64;
-    let x_buf = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("wgpu_x_buf"),
-        size: x_size,
-        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    });
+    // ── Phase 2: GPU dispatch (lock-free across distinct weights, serialized per-weight) ──
+    let _exec_guard = p.exec_lock.lock().unwrap_or_else(|e| e.into_inner());
     let x_bytes = unsafe { std::slice::from_raw_parts(x.as_ptr() as *const u8, num_cols * 4) };
-    queue.write_buffer(&x_buf, 0, x_bytes);
-
-    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("wgpu_gemv_bg"),
-        layout: &ctx.bind_group_layout,
-        entries: &[
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: x_buf.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: p.w_buf.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 2,
-                resource: p.s_buf.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 3,
-                resource: p.y_buf.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 4,
-                resource: p.params_buf.as_entire_binding(),
-            },
-        ],
-    });
+    queue.write_buffer(&p.x_buf, 0, x_bytes);
 
     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
         label: Some("wgpu_gemv_encoder"),
@@ -734,7 +1058,7 @@ pub fn wgpu_gemv_w4a32(
             timestamp_writes: None,
         });
         cpass.set_pipeline(&ctx.pipeline);
-        cpass.set_bind_group(0, &bind_group, &[]);
+        cpass.set_bind_group(0, &p.bind_group, &[]);
         let wgs = (num_rows as u32 + ctx.rows_per_wg - 1) / ctx.rows_per_wg;
         let dispatch_x = wgs.min(65535);
         let dispatch_y = (wgs + 65534) / 65535;
@@ -744,6 +1068,7 @@ pub fn wgpu_gemv_w4a32(
     encoder.copy_buffer_to_buffer(&p.y_buf, 0, &p.staging_buf, 0, (num_rows * 4) as u64);
     queue.submit(Some(encoder.finish()));
 
+    // ── Phase 3: Readback (lock-free) ──────────────────────────────────────
     let buffer_slice = p.staging_buf.slice(..(num_rows * 4) as u64);
     let (tx, rx) = std::sync::mpsc::channel();
     buffer_slice.map_async(wgpu::MapMode::Read, move |result| {

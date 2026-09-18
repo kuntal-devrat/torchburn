@@ -30,7 +30,7 @@ pub mod split_extra;
 
 pub use self::split_extra::{
     as_strided, broadcast_tensors, broadcast_to, dsplit, hsplit, index_reduce, scatter_max,
-    scatter_min, split, take_along_dim, tensor_split, vsplit,
+    scatter_min, split, split_with_sizes, take_along_dim, tensor_split, vsplit,
 };
 
 pub mod linalg_ex;

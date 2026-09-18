@@ -111,17 +111,58 @@ pub(crate) fn try_dispatch(
             let (ea, eb) = kernels::tensor_ops::broadcast_tensors(&a, &b)?;
             slots.push(Slot::Tuple(vec![ea, eb]));
         }
-        "split" => {
+        "split" | "split_with_sizes" => {
             let a = slot_view(slots, capsules, arg_index(node, 0)?)?;
-            let split_size = kw_usize(
-                node,
-                "split_size",
-                kw_usize(node, "split_size_or_sections", 1),
-            );
             let dim = kw_isize(node, "dim", 0);
-            slots.push(Slot::Tuple(kernels::tensor_ops::split(
-                &a, split_size, dim,
-            )?));
+            let sizes_opt = kw_usize_vec(node, "split_sizes")
+                .or_else(|| kw_usize_vec(node, "split_size"))
+                .or_else(|| kw_usize_vec(node, "split_size_or_sections"))
+                .or_else(|| kw_usize_vec(node, "sections"))
+                .or_else(|| {
+                    node.args.get(1).and_then(|arg| {
+                        arg.value.as_ref().and_then(|v| {
+                            v.as_array().map(|arr| {
+                                arr.iter()
+                                    .filter_map(|x| {
+                                        x.as_i64().and_then(|n| {
+                                            if n >= 0 {
+                                                Some(n as usize)
+                                            } else {
+                                                None
+                                            }
+                                        })
+                                    })
+                                    .collect::<Vec<usize>>()
+                            })
+                        })
+                    })
+                });
+
+            if let Some(sizes) = sizes_opt {
+                if !sizes.is_empty() {
+                    slots.push(Slot::Tuple(kernels::tensor_ops::split_with_sizes(
+                        &a, &sizes, dim,
+                    )?));
+                } else {
+                    let split_size = kw_usize(
+                        node,
+                        "split_size",
+                        kw_usize(node, "split_size_or_sections", 1),
+                    );
+                    slots.push(Slot::Tuple(kernels::tensor_ops::split(
+                        &a, split_size, dim,
+                    )?));
+                }
+            } else {
+                let split_size = kw_usize(
+                    node,
+                    "split_size",
+                    kw_usize(node, "split_size_or_sections", 1),
+                );
+                slots.push(Slot::Tuple(kernels::tensor_ops::split(
+                    &a, split_size, dim,
+                )?));
+            }
         }
         "vsplit" => {
             let a = slot_view(slots, capsules, arg_index(node, 0)?)?;

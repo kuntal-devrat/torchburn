@@ -1083,3 +1083,601 @@ pub fn threshold_backward(
     }
     Ok(out)
 }
+
+// ---------------------------------------------------------------------------
+// Binary Elementwise Activation Backward Helpers (SIMD + Rayon + Strided)
+// ---------------------------------------------------------------------------
+
+#[inline(always)]
+fn run_binary_f32_simd<
+    S: Fn(f32x8, f32x8) -> f32x8 + Sync + Send,
+    F: Fn(f32, f32) -> f32 + Sync + Send,
+>(
+    g_data: &[f32],
+    x_data: &[f32],
+    out_data: &mut [f32],
+    simd_op: S,
+    scalar_op: F,
+) {
+    let n = out_data.len();
+    if n >= PAR_CHUNK {
+        use rayon::prelude::*;
+        out_data
+            .par_chunks_mut(PAR_CHUNK)
+            .enumerate()
+            .for_each(|(ci, chunk)| {
+                let base = ci * PAR_CHUNK;
+                let g_slice = &g_data[base..base + chunk.len()];
+                let x_slice = &x_data[base..base + chunk.len()];
+                let n_simd = chunk.len() / 8;
+                for j in 0..n_simd {
+                    let offset = j * 8;
+                    let g_v = f32x8::from(
+                        *<&[f32; 8]>::try_from(&g_slice[offset..offset + 8]).unwrap(),
+                    );
+                    let x_v = f32x8::from(
+                        *<&[f32; 8]>::try_from(&x_slice[offset..offset + 8]).unwrap(),
+                    );
+                    let res = simd_op(g_v, x_v);
+                    chunk[offset..offset + 8].copy_from_slice(&res.to_array());
+                }
+                for j in (n_simd * 8)..chunk.len() {
+                    chunk[j] = scalar_op(g_slice[j], x_slice[j]);
+                }
+            });
+    } else {
+        let n_simd = n / 8;
+        for j in 0..n_simd {
+            let offset = j * 8;
+            let g_v =
+                f32x8::from(*<&[f32; 8]>::try_from(&g_data[offset..offset + 8]).unwrap());
+            let x_v =
+                f32x8::from(*<&[f32; 8]>::try_from(&x_data[offset..offset + 8]).unwrap());
+            let res = simd_op(g_v, x_v);
+            out_data[offset..offset + 8].copy_from_slice(&res.to_array());
+        }
+        for j in (n_simd * 8)..n {
+            out_data[j] = scalar_op(g_data[j], x_data[j]);
+        }
+    }
+}
+
+#[inline(always)]
+fn apply_binary_elementwise_f32<F: Fn(f32, f32) -> f32 + Sync + Send>(
+    g: &BorrowedTensor,
+    x: &BorrowedTensor,
+    out: &mut OwnedTensor,
+    f: F,
+) {
+    let g_data = unsafe { typed_slice::<f32>(g) };
+    let x_data = unsafe { typed_slice::<f32>(x) };
+    let n = out.elem_count();
+    let out_shape = out.shape.clone();
+    let out_data = unsafe { typed_mut_slice::<f32>(out) };
+    if g.is_contiguous() && x.is_contiguous() && g.shape == x.shape {
+        if n >= PAR_CHUNK {
+            use rayon::prelude::*;
+            out_data
+                .par_chunks_mut(PAR_CHUNK)
+                .enumerate()
+                .for_each(|(ci, chunk)| {
+                    let base = ci * PAR_CHUNK;
+                    let g_slice = &g_data[base..base + chunk.len()];
+                    let x_slice = &x_data[base..base + chunk.len()];
+                    for i in 0..chunk.len() {
+                        chunk[i] = f(g_slice[i], x_slice[i]);
+                    }
+                });
+        } else {
+            for i in 0..n {
+                out_data[i] = f(g_data[i], x_data[i]);
+            }
+        }
+    } else {
+        let rank = out_shape.len();
+        const MAX_RANK: usize = 8;
+        let mut coords = [0usize; MAX_RANK];
+        for i in 0..n {
+            let mut rem = i;
+            for d in (0..rank).rev() {
+                let dim_sz = out_shape[d].max(1) as usize;
+                coords[d] = rem % dim_sz;
+                rem /= dim_sz;
+            }
+            let mut gi = 0usize;
+            let g_rank = g.shape.len();
+            for d in 0..g_rank.min(MAX_RANK) {
+                let coord_d = if g_rank <= rank {
+                    let offset = rank - g_rank;
+                    coords[d + offset]
+                } else {
+                    coords[d]
+                };
+                if g.shape[d] > 1 {
+                    gi += (coord_d % (g.shape[d] as usize)) * g.strides[d] as usize;
+                }
+            }
+            let mut xi = 0usize;
+            let x_rank = x.shape.len();
+            for d in 0..x_rank.min(MAX_RANK) {
+                let coord_d = if x_rank <= rank {
+                    let offset = rank - x_rank;
+                    coords[d + offset]
+                } else {
+                    coords[d]
+                };
+                if x.shape[d] > 1 {
+                    xi += (coord_d % (x.shape[d] as usize)) * x.strides[d] as usize;
+                }
+            }
+            out_data[i] = f(g_data[gi], x_data[xi]);
+        }
+    }
+}
+
+#[inline(always)]
+fn apply_binary_elementwise_f64<F: Fn(f64, f64) -> f64 + Sync + Send>(
+    g: &BorrowedTensor,
+    x: &BorrowedTensor,
+    out: &mut OwnedTensor,
+    f: F,
+) {
+    let g_data = unsafe { typed_slice::<f64>(g) };
+    let x_data = unsafe { typed_slice::<f64>(x) };
+    let n = out.elem_count();
+    let out_shape = out.shape.clone();
+    let out_data = unsafe { typed_mut_slice::<f64>(out) };
+    if g.is_contiguous() && x.is_contiguous() && g.shape == x.shape {
+        if n >= PAR_CHUNK {
+            use rayon::prelude::*;
+            out_data
+                .par_chunks_mut(PAR_CHUNK)
+                .enumerate()
+                .for_each(|(ci, chunk)| {
+                    let base = ci * PAR_CHUNK;
+                    let g_slice = &g_data[base..base + chunk.len()];
+                    let x_slice = &x_data[base..base + chunk.len()];
+                    for i in 0..chunk.len() {
+                        chunk[i] = f(g_slice[i], x_slice[i]);
+                    }
+                });
+        } else {
+            for i in 0..n {
+                out_data[i] = f(g_data[i], x_data[i]);
+            }
+        }
+    } else {
+        let rank = out_shape.len();
+        const MAX_RANK: usize = 8;
+        let mut coords = [0usize; MAX_RANK];
+        for i in 0..n {
+            let mut rem = i;
+            for d in (0..rank).rev() {
+                let dim_sz = out_shape[d].max(1) as usize;
+                coords[d] = rem % dim_sz;
+                rem /= dim_sz;
+            }
+            let mut gi = 0usize;
+            let g_rank = g.shape.len();
+            for d in 0..g_rank.min(MAX_RANK) {
+                let coord_d = if g_rank <= rank {
+                    let offset = rank - g_rank;
+                    coords[d + offset]
+                } else {
+                    coords[d]
+                };
+                if g.shape[d] > 1 {
+                    gi += (coord_d % (g.shape[d] as usize)) * g.strides[d] as usize;
+                }
+            }
+            let mut xi = 0usize;
+            let x_rank = x.shape.len();
+            for d in 0..x_rank.min(MAX_RANK) {
+                let coord_d = if x_rank <= rank {
+                    let offset = rank - x_rank;
+                    coords[d + offset]
+                } else {
+                    coords[d]
+                };
+                if x.shape[d] > 1 {
+                    xi += (coord_d % (x.shape[d] as usize)) * x.strides[d] as usize;
+                }
+            }
+            out_data[i] = f(g_data[gi], x_data[xi]);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// GeLU Backward
+// ---------------------------------------------------------------------------
+
+#[inline(always)]
+pub fn gelu_backward_tanh_f32(g: f32, x: f32) -> f32 {
+    const C: f32 = 0.7978845608028654;
+    const B: f32 = 0.044715;
+    let x3 = x * x * x;
+    let inner = C * (x + B * x3);
+    let tanh_inner = inner.tanh();
+    let sech2 = 1.0 - tanh_inner * tanh_inner;
+    let d_inner = C * (1.0 + 3.0 * B * x * x);
+    g * (0.5 * (1.0 + tanh_inner) + 0.5 * x * sech2 * d_inner)
+}
+
+#[inline(always)]
+pub fn gelu_backward_tanh_f32x8(g: f32x8, x: f32x8) -> f32x8 {
+    let c = f32x8::splat(0.7978845608028654);
+    let b = f32x8::splat(0.044715);
+    let half = f32x8::splat(0.5);
+    let one = f32x8::splat(1.0);
+    let three = f32x8::splat(3.0);
+    let x2 = x * x;
+    let x3 = x2 * x;
+    let inner = c * (x + b * x3);
+    let tanh_inner = fast_tanh_f32x8(inner);
+    let sech2 = one - tanh_inner * tanh_inner;
+    let d_inner = c * (one + three * b * x2);
+    g * (half * (one + tanh_inner) + half * x * sech2 * d_inner)
+}
+
+#[inline(always)]
+pub fn gelu_backward_tanh_f64(g: f64, x: f64) -> f64 {
+    const C: f64 = 0.7978845608028654;
+    const B: f64 = 0.044715;
+    let x3 = x * x * x;
+    let inner = C * (x + B * x3);
+    let tanh_inner = inner.tanh();
+    let sech2 = 1.0 - tanh_inner * tanh_inner;
+    let d_inner = C * (1.0 + 3.0 * B * x * x);
+    g * (0.5 * (1.0 + tanh_inner) + 0.5 * x * sech2 * d_inner)
+}
+
+#[inline(always)]
+pub fn gelu_backward_exact_f32(g: f32, x: f32) -> f32 {
+    const INV_SQRT2: f32 = 0.7071067811865475;
+    const INV_SQRT_2PI: f32 = 0.3989422804014327;
+    let cdf = 0.5 * (1.0 + fast_erf_f32(x * INV_SQRT2));
+    let pdf = INV_SQRT_2PI * (-0.5 * x * x).exp();
+    g * (cdf + x * pdf)
+}
+
+#[inline(always)]
+pub fn gelu_backward_exact_f32x8(g: f32x8, x: f32x8) -> f32x8 {
+    let inv_sqrt2 = f32x8::splat(0.7071067811865475);
+    let inv_sqrt_2pi = f32x8::splat(0.3989422804014327);
+    let half = f32x8::splat(0.5);
+    let one = f32x8::splat(1.0);
+    let cdf = half * (one + fast_erf_f32x8(x * inv_sqrt2));
+    let pdf = inv_sqrt_2pi * fast_exp_f32x8(-half * x * x);
+    g * (cdf + x * pdf)
+}
+
+#[inline(always)]
+pub fn gelu_backward_exact_f64(g: f64, x: f64) -> f64 {
+    const INV_SQRT2: f64 = 0.7071067811865475;
+    const INV_SQRT_2PI: f64 = 0.3989422804014327;
+    let cdf = 0.5 * (1.0 + fast_erf_f32((x * INV_SQRT2) as f32) as f64);
+    let pdf = INV_SQRT_2PI * (-0.5 * x * x).exp();
+    g * (cdf + x * pdf)
+}
+
+pub fn gelu_backward(
+    grad: &BorrowedTensor,
+    input: &BorrowedTensor,
+    approximate: &str,
+) -> PyResult<OwnedTensor> {
+    if grad.dtype != input.dtype {
+        return Err(unsupported("gelu_backward dtype mismatch"));
+    }
+    let out_shape = crate::kernels::broadcast_shape(&grad.shape, &input.shape)?;
+    let mut out = OwnedTensor::new(grad.dtype, out_shape.clone());
+    let is_tanh = approximate == "tanh";
+
+    if grad.dtype == DType::F32
+        && grad.is_contiguous()
+        && input.is_contiguous()
+        && grad.shape == input.shape
+    {
+        let g_data = unsafe { typed_slice::<f32>(grad) };
+        let x_data = unsafe { typed_slice::<f32>(input) };
+        let out_data = unsafe { typed_mut_slice::<f32>(&mut out) };
+        if is_tanh {
+            run_binary_f32_simd(
+                g_data,
+                x_data,
+                out_data,
+                gelu_backward_tanh_f32x8,
+                gelu_backward_tanh_f32,
+            );
+        } else {
+            run_binary_f32_simd(
+                g_data,
+                x_data,
+                out_data,
+                gelu_backward_exact_f32x8,
+                gelu_backward_exact_f32,
+            );
+        }
+        return Ok(out);
+    }
+
+    match grad.dtype {
+        DType::F32 => {
+            if is_tanh {
+                apply_binary_elementwise_f32(grad, input, &mut out, gelu_backward_tanh_f32);
+            } else {
+                apply_binary_elementwise_f32(grad, input, &mut out, gelu_backward_exact_f32);
+            }
+        }
+        DType::F64 => {
+            if is_tanh {
+                apply_binary_elementwise_f64(grad, input, &mut out, gelu_backward_tanh_f64);
+            } else {
+                apply_binary_elementwise_f64(grad, input, &mut out, gelu_backward_exact_f64);
+            }
+        }
+        _ => return Err(unsupported("gelu_backward requires f32/f64")),
+    }
+    Ok(out)
+}
+
+// ---------------------------------------------------------------------------
+// SiLU Backward
+// ---------------------------------------------------------------------------
+
+#[inline(always)]
+pub fn silu_backward_f32(g: f32, x: f32) -> f32 {
+    let s = 1.0 / (1.0 + (-x).exp());
+    g * (s * (1.0 + x * (1.0 - s)))
+}
+
+#[inline(always)]
+pub fn silu_backward_f32x8(g: f32x8, x: f32x8) -> f32x8 {
+    let one = f32x8::splat(1.0);
+    let s = one / (one + fast_exp_f32x8(-x));
+    g * (s * (one + x * (one - s)))
+}
+
+#[inline(always)]
+pub fn silu_backward_f64(g: f64, x: f64) -> f64 {
+    let s = 1.0 / (1.0 + (-x).exp());
+    g * (s * (1.0 + x * (1.0 - s)))
+}
+
+pub fn silu_backward(
+    grad: &BorrowedTensor,
+    input: &BorrowedTensor,
+) -> PyResult<OwnedTensor> {
+    if grad.dtype != input.dtype {
+        return Err(unsupported("silu_backward dtype mismatch"));
+    }
+    let out_shape = crate::kernels::broadcast_shape(&grad.shape, &input.shape)?;
+    let mut out = OwnedTensor::new(grad.dtype, out_shape.clone());
+
+    if grad.dtype == DType::F32
+        && grad.is_contiguous()
+        && input.is_contiguous()
+        && grad.shape == input.shape
+    {
+        let g_data = unsafe { typed_slice::<f32>(grad) };
+        let x_data = unsafe { typed_slice::<f32>(input) };
+        let out_data = unsafe { typed_mut_slice::<f32>(&mut out) };
+        run_binary_f32_simd(
+            g_data,
+            x_data,
+            out_data,
+            silu_backward_f32x8,
+            silu_backward_f32,
+        );
+        return Ok(out);
+    }
+
+    match grad.dtype {
+        DType::F32 => {
+            apply_binary_elementwise_f32(grad, input, &mut out, silu_backward_f32);
+        }
+        DType::F64 => {
+            apply_binary_elementwise_f64(grad, input, &mut out, silu_backward_f64);
+        }
+        _ => return Err(unsupported("silu_backward requires f32/f64")),
+    }
+    Ok(out)
+}
+
+// ---------------------------------------------------------------------------
+// Sigmoid Backward (grad_output, output)
+// ---------------------------------------------------------------------------
+
+#[inline(always)]
+pub fn sigmoid_backward_f32(g: f32, y: f32) -> f32 {
+    g * y * (1.0 - y)
+}
+
+#[inline(always)]
+pub fn sigmoid_backward_f32x8(g: f32x8, y: f32x8) -> f32x8 {
+    let one = f32x8::splat(1.0);
+    g * y * (one - y)
+}
+
+#[inline(always)]
+pub fn sigmoid_backward_f64(g: f64, y: f64) -> f64 {
+    g * y * (1.0 - y)
+}
+
+pub fn sigmoid_backward(
+    grad: &BorrowedTensor,
+    output: &BorrowedTensor,
+) -> PyResult<OwnedTensor> {
+    if grad.dtype != output.dtype {
+        return Err(unsupported("sigmoid_backward dtype mismatch"));
+    }
+    let out_shape = crate::kernels::broadcast_shape(&grad.shape, &output.shape)?;
+    let mut out = OwnedTensor::new(grad.dtype, out_shape.clone());
+
+    if grad.dtype == DType::F32
+        && grad.is_contiguous()
+        && output.is_contiguous()
+        && grad.shape == output.shape
+    {
+        let g_data = unsafe { typed_slice::<f32>(grad) };
+        let y_data = unsafe { typed_slice::<f32>(output) };
+        let out_data = unsafe { typed_mut_slice::<f32>(&mut out) };
+        run_binary_f32_simd(
+            g_data,
+            y_data,
+            out_data,
+            sigmoid_backward_f32x8,
+            sigmoid_backward_f32,
+        );
+        return Ok(out);
+    }
+
+    match grad.dtype {
+        DType::F32 => {
+            apply_binary_elementwise_f32(grad, output, &mut out, sigmoid_backward_f32);
+        }
+        DType::F64 => {
+            apply_binary_elementwise_f64(grad, output, &mut out, sigmoid_backward_f64);
+        }
+        _ => return Err(unsupported("sigmoid_backward requires f32/f64")),
+    }
+    Ok(out)
+}
+
+// ---------------------------------------------------------------------------
+// Tanh Backward (grad_output, output)
+// ---------------------------------------------------------------------------
+
+#[inline(always)]
+pub fn tanh_backward_f32(g: f32, y: f32) -> f32 {
+    g * (1.0 - y * y)
+}
+
+#[inline(always)]
+pub fn tanh_backward_f32x8(g: f32x8, y: f32x8) -> f32x8 {
+    let one = f32x8::splat(1.0);
+    g * (one - y * y)
+}
+
+#[inline(always)]
+pub fn tanh_backward_f64(g: f64, y: f64) -> f64 {
+    g * (1.0 - y * y)
+}
+
+pub fn tanh_backward(
+    grad: &BorrowedTensor,
+    output: &BorrowedTensor,
+) -> PyResult<OwnedTensor> {
+    if grad.dtype != output.dtype {
+        return Err(unsupported("tanh_backward dtype mismatch"));
+    }
+    let out_shape = crate::kernels::broadcast_shape(&grad.shape, &output.shape)?;
+    let mut out = OwnedTensor::new(grad.dtype, out_shape.clone());
+
+    if grad.dtype == DType::F32
+        && grad.is_contiguous()
+        && output.is_contiguous()
+        && grad.shape == output.shape
+    {
+        let g_data = unsafe { typed_slice::<f32>(grad) };
+        let y_data = unsafe { typed_slice::<f32>(output) };
+        let out_data = unsafe { typed_mut_slice::<f32>(&mut out) };
+        run_binary_f32_simd(
+            g_data,
+            y_data,
+            out_data,
+            tanh_backward_f32x8,
+            tanh_backward_f32,
+        );
+        return Ok(out);
+    }
+
+    match grad.dtype {
+        DType::F32 => {
+            apply_binary_elementwise_f32(grad, output, &mut out, tanh_backward_f32);
+        }
+        DType::F64 => {
+            apply_binary_elementwise_f64(grad, output, &mut out, tanh_backward_f64);
+        }
+        _ => return Err(unsupported("tanh_backward requires f32/f64")),
+    }
+    Ok(out)
+}
+
+// ---------------------------------------------------------------------------
+// LeakyReLU Backward
+// ---------------------------------------------------------------------------
+
+#[inline(always)]
+pub fn leaky_relu_backward_f32(g: f32, x: f32, ns: f32) -> f32 {
+    if x > 0.0 {
+        g
+    } else {
+        g * ns
+    }
+}
+
+#[inline(always)]
+pub fn leaky_relu_backward_f32x8(g: f32x8, x: f32x8, ns: f32x8) -> f32x8 {
+    let zero = f32x8::splat(0.0);
+    let mask = x.cmp_gt(zero);
+    mask.blend(g, g * ns)
+}
+
+#[inline(always)]
+pub fn leaky_relu_backward_f64(g: f64, x: f64, ns: f64) -> f64 {
+    if x > 0.0 {
+        g
+    } else {
+        g * ns
+    }
+}
+
+pub fn leaky_relu_backward(
+    grad: &BorrowedTensor,
+    input: &BorrowedTensor,
+    negative_slope: f64,
+) -> PyResult<OwnedTensor> {
+    if grad.dtype != input.dtype {
+        return Err(unsupported("leaky_relu_backward dtype mismatch"));
+    }
+    let out_shape = crate::kernels::broadcast_shape(&grad.shape, &input.shape)?;
+    let mut out = OwnedTensor::new(grad.dtype, out_shape.clone());
+
+    if grad.dtype == DType::F32
+        && grad.is_contiguous()
+        && input.is_contiguous()
+        && grad.shape == input.shape
+    {
+        let g_data = unsafe { typed_slice::<f32>(grad) };
+        let x_data = unsafe { typed_slice::<f32>(input) };
+        let out_data = unsafe { typed_mut_slice::<f32>(&mut out) };
+        let ns_f32 = negative_slope as f32;
+        let ns_v = f32x8::splat(ns_f32);
+        run_binary_f32_simd(
+            g_data,
+            x_data,
+            out_data,
+            |gv, xv| leaky_relu_backward_f32x8(gv, xv, ns_v),
+            |g, x| leaky_relu_backward_f32(g, x, ns_f32),
+        );
+        return Ok(out);
+    }
+
+    match grad.dtype {
+        DType::F32 => {
+            let ns = negative_slope as f32;
+            apply_binary_elementwise_f32(grad, input, &mut out, |g, x| {
+                leaky_relu_backward_f32(g, x, ns)
+            });
+        }
+        DType::F64 => {
+            apply_binary_elementwise_f64(grad, input, &mut out, |g, x| {
+                leaky_relu_backward_f64(g, x, negative_slope)
+            });
+        }
+        _ => return Err(unsupported("leaky_relu_backward requires f32/f64")),
+    }
+    Ok(out)
+}
+

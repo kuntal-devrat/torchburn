@@ -136,14 +136,19 @@ pub(crate) fn try_dispatch(
                 return Err(unsupported("chunk: dim out of range"));
             }
             let dim_size = a.shape[normalized_dim as usize].max(0) as usize;
-            let chunk_size = dim_size / num_chunks.max(1);
-            let mut parts = Vec::with_capacity(num_chunks);
-            for i in 0..num_chunks {
+            let chunk_size = (dim_size + num_chunks - 1) / num_chunks;
+            let actual_chunks = if chunk_size == 0 {
+                1
+            } else {
+                num_chunks.min((dim_size + chunk_size - 1) / chunk_size)
+            };
+            let mut parts = Vec::with_capacity(actual_chunks);
+            for i in 0..actual_chunks {
                 let start = i * chunk_size;
-                let length = if i == num_chunks - 1 {
-                    dim_size - start
+                let length = if chunk_size == 0 {
+                    0
                 } else {
-                    chunk_size
+                    chunk_size.min(dim_size.saturating_sub(start))
                 };
                 parts.push(shape_ops::narrow(&a, dim, start, length)?);
             }
@@ -157,7 +162,7 @@ pub(crate) fn try_dispatch(
             let dim_size = a.shape[normalized_dim as usize] as usize;
             let mut parts = Vec::with_capacity(dim_size);
             for i in 0..dim_size {
-                parts.push(shape_ops::select(&a, dim, i)?);
+                parts.push(shape_ops::select(&a, dim, i as isize)?);
             }
             slots.push(Slot::Tuple(parts));
         }
@@ -218,30 +223,35 @@ pub(crate) fn try_dispatch(
         "select" => {
             let a = slot_view(slots, capsules, arg_index(node, 0)?)?;
             let dim = kw_isize(node, "dim", 0);
-            let index = kw_usize(node, "index", 0);
+            let index = kw_isize(node, "index", 0);
             slots.push(Slot::Owned(shape_ops::select(&a, dim, index)?));
         }
         "getitem" => {
             // getitem(tuple_slot, index) -> tuple_slot[index]
             let slot_idx = arg_index(node, 0)?;
             let elem = kw_usize(node, "index", 0);
-            let len = slots[slot_idx].tuple_len();
-            if len == 0 {
-                return Err(unsupported(&format!(
-                    "getitem: slot {slot_idx} is not a tuple"
-                )));
-            }
-            if elem >= len {
-                return Err(unsupported(&format!(
-                    "getitem: index {elem} out of range for tuple of len {len}"
-                )));
-            }
-            if let Slot::Tuple(elems) = &slots[slot_idx] {
-                slots.push(Slot::Owned(elems[elem].clone()));
-            } else {
-                return Err(unsupported(&format!(
-                    "getitem: slot {slot_idx} is not a tuple"
-                )));
+            match &slots[slot_idx] {
+                Slot::Tuple(elems) => {
+                    let len = elems.len();
+                    if elem >= len {
+                        return Err(unsupported(&format!(
+                            "getitem: index {elem} out of range for tuple of len {len}"
+                        )));
+                    }
+                    slots.push(Slot::Owned(elems[elem].clone()));
+                }
+                Slot::Owned(t) if elem == 0 => {
+                    slots.push(Slot::Owned(t.clone()));
+                }
+                Slot::Input(_) if elem == 0 => {
+                    let a = slot_view(slots, capsules, slot_idx)?;
+                    slots.push(Slot::Owned(shape_ops::to_contiguous(&a)?));
+                }
+                _ => {
+                    return Err(unsupported(&format!(
+                        "getitem: slot {slot_idx} is not a tuple or index {elem} != 0"
+                    )));
+                }
             }
         }
         "chunk_narrow" => {
@@ -263,12 +273,12 @@ pub(crate) fn try_dispatch(
                 return Err(unsupported("chunk_narrow: dim out of range"));
             }
             let dim_size = a.shape[normalized_dim as usize].max(0) as usize;
-            let chunk_size = dim_size / num_chunks.max(1);
+            let chunk_size = (dim_size + num_chunks - 1) / num_chunks;
             let start = chunk_index * chunk_size;
-            let length = if chunk_index == num_chunks - 1 {
-                dim_size - start // last chunk gets remainder
+            let length = if chunk_size == 0 || start >= dim_size {
+                0
             } else {
-                chunk_size
+                chunk_size.min(dim_size - start)
             };
             slots.push(Slot::Owned(shape_ops::narrow(&a, dim, start, length)?));
         }

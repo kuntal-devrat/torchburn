@@ -19,14 +19,19 @@ unsafe fn typed_mut_slice<T>(t: &mut OwnedTensor) -> &mut [T] {
 
 pub fn layer_norm(
     input: &BorrowedTensor,
-    weight: &BorrowedTensor,
-    bias: &BorrowedTensor,
+    weight: Option<&BorrowedTensor>,
+    bias: Option<&BorrowedTensor>,
     eps: f64,
 ) -> PyResult<OwnedTensor> {
-    if input.dtype != weight.dtype || input.dtype != bias.dtype {
-        return Err(unsupported(
-            "layer_norm: dtype mismatch between input, weight, bias",
-        ));
+    if let Some(w) = weight {
+        if input.dtype != w.dtype {
+            return Err(unsupported("layer_norm: dtype mismatch between input, weight"));
+        }
+    }
+    if let Some(b) = bias {
+        if input.dtype != b.dtype {
+            return Err(unsupported("layer_norm: dtype mismatch between input, bias"));
+        }
     }
 
     let _input_contig;
@@ -40,26 +45,29 @@ pub fn layer_norm(
 
     let shape = &input.shape;
     let rank = shape.len();
-    let normalized_dims = weight.shape.len(); // weight shape = normalized_shape
-    let normalized_size: usize = weight.shape.iter().map(|&d| d.max(0) as usize).product();
-
-    // The normalized dims are the last `normalized_dims` dims of input
-    if rank < normalized_dims {
-        return Err(unsupported("layer_norm: input rank < weight rank"));
-    }
-
-    let _batch_size: usize = shape[..rank - normalized_dims]
-        .iter()
-        .map(|&d| d.max(0) as usize)
-        .product();
+    let normalized_size: usize = if let Some(w) = weight {
+        let normalized_dims = w.shape.len();
+        if rank < normalized_dims {
+            return Err(unsupported("layer_norm: input rank < weight rank"));
+        }
+        w.shape.iter().map(|&d| d.max(0) as usize).product()
+    } else if let Some(b) = bias {
+        let normalized_dims = b.shape.len();
+        if rank < normalized_dims {
+            return Err(unsupported("layer_norm: input rank < bias rank"));
+        }
+        b.shape.iter().map(|&d| d.max(0) as usize).product()
+    } else {
+        shape.last().copied().unwrap_or(1).max(0) as usize
+    };
 
     let mut out = OwnedTensor::new(input.dtype, input.shape.clone());
 
     match input.dtype {
         DType::F32 => {
             let in_data = unsafe { typed_slice::<f32>(input) };
-            let w_data = unsafe { typed_slice::<f32>(weight) };
-            let b_data = unsafe { typed_slice::<f32>(bias) };
+            let w_data = weight.map(|w| unsafe { typed_slice::<f32>(w) });
+            let b_data = bias.map(|b| unsafe { typed_slice::<f32>(b) });
             let out_data = unsafe { typed_mut_slice::<f32>(&mut out) };
             let eps_f32 = eps as f32;
             let norm_f = normalized_size as f32;
@@ -84,14 +92,21 @@ pub fn layer_norm(
                     var /= norm_f;
                     let inv_std = 1.0 / (var + eps_f32).sqrt();
                     for i in 0..normalized_size {
-                        out_row[i] = (row_in[i] - mean) * inv_std * w_data[i] + b_data[i];
+                        let mut val = (row_in[i] - mean) * inv_std;
+                        if let Some(w) = w_data {
+                            val *= w[i];
+                        }
+                        if let Some(b) = b_data {
+                            val += b[i];
+                        }
+                        out_row[i] = val;
                     }
                 });
         }
         DType::F64 => {
             let in_data = unsafe { typed_slice::<f64>(input) };
-            let w_data = unsafe { typed_slice::<f64>(weight) };
-            let b_data = unsafe { typed_slice::<f64>(bias) };
+            let w_data = weight.map(|w| unsafe { typed_slice::<f64>(w) });
+            let b_data = bias.map(|b| unsafe { typed_slice::<f64>(b) });
             let out_data = unsafe { typed_mut_slice::<f64>(&mut out) };
             let norm_f = normalized_size as f64;
 
@@ -115,7 +130,14 @@ pub fn layer_norm(
                     var /= norm_f;
                     let inv_std = 1.0 / (var + eps).sqrt();
                     for i in 0..normalized_size {
-                        out_row[i] = (row_in[i] - mean) * inv_std * w_data[i] + b_data[i];
+                        let mut val = (row_in[i] - mean) * inv_std;
+                        if let Some(w) = w_data {
+                            val *= w[i];
+                        }
+                        if let Some(b) = b_data {
+                            val += b[i];
+                        }
+                        out_row[i] = val;
                     }
                 });
         }
@@ -139,15 +161,22 @@ pub fn layer_norm(
 
 pub fn batch_norm(
     input: &BorrowedTensor,
-    weight: &BorrowedTensor,
-    bias: &BorrowedTensor,
-    running_mean: &BorrowedTensor,
-    running_var: &BorrowedTensor,
+    weight: Option<&BorrowedTensor>,
+    bias: Option<&BorrowedTensor>,
+    running_mean: Option<&BorrowedTensor>,
+    running_var: Option<&BorrowedTensor>,
     eps: f64,
     training: bool,
 ) -> PyResult<OwnedTensor> {
-    if input.dtype != weight.dtype || input.dtype != bias.dtype {
-        return Err(unsupported("batch_norm: dtype mismatch"));
+    if let Some(w) = weight {
+        if input.dtype != w.dtype {
+            return Err(unsupported("batch_norm: dtype mismatch with weight"));
+        }
+    }
+    if let Some(b) = bias {
+        if input.dtype != b.dtype {
+            return Err(unsupported("batch_norm: dtype mismatch with bias"));
+        }
     }
 
     let shape = &input.shape;
@@ -167,16 +196,15 @@ pub fn batch_norm(
     match input.dtype {
         DType::F32 => {
             let in_data = unsafe { typed_slice::<f32>(input) };
-            let w_data = unsafe { typed_slice::<f32>(weight) };
-            let b_data = unsafe { typed_slice::<f32>(bias) };
-            let rm_data = unsafe { typed_slice::<f32>(running_mean) };
-            let rv_data = unsafe { typed_slice::<f32>(running_var) };
+            let w_data = weight.map(|w| unsafe { typed_slice::<f32>(w) });
+            let b_data = bias.map(|b| unsafe { typed_slice::<f32>(b) });
+            let rm_data = running_mean.map(|rm| unsafe { typed_slice::<f32>(rm) });
+            let rv_data = running_var.map(|rv| unsafe { typed_slice::<f32>(rv) });
             let out_data = unsafe { typed_mut_slice::<f32>(&mut out) };
             let eps_f32 = eps as f32;
 
             for ch in 0..c {
                 let mean = if training {
-                    // Compute batch mean for this channel
                     let mut sum = 0.0f32;
                     for i in 0..n {
                         for s in 0..spatial_size {
@@ -185,8 +213,10 @@ pub fn batch_norm(
                         }
                     }
                     sum / (n * spatial_size) as f32
+                } else if let Some(rm) = rm_data {
+                    rm[ch]
                 } else {
-                    rm_data[ch]
+                    0.0f32
                 };
 
                 let var = if training {
@@ -199,27 +229,31 @@ pub fn batch_norm(
                         }
                     }
                     sum / (n * spatial_size) as f32
+                } else if let Some(rv) = rv_data {
+                    rv[ch]
                 } else {
-                    rv_data[ch]
+                    1.0f32
                 };
 
                 let inv_std = 1.0 / (var + eps_f32).sqrt();
+                let w = w_data.map(|w| w[ch]).unwrap_or(1.0f32);
+                let b = b_data.map(|b| b[ch]).unwrap_or(0.0f32);
 
                 for i in 0..n {
                     for s in 0..spatial_size {
                         let idx = i * c * spatial_size + ch * spatial_size + s;
                         let normalized = (in_data[idx] - mean) * inv_std;
-                        out_data[idx] = normalized * w_data[ch] + b_data[ch];
+                        out_data[idx] = normalized * w + b;
                     }
                 }
             }
         }
         DType::F64 => {
             let in_data = unsafe { typed_slice::<f64>(input) };
-            let w_data = unsafe { typed_slice::<f64>(weight) };
-            let b_data = unsafe { typed_slice::<f64>(bias) };
-            let rm_data = unsafe { typed_slice::<f64>(running_mean) };
-            let rv_data = unsafe { typed_slice::<f64>(running_var) };
+            let w_data = weight.map(|w| unsafe { typed_slice::<f64>(w) });
+            let b_data = bias.map(|b| unsafe { typed_slice::<f64>(b) });
+            let rm_data = running_mean.map(|rm| unsafe { typed_slice::<f64>(rm) });
+            let rv_data = running_var.map(|rv| unsafe { typed_slice::<f64>(rv) });
             let out_data = unsafe { typed_mut_slice::<f64>(&mut out) };
 
             for ch in 0..c {
@@ -232,8 +266,10 @@ pub fn batch_norm(
                         }
                     }
                     sum / (n * spatial_size) as f64
+                } else if let Some(rm) = rm_data {
+                    rm[ch]
                 } else {
-                    rm_data[ch]
+                    0.0f64
                 };
 
                 let var = if training {
@@ -246,17 +282,21 @@ pub fn batch_norm(
                         }
                     }
                     sum / (n * spatial_size) as f64
+                } else if let Some(rv) = rv_data {
+                    rv[ch]
                 } else {
-                    rv_data[ch]
+                    1.0f64
                 };
 
                 let inv_std = 1.0 / (var + eps).sqrt();
+                let w = w_data.map(|w| w[ch]).unwrap_or(1.0f64);
+                let b = b_data.map(|b| b[ch]).unwrap_or(0.0f64);
 
                 for i in 0..n {
                     for s in 0..spatial_size {
                         let idx = i * c * spatial_size + ch * spatial_size + s;
                         let normalized = (in_data[idx] - mean) * inv_std;
-                        out_data[idx] = normalized * w_data[ch] + b_data[ch];
+                        out_data[idx] = normalized * w + b;
                     }
                 }
             }

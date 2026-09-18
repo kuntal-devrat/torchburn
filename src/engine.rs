@@ -41,7 +41,7 @@ pub mod helpers;
 
 pub(crate) use self::helpers::{
     arg_index, kw_bool, kw_f64, kw_f64_allow_inf, kw_i64, kw_i64_vec, kw_isize, kw_isize_vec,
-    kw_opt_dim, kw_opt_dims, kw_str, kw_usize, slot_view,
+    kw_opt_dim, kw_opt_dims, kw_str, kw_usize, kw_usize_vec, slot_view,
 };
 
 pub mod dispatch_op;
@@ -97,18 +97,19 @@ fn collect_outputs(
             (id, false, 0)
         } else if node_slot.contains_key(&(id >> 16)) {
             (id >> 16, true, (id & 0xFFFF) as usize)
-        } else if node_slot.contains_key(&(id & 0xFFFF)) {
-            (id & 0xFFFF, true, (id >> 16) as usize)
         } else {
             (id, false, 0)
         }
     };
 
     let mut ref_counts: HashMap<usize, usize> = HashMap::new();
+    let mut tuple_ref_counts: HashMap<(usize, usize), usize> = HashMap::new();
     for id in &payload.outputs {
-        let (effective_id, _, _) = parse_output_id(*id);
+        let (effective_id, use_tuple_elem, elem) = parse_output_id(*id);
         if let Some(&idx) = node_slot.get(&effective_id) {
             *ref_counts.entry(idx).or_insert(0) += 1;
+            let elem_idx = if use_tuple_elem { elem } else { 0 };
+            *tuple_ref_counts.entry((idx, elem_idx)).or_insert(0) += 1;
         }
     }
 
@@ -147,25 +148,34 @@ fn collect_outputs(
                 out.push(shape_ops::to_contiguous(&borrowed)?);
             }
             Slot::Tuple(elems) => {
-                if use_tuple_elem {
+                let target_elem = if use_tuple_elem {
                     if elem >= elems.len() {
                         return Err(unsupported(&format!(
                             "tuple node {effective_id}: element {elem} out of range (len={})",
                             elems.len()
                         )));
                     }
-                    out.push(std::mem::take(&mut elems[elem]));
+                    elem
                 } else if elems.len() == 1 {
-                    out.push(std::mem::take(&mut elems[0]));
-                } else if let Some(t) = elems.first_mut() {
-                    // Whole-tuple request on multi-output node (max/sort/topk):
-                    // return values (elem 0) for single-tensor callers (ops.py).
-                    // Explicit getitem encoding is used when indices are needed.
-                    out.push(std::mem::take(t));
+                    0
+                } else if !elems.is_empty() {
+                    0
                 } else {
                     return Err(unsupported(&format!(
                         "tuple node {effective_id} has no outputs"
                     )));
+                };
+
+                let remaining = tuple_ref_counts.get_mut(&(*slot_idx, target_elem));
+                if let Some(count) = remaining {
+                    if *count > 1 {
+                        *count -= 1;
+                        out.push(elems[target_elem].clone());
+                    } else {
+                        out.push(std::mem::take(&mut elems[target_elem]));
+                    }
+                } else {
+                    out.push(elems[target_elem].clone());
                 }
             }
             Slot::Input(_) => {
@@ -177,11 +187,22 @@ fn collect_outputs(
     }
     // Recycle all remaining intermediate slots back into the thread memory pool
     for slot in slots.iter_mut() {
-        if let Slot::Owned(t) = slot {
-            if !t.data.is_empty() {
-                let taken = std::mem::take(t);
-                crate::memory_pool::recycle_tensor(taken);
+        match slot {
+            Slot::Owned(t) => {
+                if !t.data.is_empty() {
+                    let taken = std::mem::take(t);
+                    crate::memory_pool::recycle_tensor(taken);
+                }
             }
+            Slot::Tuple(elems) => {
+                for t in elems.iter_mut() {
+                    if !t.data.is_empty() {
+                        let taken = std::mem::take(t);
+                        crate::memory_pool::recycle_tensor(taken);
+                    }
+                }
+            }
+            _ => {}
         }
     }
     Ok(out)
@@ -268,7 +289,19 @@ fn execute_step(
             }
 
             // 4) Get conv output and apply fused BN+ReLU in single pass.
+            if slots.is_empty() {
+                return Err(fusion::fusion_skip("conv_bn_relu: no conv output slot"));
+            }
             let conv_out_slot = slots.len() - 1;
+            // Verify the slot is an Owned tensor (not a Tuple or missing).
+            match &slots[conv_out_slot] {
+                Slot::Owned(_) => {}
+                _ => {
+                    return Err(fusion::fusion_skip(
+                        "conv_bn_relu: conv output is not an Owned tensor",
+                    ));
+                }
+            }
             let conv_view = slot_view(slots, capsules, conv_out_slot)?;
             let shape = conv_view.shape.clone();
             let n = shape[0] as usize;
@@ -295,12 +328,25 @@ fn execute_step(
             slots[conv_out_slot] = Slot::Owned(out);
         }
     }
-    debug_assert_eq!(
-        slots.len(),
-        out_slot + 1,
-        "each step pushes exactly one slot"
-    );
+    if slots.len() != out_slot + 1 {
+        return Err(unsupported(&format!(
+            "engine internal error: step did not produce expected slot count (expected {}, got {})",
+            out_slot + 1,
+            slots.len()
+        )));
+    }
     Ok(())
+}
+
+/// Cached fusion-disable flag. Probed once per process to avoid the
+/// per-call `GetEnvironmentVariable` lock contention on Windows.
+static NO_FUSION: OnceLock<bool> = OnceLock::new();
+
+#[inline(always)]
+fn no_fusion_enabled() -> bool {
+    *NO_FUSION.get_or_init(|| {
+        std::env::var("TORCHBURN_NO_FUSION").map_or(false, |v| v == "1" || v == "true")
+    })
 }
 
 /// Execute a payload with the native zero-copy engine, fusing contiguous
@@ -313,18 +359,33 @@ fn execute_step(
 pub fn execute_native(payload: &Payload, capsules: &[CapsuleRef]) -> PyResult<Vec<OwnedTensor>> {
     let base = payload.inputs.len();
 
-    // Plan fusion on a clone (the planner rewrites arg slots to group slots).
-    // TORCHBURN_NO_FUSION=1 skips the planner for benchmarking.
-    let mut nodes = payload.nodes.clone();
-    let no_fusion = std::env::var("TORCHBURN_NO_FUSION").map_or(false, |v| v == "1" || v == "true");
-    let mut fp = if no_fusion {
-        fusion::FusionPlan {
-            steps: (0..nodes.len()).map(|i| Step::Node(i)).collect(),
-            node_step: (0..nodes.len()).collect(),
+    // TORCHBURN_NO_FUSION=1 skips the planner and avoids cloning nodes entirely.
+    if no_fusion_enabled() {
+        let mut slots = init_input_slots(payload, capsules)?;
+        let mut node_slot: HashMap<u32, usize> = HashMap::with_capacity(payload.nodes.len());
+        for node in &payload.nodes {
+            dispatch_node(node, &mut slots, capsules)?;
+            node_slot.insert(node.id, slots.len() - 1);
         }
-    } else {
-        fusion::plan(&nodes, base)
-    };
+        return collect_outputs(payload, &node_slot, &mut slots);
+    }
+
+    let mut fp = fusion::plan(&payload.nodes, base);
+
+    // If no nodes can be fused, run the unfused path directly on &payload.nodes (zero clone).
+    if fp.steps.len() == payload.nodes.len() {
+        let mut slots = init_input_slots(payload, capsules)?;
+        let mut node_slot: HashMap<u32, usize> = HashMap::with_capacity(payload.nodes.len());
+        for node in &payload.nodes {
+            dispatch_node(node, &mut slots, capsules)?;
+            node_slot.insert(node.id, slots.len() - 1);
+        }
+        return collect_outputs(payload, &node_slot, &mut slots);
+    }
+
+    // Plan fusion on a clone (the planner rewrites arg slots to group slots).
+    // Defer the clone until after the unsafe_output check so we don't waste
+    // the allocation when fusion will be skipped anyway.
 
     // Safety: a fused chain's *intermediate* members don't materialise their
     // own output (the group output is the chain's last node).  If the caller
@@ -336,23 +397,27 @@ pub fn execute_native(payload: &Payload, capsules: &[CapsuleRef]) -> PyResult<Ve
     for step in &fp.steps {
         if let Step::Chain(plan) = step {
             for &m in &plan.nodes[..plan.nodes.len() - 1] {
-                if requested.contains(&nodes[m].id) {
+                if requested.contains(&payload.nodes[m].id) {
                     unsafe_output = true;
                 }
             }
         }
         if let Step::Gemm { linear, .. } = step {
-            if requested.contains(&nodes[*linear].id) {
+            if requested.contains(&payload.nodes[*linear].id) {
                 unsafe_output = true;
             }
         }
         if let Step::ConvBnRelu(spec) = step {
-            if requested.contains(&nodes[spec.conv].id) || requested.contains(&nodes[spec.bn].id) {
+            if requested.contains(&payload.nodes[spec.conv].id) || requested.contains(&payload.nodes[spec.bn].id) {
                 unsafe_output = true;
             }
         }
     }
     if !unsafe_output {
+        // Clone nodes only when we're actually going to use the fused path
+        // (avoids a wasted allocation when unsafe_output skips fusion).
+        let mut nodes = payload.nodes.clone();
+
         // Remap slots to steps. Value::Array remap only for slot-list targets
         // (cat/stack); shape constants must NOT be rewritten.
         fn is_slot_list_target(t: &str) -> bool {
@@ -492,12 +557,13 @@ pub fn engine_name() -> &'static str {
 #[cfg(feature = "burn")]
 fn engine_is_burn() -> bool {
     // If the user explicitly chose CPU, respect that choice:
-    if matches!(std::env::var("TORCHBURN_DEVICE").as_deref(), Ok("cpu"))
-        || matches!(
-            std::env::var("TORCHBURN_ENGINE").as_deref(),
-            Ok("native_cpu") | Ok("cpu")
-        )
-    {
+    if matches!(
+        std::env::var("TORCHBURN_DEVICE").as_deref(),
+        Ok("cpu") | Ok("native_cpu")
+    ) || matches!(
+        std::env::var("TORCHBURN_ENGINE").as_deref(),
+        Ok("native_cpu") | Ok("cpu")
+    ) {
         return false;
     }
     // Accept explicit Burn / WGPU engine selections:
@@ -510,7 +576,14 @@ fn engine_is_burn() -> bool {
     // Accept explicit GPU device selection:
     if matches!(
         std::env::var("TORCHBURN_DEVICE").as_deref(),
-        Ok("gpu") | Ok("wgpu") | Ok("cuda")
+        Ok("gpu")
+            | Ok("wgpu")
+            | Ok("igpu")
+            | Ok("dgpu")
+            | Ok("vulkan")
+            | Ok("dx12")
+            | Ok("metal")
+            | Ok("auto")
     ) {
         #[cfg(feature = "burn-wgpu")]
         {

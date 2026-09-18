@@ -80,6 +80,9 @@ _REDUCE_POSITIONAL_KWARGS: dict[str, list[str]] = {
     "softmax": ["dim"],
     "log_softmax": ["dim"],
     "threshold_backward": ["threshold"],
+    "gelu_backward": ["approximate"],
+    "leaky_relu_backward": ["negative_slope", "is_result"],
+    "embedding_backward": ["num_weights", "padding_idx", "scale_grad_by_freq"],
     "clamp": ["min", "max"],
     "clamp_min": ["min"],
     "clamp_max": ["max"],
@@ -133,6 +136,8 @@ _TRANSPOSE_POSITIONAL_KWARGS: dict[str, list[str]] = {
     "linalg_solve_ex": ["check_errors"],
     "linalg_lu_factor": ["pivot"],
     "logsumexp": ["dim", "keepdim"],
+    "chunk": ["chunks", "dim"],
+    "unbind": ["dim"],
 }
 
 # Phase 4: SDPA positional consts.  Export graphs emit either
@@ -159,6 +164,12 @@ _TRANSFORMER_POSITIONAL_KWARGS: dict[str, list[str]] = {
 # (bool consts would also trip the runtime bool-const guard in _compiled.py).
 _FIXED_TENSOR_ARITY: dict[str, int] = {
     "embedding": 2,  # (weight, indices)
+    "embedding_backward": 2,  # (grad_output, indices)
+    "gelu_backward": 2,  # (grad_output, input)
+    "silu_backward": 2,  # (grad_output, input)
+    "sigmoid_backward": 2,  # (grad_output, output)
+    "tanh_backward": 2,  # (grad_output, output)
+    "leaky_relu_backward": 2,  # (grad_output, input)
 }
 
 # Phase 4: loss positional consts (reduction enum, ignore_index, beta).
@@ -169,6 +180,11 @@ _LOSS_POSITIONAL_KWARGS: dict[str, list[str]] = {
     "binary_cross_entropy": ["reduction"],
     # aten.scalar_tensor(-inf, dtype=...) — the value is a positional const.
     "scalar_tensor": ["value"],
+}
+
+
+_NORM_POSITIONAL_KWARGS: dict[str, list[str]] = {
+    "layer_norm": ["normalized_shape", "eps"],
 }
 
 
@@ -190,6 +206,7 @@ def _promote_positional_args_to_kwargs(
         or _LOSS_POSITIONAL_KWARGS.get(op)
         or _TRANSPOSE_POSITIONAL_KWARGS.get(op)
         or _TRANSFORMER_POSITIONAL_KWARGS.get(op)
+        or _NORM_POSITIONAL_KWARGS.get(op)
     )
     if names is None:
         return args, existing_kwargs
@@ -414,6 +431,11 @@ def parse_graph(
                 mask_node = n.kwargs.get("attn_mask")
                 if isinstance(mask_node, torch.fx.Node):
                     args.append(_ref(mask_node, node_id))
+            if mapped is not None and mapped[0] == "layer_norm":
+                for kw_name in ("weight", "bias"):
+                    kw_node = n.kwargs.get(kw_name)
+                    if isinstance(kw_node, torch.fx.Node):
+                        args.append(_ref(kw_node, node_id))
             # to_dtype: method calls like x.float() / x.double() / x.to(dtype)
             # don't carry a serializable dtype kwarg.  Infer from the method name.
             _DTYPE_FROM_METHOD: dict[str, str] | None = None
@@ -518,7 +540,7 @@ def parse_graph(
                             "fx_op": n.op,
                             "fx_target": target_key,
                             "args": args,
-                            "fx_args": [_ref(a, node_id) for a in n.args],
+                            "fx_args": [_ref_eager(a, node_id) for a in n.args],
                             # kwargs feeds the JSON signature payload: keep only
                             # serializable primitives (device/dtype objects and
                             # tensor refs live in fx_kwargs for eager replay).
@@ -536,7 +558,7 @@ def parse_graph(
                             "fx_op": n.op,
                             "fx_target": target_key,
                             "args": args,
-                            "fx_args": [_ref(a, node_id) for a in n.args],
+                            "fx_args": [_ref_eager(a, node_id) for a in n.args],
                             "kwargs": extracted_kwargs,
                             "fx_kwargs": _ref_kwargs(n.kwargs, node_id),
                         }
@@ -552,7 +574,7 @@ def parse_graph(
                         "fx_op": n.op,
                         "fx_target": target_key,
                         "args": args,
-                        "fx_args": [_ref(a, node_id) for a in n.args],
+                        "fx_args": [_ref_eager(a, node_id) for a in n.args],
                         "kwargs": _extract_kwargs(n.kwargs, node_id),
                         "fx_kwargs": _ref_kwargs(n.kwargs, node_id),
                     }
@@ -692,6 +714,19 @@ def _ref(a: Any, node_id: dict[torch.fx.Node, int]) -> Any:
     return {"kind": "const", "value": None}
 
 
+def _ref_eager(a: Any, node_id: dict[torch.fx.Node, int]) -> Any:
+    """Serialize an FX node argument for eager fallback replay, preserving Python types (dtypes, etc.)."""
+    if isinstance(a, torch.fx.Node):
+        if a.op == "placeholder":
+            return {"kind": "input", "index": node_id[a]}
+        if a.op == "get_attr":
+            return {"kind": "attr", "index": node_id[a]}
+        return {"kind": "node", "index": node_id[a]}
+    if isinstance(a, (list, tuple)):
+        return type(a)(_ref_eager(x, node_id) for x in a)
+    return a
+
+
 def _sanitize_nonfinite(obj: Any) -> Any:
     """Replace non-finite floats with string tokens.
 
@@ -713,18 +748,20 @@ def _sanitize_nonfinite(obj: Any) -> Any:
 def payload_json(plan: dict[str, Any]) -> str:
     """Canonical JSON form of a plan (sorted keys => stable BLAKE3 signature).
 
-    ``fx_kwargs`` holds the ORIGINAL FX kwargs (may contain non-serializable
-    values like torch.dtype) for eager fallback replay; it is excluded from
-    the signature payload because it is never sent to the Rust engine.
+    ``fx_kwargs`` and ``fx_args`` hold the ORIGINAL FX args/kwargs (may contain
+    non-serializable values like torch.dtype) for eager fallback replay; they are
+    excluded from the signature payload because they are never sent to the Rust engine.
     """
-    # Deep-copy so we never mutate the live plan (which carries fx_kwargs).
+    # Deep-copy so we never mutate the live plan (which carries fx_kwargs/fx_args).
     nodes = []
     for node in plan.get("nodes", []):
         copy = dict(node)
         copy.pop("fx_kwargs", None)
+        copy.pop("fx_args", None)
         nodes.append(copy)
     sig = dict(plan)
     sig.pop("fx_kwargs", None)
+    sig.pop("fx_args", None)
     sig["nodes"] = nodes
     sig = _sanitize_nonfinite(sig)
     return json.dumps(sig, sort_keys=True, separators=(",", ":"))

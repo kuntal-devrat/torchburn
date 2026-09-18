@@ -22,9 +22,9 @@ struct RMSNormParams {
 @group(0) @binding(2) var<storage, read_write> y:      array<vec4<f32>>;
 @group(0) @binding(3) var<uniform>             params: RMSNormParams;
 
-// One slot per subgroup (max subgroup size = 128; typical = 32 or 64).
-// 64 / 32 = 2 subgroups at minimum; 64 / 64 = 1 on AMD RDNA / Apple M-series.
-var<workgroup> sg_partial: array<f32, 2>;
+// B5 fix: sized for worst case 8-lane subgroups (64/8 = 8 subgroups).
+// Previous value of 2 caused OOB on GPUs with 16-lane subgroups (64/16 = 4).
+var<workgroup> sg_partial: array<f32, 8>;
 var<workgroup> s_inv_rms:  f32;
 
 @compute @workgroup_size(64)

@@ -13,26 +13,67 @@ pub(crate) fn try_dispatch(
         // Phase 2: norm
         "layer_norm" => {
             let input = slot_view(slots, capsules, arg_index(node, 0)?)?;
-            let weight = slot_view(slots, capsules, arg_index(node, 1)?)?;
-            let bias = slot_view(slots, capsules, arg_index(node, 2)?)?;
+            let weight = if node.args.len() > 1 {
+                arg_index(node, 1)
+                    .ok()
+                    .and_then(|idx| slot_view(slots, capsules, idx).ok())
+            } else {
+                None
+            };
+            let bias = if node.args.len() > 2 {
+                arg_index(node, 2)
+                    .ok()
+                    .and_then(|idx| slot_view(slots, capsules, idx).ok())
+            } else {
+                None
+            };
             let eps = kw_f64(node, "eps", 1e-5);
-            slots.push(Slot::Owned(norm::layer_norm(&input, &weight, &bias, eps)?));
+            slots.push(Slot::Owned(norm::layer_norm(
+                &input,
+                weight.as_ref(),
+                bias.as_ref(),
+                eps,
+            )?));
         }
         "batch_norm" => {
             // torch signature: batch_norm(x, running_mean, running_var, weight, bias, ...)
             let input = slot_view(slots, capsules, arg_index(node, 0)?)?;
-            let running_mean = slot_view(slots, capsules, arg_index(node, 1)?)?;
-            let running_var = slot_view(slots, capsules, arg_index(node, 2)?)?;
-            let weight = slot_view(slots, capsules, arg_index(node, 3)?)?;
-            let bias = slot_view(slots, capsules, arg_index(node, 4)?)?;
+            let running_mean = if node.args.len() > 1 {
+                arg_index(node, 1)
+                    .ok()
+                    .and_then(|idx| slot_view(slots, capsules, idx).ok())
+            } else {
+                None
+            };
+            let running_var = if node.args.len() > 2 {
+                arg_index(node, 2)
+                    .ok()
+                    .and_then(|idx| slot_view(slots, capsules, idx).ok())
+            } else {
+                None
+            };
+            let weight = if node.args.len() > 3 {
+                arg_index(node, 3)
+                    .ok()
+                    .and_then(|idx| slot_view(slots, capsules, idx).ok())
+            } else {
+                None
+            };
+            let bias = if node.args.len() > 4 {
+                arg_index(node, 4)
+                    .ok()
+                    .and_then(|idx| slot_view(slots, capsules, idx).ok())
+            } else {
+                None
+            };
             let eps = kw_f64(node, "eps", 1e-5);
             let training = kw_bool(node, "training", false);
             slots.push(Slot::Owned(norm::batch_norm(
                 &input,
-                &weight,
-                &bias,
-                &running_mean,
-                &running_var,
+                weight.as_ref(),
+                bias.as_ref(),
+                running_mean.as_ref(),
+                running_var.as_ref(),
                 eps,
                 training,
             )?));

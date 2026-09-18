@@ -7,6 +7,7 @@
 
 mod decoder;
 
-/// Sampling entry point, exposed publicly for benches/parity tests.
-pub use decoder::sample_logits;
+/// Sampling entry point, exposed publicly for benches/parity tests and WGPU backend.
+#[allow(unused_imports)]
+pub use decoder::{apply_repetition_penalty, sample_logits};
 pub(crate) use decoder::RustQwenDecoder;

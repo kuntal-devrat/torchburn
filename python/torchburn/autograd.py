@@ -71,36 +71,107 @@ class _Tape:
         return len(self.ops)
 
 
-# Global tape instance
-_tape = _Tape()
-_enabled = False
+# Thread-local storage for autograd tape and enabled flag
+_local = threading.local()
+
+
+def _get_tape() -> _Tape:
+    tape = getattr(_local, "tape", None)
+    if tape is None:
+        tape = _Tape()
+        _local.tape = tape
+    return tape
+
+
+class _TapeProxy:
+    """Thread-local proxy to _Tape preserving backward compatibility."""
+
+    @property
+    def ops(self):
+        return _get_tape().ops
+
+    def record(self, *args, **kwargs):
+        return _get_tape().record(*args, **kwargs)
+
+    def clear(self):
+        return _get_tape().clear()
+
+    def __len__(self):
+        return len(_get_tape())
+
+    def __iter__(self):
+        return iter(_get_tape().ops)
+
+
+class _EnabledProxy:
+    """Thread-local boolean proxy for _enabled."""
+
+    def __bool__(self):
+        return bool(getattr(_local, "enabled", False))
+
+    def __repr__(self):
+        return str(bool(self))
+
+
+# Thread-local proxies (accessible globally, isolated per thread)
+_tape = _TapeProxy()
+_enabled = _EnabledProxy()
 
 
 def enable():
-    global _enabled
-    _enabled = True
+    _local.enabled = True
 
 
 def disable():
-    global _enabled
-    _enabled = False
+    _local.enabled = False
 
 
 def is_enabled():
-    return _enabled
+    return getattr(_local, "enabled", False)
 
 
 def reset():
-    global _tape, _enabled
-    _tape.clear()
-    _enabled = False
+    _get_tape().clear()
+    _local.enabled = False
     Tensor._registry.clear()
     # NOTE: do NOT reset _next_id — existing Tensor objects keep their IDs,
     # and new tensors must not collide with them.
 
 
 def tape_len():
-    return len(_tape)
+    return len(_get_tape())
+
+
+class _RegistryProxy:
+    """Thread-local proxy to WeakValueDictionary for tensor registration."""
+
+    def _get_dict(self) -> weakref.WeakValueDictionary:
+        d = getattr(_local, "registry", None)
+        if d is None:
+            d = weakref.WeakValueDictionary()
+            _local.registry = d
+        return d
+
+    def __getitem__(self, item):
+        return self._get_dict()[item]
+
+    def __setitem__(self, key, value):
+        self._get_dict()[key] = value
+
+    def __contains__(self, item):
+        return item in self._get_dict()
+
+    def get(self, key, default=None):
+        return self._get_dict().get(key, default)
+
+    def pop(self, key, default=None):
+        return self._get_dict().pop(key, default)
+
+    def clear(self):
+        self._get_dict().clear()
+
+    def __len__(self):
+        return len(self._get_dict())
 
 
 # ---------------------------------------------------------------------------
@@ -110,7 +181,7 @@ def tape_len():
 class Tensor:
     """Differentiable tensor wrapping a torch.Tensor."""
 
-    _registry: weakref.WeakValueDictionary = weakref.WeakValueDictionary()  # type: ignore
+    _registry = _RegistryProxy()
     _lock = threading.Lock()
     _next_id: int = 0
 
@@ -123,12 +194,14 @@ class Tensor:
         with Tensor._lock:
             self._id: int = Tensor._next_id
             Tensor._next_id += 1
-            if requires_grad:
-                Tensor._registry[self._id] = self
+        if requires_grad:
+            Tensor._registry[self._id] = self
 
     def __del__(self):
         try:
-            Tensor._registry.pop(self._id, None)
+            reg = getattr(Tensor, "_registry", None)
+            if reg is not None:
+                reg.pop(self._id, None)
         except Exception:
             pass
 
@@ -354,12 +427,15 @@ def _backward_batch(grad_output: torch.Tensor, output_id: int) -> dict[int, torc
         saved_shapes_per_entry.append([d.shape for d in entry.saved_data])
         input_ids_per_entry.append(entry.input_ids)
 
-        # Clone + pad saved data to capsules
+        # Ensure contiguous data for capsules without redundant copies
         saved_padded = []
         for d in entry.saved_data:
-            c = d.detach().contiguous().clone()
+            c = d.detach()
+            if not c.is_contiguous():
+                c = c.contiguous()
             if torch.is_floating_point(c):
-                c = c.float()
+                if c.dtype != torch.float32:
+                    c = c.float()
             elif entry.target not in need_int_ops:
                 c = c.float()
             if c.dim() == 0:
@@ -370,8 +446,13 @@ def _backward_batch(grad_output: torch.Tensor, output_id: int) -> dict[int, torc
     if not targets:
         return {}
 
-    # Convert initial upstream to capsule
-    up_cap = grad_output.detach().contiguous().clone().float().__dlpack__()
+    # Convert initial upstream to capsule without redundant copies
+    up = grad_output.detach()
+    if not up.is_contiguous():
+        up = up.contiguous()
+    if up.is_floating_point() and up.dtype != torch.float32:
+        up = up.float()
+    up_cap = up.__dlpack__()
 
     # Convert saved_shapes to list of lists of ints for Rust
     saved_shapes_lists = [[list(s) for s in entry_shapes]

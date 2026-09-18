@@ -32,7 +32,8 @@ def quantize_weight_int8(w: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         w_q: torch.Tensor of dtype torch.int8 (1-byte storage), shape (N, K)
         scales: torch.Tensor of dtype torch.float32, shape (N,)
     """
-    assert w.ndim == 2, f"Expected 2D weight, got {w.shape}"
+    if w.ndim != 2:
+        raise ValueError(f"Expected 2D weight, got {w.shape}")
     w_cap = torch.to_dlpack(w.detach().float().contiguous())
     qw_cap, qs_cap = _native.quantize_linear_int8(w_cap)
     return torch.from_dlpack(qw_cap), torch.from_dlpack(qs_cap)
@@ -40,7 +41,8 @@ def quantize_weight_int8(w: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
 
 def quantize_weight_int4(w: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
     """Quantize 2D weight matrix (N, K) to symmetric INT4 packed into bytes with per-channel scale (N,)."""
-    assert w.ndim == 2, f"Expected 2D weight, got {w.shape}"
+    if w.ndim != 2:
+        raise ValueError(f"Expected 2D weight, got {w.shape}")
     w_cap = torch.to_dlpack(w.detach().float().contiguous())
     qw_cap, qs_cap = _native.quantize_linear_int4(w_cap)
     return torch.from_dlpack(qw_cap), torch.from_dlpack(qs_cap)
@@ -64,7 +66,8 @@ def quantize_weight_int4_grouped(
     """
     orig_device = weight.device
     N, K = weight.shape
-    assert K % group_size == 0, f"K={K} must be divisible by group_size={group_size}"
+    if K % group_size != 0:
+        raise ValueError(f"K={K} must be divisible by group_size={group_size}")
     num_groups = K // group_size
     packed_cols = (K + 1) // 2
 
@@ -124,7 +127,8 @@ def quantize_weight_int4_grouped_v2(
     weight stream so the GEMV reads one sequential 34-byte block per group.
     """
     N, K = weight.shape
-    assert K % group_size == 0, f"K={K} must be divisible by group_size={group_size}"
+    if K % group_size != 0:
+        raise ValueError(f"K={K} must be divisible by group_size={group_size}")
     num_groups = K // group_size
 
     packed, scales = quantize_weight_int4_grouped(weight, group_size=group_size, chunk_size=chunk_size)
@@ -658,62 +662,7 @@ def create_wgpu_qwen_decoder(model: nn.Module, max_seq_len: int = 2048) -> Any:
     return decoder
 
 
-def create_cuda_qwen_decoder(model: nn.Module, max_seq_len: int = 2048) -> Any:
-    """Instantiate a CudaQwenDecoder for NVIDIA dGPUs (requires ``--features cuda``)."""
-    from . import _torchburn as _native
 
-    if not hasattr(_native, "CudaQwenDecoder"):
-        raise RuntimeError(
-            "CudaQwenDecoder requires torchburn compiled with the 'cuda' feature."
-        )
-
-    embed_tokens_cap = torch.to_dlpack(model.embed_tokens.weight.detach().cpu().contiguous().float())
-    final_norm_cap = torch.to_dlpack(model.norm.weight.detach().cpu().contiguous().float())
-    lm_head_w_cap = torch.to_dlpack(model.lm_head.qweight.detach().cpu().contiguous())
-    lm_head_s_cap = torch.to_dlpack(model.lm_head.scales.detach().cpu().contiguous().float())
-
-    layers_caps = []
-    for layer in model.layers:
-        in_norm = torch.to_dlpack(layer.input_layernorm.weight.detach().cpu().contiguous().float())
-        qkv_w = torch.to_dlpack(layer.self_attn.qkv_proj.qweight.detach().cpu().contiguous())
-        qkv_s = torch.to_dlpack(layer.self_attn.qkv_proj.scales.detach().cpu().contiguous().float())
-        o_w = torch.to_dlpack(layer.self_attn.o_proj.qweight.detach().cpu().contiguous())
-        o_s = torch.to_dlpack(layer.self_attn.o_proj.scales.detach().cpu().contiguous().float())
-        post_norm = torch.to_dlpack(layer.post_attention_layernorm.weight.detach().cpu().contiguous().float())
-        gate_w = torch.to_dlpack(layer.mlp.gate_proj.qweight.detach().cpu().contiguous())
-        gate_s = torch.to_dlpack(layer.mlp.gate_proj.scales.detach().cpu().contiguous().float())
-        up_w = torch.to_dlpack(layer.mlp.up_proj.qweight.detach().cpu().contiguous())
-        up_s = torch.to_dlpack(layer.mlp.up_proj.scales.detach().cpu().contiguous().float())
-        down_w = torch.to_dlpack(layer.mlp.down_proj.qweight.detach().cpu().contiguous())
-        down_s = torch.to_dlpack(layer.mlp.down_proj.scales.detach().cpu().contiguous().float())
-
-        caps = [
-            in_norm, qkv_w, qkv_s, o_w, o_s, post_norm,
-            gate_w, gate_s, up_w, up_s, down_w, down_s,
-        ]
-        if hasattr(layer.self_attn.qkv_proj, "bias") and layer.self_attn.qkv_proj.bias is not None:
-            caps.append(torch.to_dlpack(layer.self_attn.qkv_proj.bias.detach().cpu().contiguous().float()))
-        layers_caps.append(caps)
-
-    cfg = model.config
-    decoder = _native.CudaQwenDecoder(
-        embed_tokens_cap,
-        layers_caps,
-        final_norm_cap,
-        lm_head_w_cap,
-        lm_head_s_cap,
-        len(model.layers),
-        cfg.hidden_size,
-        cfg.intermediate_size,
-        cfg.num_attention_heads,
-        cfg.num_key_value_heads,
-        cfg.head_dim,
-        64,
-        cfg.rms_norm_eps,
-        max_seq_len,
-        cfg.rope_theta,
-    )
-    return decoder
 
 
 class QuantizedLinear(nn.Module):
@@ -783,9 +732,14 @@ class QuantizedLinear(nn.Module):
         # never changes results, only which engine computes them. When the GPU
         # adapter cannot be initialized we also fall back to the CPU kernel
         # instead of crashing mid-forward.
-        gpu_preferred = self.backend == "igpu" or os.environ.get(
-            "TORCHBURN_DEVICE", ""
-        ).lower() in ("gpu", "igpu", "vulkan")
+        dev_env = os.environ.get("TORCHBURN_DEVICE", "").strip().lower()
+        if dev_env in ("cpu", "native_cpu"):
+            gpu_preferred = False
+        else:
+            gpu_preferred = (
+                self.backend in ("gpu", "igpu", "dgpu", "wgpu", "burn-wgpu", "vulkan", "dx12", "metal")
+                or dev_env in ("gpu", "igpu", "dgpu", "wgpu", "burn-wgpu", "vulkan", "dx12", "metal")
+            )
         m = 1 if x.dim() <= 1 else _flattened_rows(x.shape)
 
         if gpu_preferred and m == 1:

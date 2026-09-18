@@ -120,7 +120,7 @@ pub fn transformer_encoder_layer_fwd(
 
     // Pre-norm: layer-norm before attention.
     let pre = if norm_first {
-        crate::nn::norm::layer_norm(src, nw1, nb1, eps)?
+        crate::nn::norm::layer_norm(src, Some(nw1), Some(nb1), eps)?
     } else {
         crate::shape_ops::to_contiguous(src)?
     };
@@ -145,9 +145,9 @@ pub fn transformer_encoder_layer_fwd(
 
     // Layer-norm before FFN: norm_first -> norm2, post-norm -> norm1.
     let ffn_in = if norm_first {
-        crate::nn::norm::layer_norm(&r1.as_view(), nw2, nb2, eps)?
+        crate::nn::norm::layer_norm(&r1.as_view(), Some(nw2), Some(nb2), eps)?
     } else {
-        crate::nn::norm::layer_norm(&r1.as_view(), nw1, nb1, eps)?
+        crate::nn::norm::layer_norm(&r1.as_view(), Some(nw1), Some(nb1), eps)?
     };
 
     // FFN: linear1 -> gelu/relu -> linear2.
@@ -164,7 +164,7 @@ pub fn transformer_encoder_layer_fwd(
     if norm_first {
         Ok(out)
     } else {
-        crate::nn::norm::layer_norm(&out.as_view(), nw2, nb2, eps)
+        crate::nn::norm::layer_norm(&out.as_view(), Some(nw2), Some(nb2), eps)
     }
 }
 

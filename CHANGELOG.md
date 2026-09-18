@@ -7,7 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.6.3] - 2026-09-09
+## [0.6.4] - 2026-09-18
+
+### Added
+- **Native Backward Activation Kernels**: SIMD-vectorized AVX2/FMA and Rayon parallel backward kernels for `gelu_backward` (exact and tanh), `silu_backward`, `sigmoid_backward`, `tanh_backward`, and `leaky_relu_backward` with full `f32` and `f64` support.
+- **Native Embedding Backward**: Column-parallel Rayon scatter-add to eliminate concurrent write conflicts and provide deterministic gradient updates with frequency scaling.
+- **BatchNorm Legit Dynamo Support**: Mapped `aten._native_batch_norm_legit_functional.default`, `aten._native_batch_norm_legit.default`, and `.no_stats` into native execution.
+- **DLPack Explicit Strides Preservation**: Extended `ManagedBuffer` and `DLManagedTensor` capsules with arbitrary non-contiguous strides support.
+- **WGPU Device-Loss Recovery**: Added `is_device_lost()` and `mark_device_lost()` flags hooked into uncaptured error callbacks for GPU resets/TDR.
+- **Memory Pool High-Water Mark Tracking**: Atomic `GLOBAL_PEAK_CACHED_WORDS` tracking exposed via `torchburn.memory_pool_stats()`.
+
+### Fixed
+- **Split-K GEMV Reduction Dirty Memory Corruption**: Ensured output buffer is zero-filled prior to partial sum accumulation in split-K GEMV, resolving MLP training numerical divergence.
+- **Embedding Backward Unindexed Row Zeroing**: Initialized gradient tensor using zeroed memory to prevent stale pool data retention.
+- **Memory Pool Zero-Word Underflow**: Guarded `bucket_index()` when `words == 0`.
+- **WGPU Zero-Panic Init**: Replaced panicking `block_on` with graceful CPU fallback on adapter/device timeout.
+- **Environment Variable Lock Contention**: Cached `TORCHBURN_NO_FUSION` in `OnceLock<bool>` to eliminate Windows process-lock contention during multi-threaded `torch.compile`.
+- **Rayon Thread Pool Configuration**: Configured `RAYON_NUM_THREADS` dynamically from CLI `--threads` before engine initialization.
+- **WGPU Staging Buffer Reallocation**: Mutated readback logits in place to avoid 608 KB vector clone per token.
 
 ### Added
 - **Multi-ISA CPU Tiers**: Added `NeonSve` and `NeonSve2` tiers to microarchitecture dispatch (now 10 tiers total).

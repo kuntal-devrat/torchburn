@@ -1444,6 +1444,14 @@ pub fn var(
 // ---------------------------------------------------------------------------
 
 pub fn cumsum(a: &BorrowedTensor, dim: isize) -> PyResult<OwnedTensor> {
+    let _contig;
+    let a = if !a.is_contiguous() {
+        _contig = crate::shape_ops::to_contiguous(a)?;
+        BorrowedTensor::from_owned(&_contig)
+    } else {
+        a.clone()
+    };
+    let a = &a;
     let d = norm_dim(dim, a.shape.len());
     let mut out = OwnedTensor::new(a.dtype, a.shape.clone());
 
@@ -1756,6 +1764,14 @@ pub fn prod(a: &BorrowedTensor, dim: Option<isize>, keepdim: bool) -> PyResult<O
 // ---------------------------------------------------------------------------
 
 pub fn norm(a: &BorrowedTensor, dim: Option<isize>, keepdim: bool) -> PyResult<OwnedTensor> {
+    let _contig;
+    let a = if !a.is_contiguous() {
+        _contig = crate::shape_ops::to_contiguous(a)?;
+        BorrowedTensor::from_owned(&_contig)
+    } else {
+        a.clone()
+    };
+    let a = &a;
     // L2 norm: sqrt(sum(x^2))
     let squared = match a.dtype {
         DType::F32 => {
@@ -1831,6 +1847,14 @@ pub fn p_norm(
     dim: Option<isize>,
     keepdim: bool,
 ) -> PyResult<OwnedTensor> {
+    let _contig;
+    let a = if !a.is_contiguous() {
+        _contig = crate::shape_ops::to_contiguous(a)?;
+        BorrowedTensor::from_owned(&_contig)
+    } else {
+        a.clone()
+    };
+    let a = &a;
     // Handle special cases
     if (p - 1.0).abs() < 1e-9 {
         // L1 norm: sum(|x|)

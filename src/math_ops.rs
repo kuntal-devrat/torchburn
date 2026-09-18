@@ -664,6 +664,22 @@ pub fn cos(a: &BorrowedTensor) -> PyResult<OwnedTensor> {
     }
 }
 
+pub fn tan(a: &BorrowedTensor) -> PyResult<OwnedTensor> {
+    match a.dtype {
+        DType::F32 => unary_f32(a, |x| x.tan()),
+        DType::F64 => unary_f64(a, |x| x.tan()),
+        DType::I64
+        | DType::I32
+        | DType::I8
+        | DType::U8
+        | DType::Bool
+        | DType::F16
+        | DType::BF16 => {
+            return Err(unsupported("this kernel only supports f32/f64 tensors"));
+        }
+    }
+}
+
 pub fn round(a: &BorrowedTensor) -> PyResult<OwnedTensor> {
     match a.dtype {
         DType::F32 => unary_f32(a, |x: f32| {

@@ -980,15 +980,22 @@ pub fn run_chain(
     let out_shape = shapes[plan.exprs.len() - 1].clone();
     let out_n = elem_count(&out_shape);
 
+    let out_shape_rt = out_shape.clone();
+    let mut out = OwnedTensor::new(dtype, out_shape);
+    if out_n == 0 {
+        return Ok(out);
+    }
+
     // 3) Broadcast maps for each leaf against the output shape.
     let mut leaves: Vec<LeafInfo> = Vec::with_capacity(leaf_slots.len());
     for (slot, shape) in leaf_slots.iter().zip(leaf_shapes.iter()) {
-        let map = if *shape == out_shape {
+        let view = crate::engine::slot_view(slots, capsules, *slot)?;
+        let map = if *shape == out_shape_rt && view.is_contiguous() {
             LeafMap::Identity
         } else if elem_count(shape) == 1 {
             LeafMap::Scalar
         } else {
-            match broadcast_strides(&out_shape, shape) {
+            match broadcast_strides(&out_shape_rt, shape) {
                 Some(strides) => LeafMap::General { strides },
                 None => return Err(fusion_skip("chain leaf not broadcast-compatible")),
             }
@@ -1026,8 +1033,6 @@ pub fn run_chain(
         })
         .collect();
 
-    let out_shape_rt = out_shape.clone();
-    let mut out = OwnedTensor::new(dtype, out_shape);
     match dtype {
         // f32 chains whose leaves are contiguous/scalar and whose ops are all
         // lane-wise (add/sub/mul/div/relu/abs/neg) get the 8-wide lane pass:

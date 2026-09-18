@@ -110,3 +110,139 @@ class TestBurnLinalg:
         p = _linalg_payload("bmm", [a, b], 2)
         with pytest.raises(RuntimeError, match="TB_UNSUPPORTED"):
             _run(p, [a, b])
+
+    def test_conv2d_burn(self):
+        x = torch.randn(2, 3, 8, 8)
+        w = torch.randn(4, 3, 3, 3)
+        b = torch.randn(4)
+        payload = {
+            "inputs": [_spec(x), _spec(w), _spec(b)],
+            "nodes": [{
+                "id": 0,
+                "target": "conv2d",
+                "args": [{"kind": "slot", "index": 0}, {"kind": "slot", "index": 1}, {"kind": "slot", "index": 2}],
+                "kwargs": {"stride": [1, 1], "padding": [1, 1], "dilation": [1, 1], "groups": 1},
+            }],
+            "outputs": [0],
+        }
+        got = _run(payload, [x, w, b])[0]
+        ref = F.conv2d(x, w, b, stride=1, padding=1)
+        assert torch.allclose(got, ref, atol=1e-4)
+
+    def test_conv_transpose2d_burn(self):
+        x = torch.randn(2, 4, 8, 8)
+        w = torch.randn(4, 8, 3, 3)
+        b = torch.randn(8)
+        payload = {
+            "inputs": [_spec(x), _spec(w), _spec(b)],
+            "nodes": [{
+                "id": 0,
+                "target": "conv_transpose2d",
+                "args": [{"kind": "slot", "index": 0}, {"kind": "slot", "index": 1}, {"kind": "slot", "index": 2}],
+                "kwargs": {"stride": [2, 2], "padding": [1, 1], "output_padding": [1, 1], "dilation": [1, 1], "groups": 1},
+            }],
+            "outputs": [0],
+        }
+        got = _run(payload, [x, w, b])[0]
+        ref = F.conv_transpose2d(x, w, b, stride=2, padding=1, output_padding=1)
+        assert torch.allclose(got, ref, atol=1e-4)
+
+    def test_max_pool2d_burn(self):
+        x = torch.randn(2, 3, 8, 8)
+        payload = {
+            "inputs": [_spec(x)],
+            "nodes": [{
+                "id": 0,
+                "target": "max_pool2d",
+                "args": [{"kind": "slot", "index": 0}],
+                "kwargs": {"kernel_size": [2, 2], "stride": [2, 2], "padding": [0, 0], "dilation": [1, 1]},
+            }],
+            "outputs": [0],
+        }
+        got = _run(payload, [x])[0]
+        ref = F.max_pool2d(x, 2, 2)
+        assert torch.allclose(got, ref, atol=1e-4)
+
+    def test_avg_pool2d_burn(self):
+        x = torch.randn(2, 3, 8, 8)
+        payload = {
+            "inputs": [_spec(x)],
+            "nodes": [{
+                "id": 0,
+                "target": "avg_pool2d",
+                "args": [{"kind": "slot", "index": 0}],
+                "kwargs": {"kernel_size": [2, 2], "stride": [2, 2], "padding": [0, 0], "count_include_pad": True},
+            }],
+            "outputs": [0],
+        }
+        got = _run(payload, [x])[0]
+        ref = F.avg_pool2d(x, 2, 2)
+        assert torch.allclose(got, ref, atol=1e-4)
+
+    def test_adaptive_avg_pool2d_burn(self):
+        x = torch.randn(2, 3, 8, 8)
+        payload = {
+            "inputs": [_spec(x)],
+            "nodes": [{
+                "id": 0,
+                "target": "adaptive_avg_pool2d",
+                "args": [{"kind": "slot", "index": 0}],
+                "kwargs": {"output_size": [1, 1]},
+            }],
+            "outputs": [0],
+        }
+        got = _run(payload, [x])[0]
+        ref = F.adaptive_avg_pool2d(x, (1, 1))
+        assert torch.allclose(got, ref, atol=1e-4)
+
+    def test_rms_norm_burn(self):
+        x = torch.randn(4, 16)
+        w = torch.randn(16)
+        payload = {
+            "inputs": [_spec(x), _spec(w)],
+            "nodes": [{
+                "id": 0,
+                "target": "rms_norm",
+                "args": [{"kind": "slot", "index": 0}, {"kind": "slot", "index": 1}],
+                "kwargs": {"eps": 1e-5},
+            }],
+            "outputs": [0],
+        }
+        got = _run(payload, [x, w])[0]
+        variance = x.pow(2).mean(-1, keepdim=True)
+        ref = x * torch.rsqrt(variance + 1e-5) * w
+        assert torch.allclose(got, ref, atol=1e-4)
+
+    def test_layer_norm_burn(self):
+        x = torch.randn(4, 16)
+        w = torch.randn(16)
+        b = torch.randn(16)
+        payload = {
+            "inputs": [_spec(x), _spec(w), _spec(b)],
+            "nodes": [{
+                "id": 0,
+                "target": "layer_norm",
+                "args": [{"kind": "slot", "index": 0}, {"kind": "slot", "index": 1}, {"kind": "slot", "index": 2}],
+                "kwargs": {"eps": 1e-5},
+            }],
+            "outputs": [0],
+        }
+        got = _run(payload, [x, w, b])[0]
+        ref = F.layer_norm(x, (16,), w, b)
+        assert torch.allclose(got, ref, atol=1e-4)
+
+    def test_tan_burn(self):
+        x = torch.randn(4, 8)
+        payload = {
+            "inputs": [_spec(x)],
+            "nodes": [{
+                "id": 0,
+                "target": "tan",
+                "args": [{"kind": "slot", "index": 0}],
+                "kwargs": {},
+            }],
+            "outputs": [0],
+        }
+        got = _run(payload, [x])[0]
+        ref = torch.tan(x)
+        assert torch.allclose(got, ref, atol=1e-4)

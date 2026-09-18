@@ -377,6 +377,9 @@ fn conv1d_f32(
 
     let (s, p, d) = (stride as usize, padding, dilation as usize);
     let plane_elems = cout * out_l;
+    if plane_elems == 0 || out_data.is_empty() {
+        return Ok(out);
+    }
     use rayon::prelude::*;
     out_data
         .par_chunks_mut(plane_elems)
@@ -452,6 +455,9 @@ fn conv1d_f64(
 
     let (s, p, d) = (stride as usize, padding, dilation as usize);
     let plane_elems = cout * out_l;
+    if plane_elems == 0 || out_data.is_empty() {
+        return Ok(out);
+    }
     use rayon::prelude::*;
     out_data
         .par_chunks_mut(plane_elems)
@@ -693,6 +699,9 @@ fn conv_transpose2d_f32(
     let (ph, pw) = (padding.0, padding.1);
     let (dh, dw) = (dilation.0 as usize, dilation.1 as usize);
     let plane_elems = cout * out_h * out_w;
+    if plane_elems == 0 || out_data.is_empty() {
+        return Ok(out);
+    }
 
     use rayon::prelude::*;
     // Scatter approach: for each input position and kernel tap, add the
@@ -808,6 +817,9 @@ fn conv_transpose2d_f64(
     let (ph, pw) = (padding.0, padding.1);
     let (dh, dw) = (dilation.0 as usize, dilation.1 as usize);
     let plane_elems = cout * out_h * out_w;
+    if plane_elems == 0 || out_data.is_empty() {
+        return Ok(out);
+    }
 
     use rayon::prelude::*;
     out_data

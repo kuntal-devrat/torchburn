@@ -35,13 +35,13 @@ fn main(
     // For head_dim=128: 32 vec4s, each thread handles ~0-1 vec4s (strided).
     // For head_dim=64: 16 vec4s, each thread handles a fraction.
     let total_vec4 = head_dim_vec4;
-    let vec4s_per_pass = (total_vec4 + 63u) / 64u; // ceil division
+    let vec4s_per_pass = min((total_vec4 + 63u) / 64u, 4u); // ceil division, clamped to array capacity
 
     let kv_head_base4 = kv_h * params.max_seq_len * head_dim_vec4;
     let q_base4 = q_h * head_dim_vec4;
 
     // Load q values for this thread's slice(s)
-    var q_val: array<vec4<f32>, 2>;
+    var q_val: array<vec4<f32>, 4>;
     var q_count: u32 = 0u;
     for (var i = 0u; i < vec4s_per_pass; i = i + 1u) {
         let idx = tid + i * 64u;
@@ -55,7 +55,7 @@ fn main(
     var l = 0.0;
 
     // Accumulators for output (one per vec4 this thread owns)
-    var acc_v: array<vec4<f32>, 2>;
+    var acc_v: array<vec4<f32>, 4>;
     var acc_count: u32 = 0u;
     for (var i = 0u; i < vec4s_per_pass; i = i + 1u) {
         let idx = tid + i * 64u;

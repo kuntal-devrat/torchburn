@@ -26,15 +26,176 @@ use crate::dlpack::{self, dtype_from_spec, unsupported, BorrowedTensor, DType, O
 use crate::engine::{self, Node, Payload};
 use burn::backend::NdArray;
 use burn::tensor::activation::{
-    leaky_relu, log_softmax, mish, sigmoid, silu, softmax, softplus, tanh,
+    leaky_relu, log_softmax, mish, relu, sigmoid, silu, softmax, softplus, tanh,
 };
 use burn::tensor::backend::Backend as BurnBackend;
+use burn::tensor::module::{adaptive_avg_pool2d, avg_pool2d, conv2d, conv_transpose2d, max_pool2d};
+use burn::tensor::ops::{ConvOptions, ConvTransposeOptions};
 use burn::tensor::{Tensor, TensorData};
 use pyo3::prelude::*;
 use pyo3::types::PyCapsule;
 
+trait Conv2dOp<B: BurnBackend, const R: usize> {
+    fn do_conv2d(
+        self,
+        weight: Tensor<B, R>,
+        bias: Option<Tensor<B, R>>,
+        options: ConvOptions<2>,
+    ) -> PyResult<Tensor<B, R>>;
+
+    fn do_conv_transpose2d(
+        self,
+        weight: Tensor<B, R>,
+        bias: Option<Tensor<B, R>>,
+        options: ConvTransposeOptions<2>,
+    ) -> PyResult<Tensor<B, R>>;
+
+    fn do_max_pool2d(
+        self,
+        kernel_size: [usize; 2],
+        stride: [usize; 2],
+        padding: [usize; 2],
+        dilation: [usize; 2],
+    ) -> PyResult<Tensor<B, R>>;
+
+    fn do_avg_pool2d(
+        self,
+        kernel_size: [usize; 2],
+        stride: [usize; 2],
+        padding: [usize; 2],
+        count_include_pad: bool,
+    ) -> PyResult<Tensor<B, R>>;
+
+    fn do_adaptive_avg_pool2d(self, output_size: [usize; 2]) -> PyResult<Tensor<B, R>>;
+}
+
+macro_rules! impl_conv2d_unsupported {
+    ($rank:literal) => {
+        impl<B: BurnBackend<FloatElem = f32>> Conv2dOp<B, $rank> for Tensor<B, $rank> {
+            fn do_conv2d(
+                self,
+                _weight: Tensor<B, $rank>,
+                _bias: Option<Tensor<B, $rank>>,
+                _options: ConvOptions<2>,
+            ) -> PyResult<Tensor<B, $rank>> {
+                Err(unsupported(concat!(
+                    "burn engine: 2D convolution requires rank 4, got rank ",
+                    stringify!($rank)
+                )))
+            }
+
+            fn do_conv_transpose2d(
+                self,
+                _weight: Tensor<B, $rank>,
+                _bias: Option<Tensor<B, $rank>>,
+                _options: ConvTransposeOptions<2>,
+            ) -> PyResult<Tensor<B, $rank>> {
+                Err(unsupported(concat!(
+                    "burn engine: 2D transposed convolution requires rank 4, got rank ",
+                    stringify!($rank)
+                )))
+            }
+
+            fn do_max_pool2d(
+                self,
+                _kernel_size: [usize; 2],
+                _stride: [usize; 2],
+                _padding: [usize; 2],
+                _dilation: [usize; 2],
+            ) -> PyResult<Tensor<B, $rank>> {
+                Err(unsupported(concat!(
+                    "burn engine: 2D pooling requires rank 4, got rank ",
+                    stringify!($rank)
+                )))
+            }
+
+            fn do_avg_pool2d(
+                self,
+                _kernel_size: [usize; 2],
+                _stride: [usize; 2],
+                _padding: [usize; 2],
+                _count_include_pad: bool,
+            ) -> PyResult<Tensor<B, $rank>> {
+                Err(unsupported(concat!(
+                    "burn engine: 2D pooling requires rank 4, got rank ",
+                    stringify!($rank)
+                )))
+            }
+
+            fn do_adaptive_avg_pool2d(
+                self,
+                _output_size: [usize; 2],
+            ) -> PyResult<Tensor<B, $rank>> {
+                Err(unsupported(concat!(
+                    "burn engine: 2D adaptive pooling requires rank 4, got rank ",
+                    stringify!($rank)
+                )))
+            }
+        }
+    };
+}
+
+impl_conv2d_unsupported!(1);
+impl_conv2d_unsupported!(2);
+impl_conv2d_unsupported!(3);
+
+impl<B: BurnBackend<FloatElem = f32>> Conv2dOp<B, 4> for Tensor<B, 4> {
+    fn do_conv2d(
+        self,
+        weight: Tensor<B, 4>,
+        bias: Option<Tensor<B, 4>>,
+        options: ConvOptions<2>,
+    ) -> PyResult<Tensor<B, 4>> {
+        let b1 = bias.map(|b| b.flatten(0, 3));
+        Ok(conv2d(self, weight, b1, options))
+    }
+
+    fn do_conv_transpose2d(
+        self,
+        weight: Tensor<B, 4>,
+        bias: Option<Tensor<B, 4>>,
+        options: ConvTransposeOptions<2>,
+    ) -> PyResult<Tensor<B, 4>> {
+        let b1 = bias.map(|b| b.flatten(0, 3));
+        Ok(conv_transpose2d(self, weight, b1, options))
+    }
+
+    fn do_max_pool2d(
+        self,
+        kernel_size: [usize; 2],
+        stride: [usize; 2],
+        padding: [usize; 2],
+        dilation: [usize; 2],
+    ) -> PyResult<Tensor<B, 4>> {
+        Ok(max_pool2d(self, kernel_size, stride, padding, dilation))
+    }
+
+    fn do_avg_pool2d(
+        self,
+        kernel_size: [usize; 2],
+        stride: [usize; 2],
+        padding: [usize; 2],
+        count_include_pad: bool,
+    ) -> PyResult<Tensor<B, 4>> {
+        Ok(avg_pool2d(
+            self,
+            kernel_size,
+            stride,
+            padding,
+            count_include_pad,
+        ))
+    }
+
+    fn do_adaptive_avg_pool2d(self, output_size: [usize; 2]) -> PyResult<Tensor<B, 4>> {
+        Ok(adaptive_avg_pool2d(self, output_size))
+    }
+}
+
 /// Read all capsule inputs into contiguous f32 buffers.
-fn read_inputs(payload: &Payload, capsules: &[Bound<'_, PyCapsule>]) -> PyResult<Vec<Vec<f32>>> {
+fn read_inputs(
+    payload: &Payload,
+    capsules: &[Bound<'_, PyCapsule>],
+) -> PyResult<(Vec<Vec<f32>>, DType)> {
     if payload.inputs.len() != capsules.len() {
         return Err(unsupported(&format!(
             "payload declares {} inputs but {} capsules were passed",
@@ -43,6 +204,7 @@ fn read_inputs(payload: &Payload, capsules: &[Bound<'_, PyCapsule>]) -> PyResult
         )));
     }
     let mut inputs = Vec::with_capacity(capsules.len());
+    let mut target_dtype = DType::F32;
     for (i, cap) in capsules.iter().enumerate() {
         let t = BorrowedTensor::from_capsule(cap)?;
         let want = dtype_from_spec(&payload.inputs[i].dtype).ok_or_else(|| {
@@ -64,9 +226,6 @@ fn read_inputs(payload: &Payload, capsules: &[Bound<'_, PyCapsule>]) -> PyResult
                 t.shape, payload.inputs[i].shape
             )));
         }
-        if t.dtype != DType::F32 {
-            return Err(unsupported("burn engine currently supports f32 only"));
-        }
         if !t.is_contiguous() {
             return Err(unsupported("burn engine requires contiguous inputs"));
         }
@@ -76,11 +235,35 @@ fn read_inputs(payload: &Payload, capsules: &[Bound<'_, PyCapsule>]) -> PyResult
                 "burn engine does not support empty tensors; fallback to native",
             ));
         }
-        // SAFETY: the DLPack buffer is alive for this call and holds n f32s.
-        let slice = unsafe { std::slice::from_raw_parts(t.data as *const f32, n) };
-        inputs.push(slice.to_vec());
+
+        match t.dtype {
+            DType::F32 => {
+                // SAFETY: the DLPack buffer is alive for this call and holds n f32s.
+                let slice = unsafe { std::slice::from_raw_parts(t.data as *const f32, n) };
+                inputs.push(slice.to_vec());
+            }
+            DType::F16 => {
+                if target_dtype == DType::F32 {
+                    target_dtype = DType::F16;
+                }
+                let slice = unsafe { std::slice::from_raw_parts(t.data as *const half::f16, n) };
+                inputs.push(slice.iter().map(|v| v.to_f32()).collect());
+            }
+            DType::BF16 => {
+                if target_dtype == DType::F32 {
+                    target_dtype = DType::BF16;
+                }
+                let slice = unsafe { std::slice::from_raw_parts(t.data as *const half::bf16, n) };
+                inputs.push(slice.iter().map(|v| v.to_f32()).collect());
+            }
+            _ => {
+                return Err(unsupported(
+                    "burn engine currently supports f32, f16, and bf16 only; fallback to native",
+                ));
+            }
+        }
     }
-    Ok(inputs)
+    Ok((inputs, target_dtype))
 }
 
 /// Normalize a dim (handle negatives) to [0, R).
@@ -98,9 +281,11 @@ fn norm_dim(dim: isize, rank: usize) -> PyResult<usize> {
 fn run_rank<B, const R: usize>(
     payload: &Payload,
     inputs: Vec<Vec<f32>>,
+    target_dtype: DType,
 ) -> PyResult<Vec<OwnedTensor>>
 where
     B: BurnBackend<FloatElem = f32>,
+    Tensor<B, R>: Conv2dOp<B, R>,
 {
     let mut env: Vec<Option<Tensor<B, R>>> = Vec::with_capacity(payload.nodes.len() + inputs.len());
     // Original rank of every env slot (inputs as declared; node outputs are R).
@@ -181,12 +366,14 @@ where
         let values = data
             .to_vec::<f32>()
             .map_err(|_| unsupported("burn engine: could not read output data"))?;
-        out.push(owned_from_values(values, shape));
+        out.push(owned_from_values_dtype(values, shape, target_dtype));
     }
     drop(env);
     drop(node_slot);
     drop(ref_counts);
-    B::sync(&device);
+    // NOTE: B::sync(&device) removed — into_data() above already synchronizes
+    // the backend (reads GPU data back to CPU).  The explicit sync was adding
+    // ~0.5–2 ms of redundant fence latency per execute_plan call.
     Ok(out)
 }
 
@@ -217,14 +404,16 @@ where
     if !compatible {
         return Err(unsupported("burn engine: incompatible broadcast shapes"));
     }
-    let mut a_out = a.clone();
-    let mut b_out = b.clone();
-    if a.shape().dims::<R>() != target {
-        a_out = a.clone().expand(target);
-    }
-    if b.shape().dims::<R>() != target {
-        b_out = b.clone().expand(target);
-    }
+    let a_out = if da == target {
+        a.clone()
+    } else {
+        a.clone().expand(target)
+    };
+    let b_out = if db == target {
+        b.clone()
+    } else {
+        b.clone().expand(target)
+    };
     Ok((a_out, b_out))
 }
 
@@ -235,6 +424,7 @@ fn run_node<B, const R: usize>(
 ) -> PyResult<Tensor<B, R>>
 where
     B: BurnBackend<FloatElem = f32>,
+    Tensor<B, R>: Conv2dOp<B, R>,
 {
     let arg = |pos: usize| -> PyResult<usize> {
         node.args.get(pos).and_then(|a| a.index).ok_or_else(|| {
@@ -267,6 +457,25 @@ where
             .and_then(|v| v.as_i64())
             .map(|v| v as isize)
             .unwrap_or(default)
+    };
+    let kw_2d = |key: &str, default: [usize; 2]| -> [usize; 2] {
+        if let Some(arr) = node.kwargs.get(key).and_then(|v| v.as_array()) {
+            if arr.len() == 1 {
+                let v = arr[0].as_i64().unwrap_or(default[0] as i64) as usize;
+                [v, v]
+            } else if arr.len() >= 2 {
+                [
+                    arr[0].as_i64().unwrap_or(default[0] as i64) as usize,
+                    arr[1].as_i64().unwrap_or(default[1] as i64) as usize,
+                ]
+            } else {
+                default
+            }
+        } else if let Some(v) = node.kwargs.get(key).and_then(|v| v.as_i64()) {
+            [v as usize, v as usize]
+        } else {
+            default
+        }
     };
 
     match node.target.as_str() {
@@ -317,8 +526,42 @@ where
         }
 
         // Phase 2: activations
+        "relu" => Ok(relu(unary(0)?)),
         "sigmoid" => Ok(sigmoid(unary(0)?)),
         "tanh" => Ok(tanh(unary(0)?)),
+        "rms_norm" => {
+            let x = unary(0)?;
+            let eps = kw_f64("eps", 1e-5) as f32;
+            let variance = x.clone().powf_scalar(2.0).mean_dim(R - 1);
+            let rsqrt = variance.add_scalar(eps).sqrt().recip();
+            let norm = x.mul(rsqrt);
+            if node.args.len() > 1 {
+                let weight = unary(1)?;
+                let (n, w) = broadcast_pair(&norm, &weight)?;
+                Ok(n.mul(w))
+            } else {
+                Ok(norm)
+            }
+        }
+        "layer_norm" => {
+            let x = unary(0)?;
+            let eps = kw_f64("eps", 1e-5) as f32;
+            let mean = x.clone().mean_dim(R - 1);
+            let var = x.clone().sub(mean.clone()).powf_scalar(2.0).mean_dim(R - 1);
+            let rsqrt = var.add_scalar(eps).sqrt().recip();
+            let mut norm = x.sub(mean).mul(rsqrt);
+            if node.args.len() > 1 {
+                let weight = unary(1)?;
+                let (n, w) = broadcast_pair(&norm, &weight)?;
+                norm = n.mul(w);
+            }
+            if node.args.len() > 2 {
+                let bias = unary(2)?;
+                let (n, b) = broadcast_pair(&norm, &bias)?;
+                norm = n.add(b);
+            }
+            Ok(norm)
+        }
         "gelu" => {
             // tanh approximation (matches the native engine and torch's
             // approximate="tanh"): 0.5*x*(1 + tanh(0.7978845608*(x + 0.044715*x^3)))
@@ -439,10 +682,76 @@ where
             Ok(o.add(b))
         }
 
+        // Convolutions and Pooling (WGPU accelerated)
+        "conv2d" => {
+            let x = unary(0)?;
+            let weight = unary(1)?;
+            let stride = kw_2d("stride", [1, 1]);
+            let padding = kw_2d("padding", [0, 0]);
+            let dilation = kw_2d("dilation", [1, 1]);
+            let groups = kw_isize("groups", 1) as usize;
+            let bias = if node.args.len() > 2 {
+                Some(unary(2)?)
+            } else {
+                None
+            };
+            let options = ConvOptions::new(stride, padding, dilation, groups);
+            x.do_conv2d(weight, bias, options)
+        }
+        "conv_transpose2d" => {
+            let x = unary(0)?;
+            let weight = unary(1)?;
+            let stride = kw_2d("stride", [1, 1]);
+            let padding = kw_2d("padding", [0, 0]);
+            let out_pad = kw_2d("output_padding", [0, 0]);
+            let dilation = kw_2d("dilation", [1, 1]);
+            let groups = kw_isize("groups", 1) as usize;
+            let bias = if node.args.len() > 2 {
+                Some(unary(2)?)
+            } else {
+                None
+            };
+            let options = ConvTransposeOptions::new(stride, padding, out_pad, dilation, groups);
+            x.do_conv_transpose2d(weight, bias, options)
+        }
+        "max_pool2d" => {
+            let x = unary(0)?;
+            let kernel_size = if node.kwargs.contains_key("kernel") {
+                kw_2d("kernel", [2, 2])
+            } else {
+                kw_2d("kernel_size", [2, 2])
+            };
+            let stride = kw_2d("stride", kernel_size);
+            let padding = kw_2d("padding", [0, 0]);
+            let dilation = kw_2d("dilation", [1, 1]);
+            x.do_max_pool2d(kernel_size, stride, padding, dilation)
+        }
+        "avg_pool2d" => {
+            let x = unary(0)?;
+            let kernel_size = if node.kwargs.contains_key("kernel") {
+                kw_2d("kernel", [2, 2])
+            } else {
+                kw_2d("kernel_size", [2, 2])
+            };
+            let stride = kw_2d("stride", kernel_size);
+            let padding = kw_2d("padding", [0, 0]);
+            let count_include_pad = node
+                .kwargs
+                .get("count_include_pad")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true);
+            x.do_avg_pool2d(kernel_size, stride, padding, count_include_pad)
+        }
+        "adaptive_avg_pool2d" => {
+            let x = unary(0)?;
+            let output_size = kw_2d("output_size", [1, 1]);
+            x.do_adaptive_avg_pool2d(output_size)
+        }
+
         // Shape ops (rank-preserving, GPU-accelerated)
         "reshape" => {
             let t = unary(0)?;
-            let shape_vec: Vec<usize> = node
+            let mut shape_vec: Vec<usize> = node
                 .kwargs
                 .get("shape")
                 .and_then(|v| v.as_array())
@@ -459,6 +768,27 @@ where
                 ));
             }
             let old_numel: usize = t.shape().dims.iter().product();
+            // Handle -1 (inferred) dimension — PyTorch allows exactly one.
+            let neg_count = shape_vec.iter().filter(|&&d| d == usize::MAX).count();
+            if neg_count > 1 {
+                return Err(unsupported(
+                    "burn engine: reshape with multiple -1 dims (fallback to native)",
+                ));
+            }
+            if neg_count == 1 {
+                let known_product: usize = shape_vec.iter().filter(|&&d| d != usize::MAX).product();
+                if known_product == 0 {
+                    return Err(unsupported(
+                        "burn engine: reshape inferred dim with zero-product (fallback to native)",
+                    ));
+                }
+                let inferred = old_numel / known_product;
+                for d in shape_vec.iter_mut() {
+                    if *d == usize::MAX {
+                        *d = inferred;
+                    }
+                }
+            }
             let new_numel: usize = shape_vec.iter().product();
             if old_numel != new_numel {
                 return Err(unsupported(
@@ -611,6 +941,10 @@ where
             let t = unary(0)?;
             Ok(t.cos())
         }
+        "tan" => {
+            let t = unary(0)?;
+            Ok(t.tan())
+        }
         "round" => {
             let t = unary(0)?;
             Ok(t.round())
@@ -626,7 +960,7 @@ where
 fn owned_from_values(values: Vec<f32>, shape: Vec<i64>) -> OwnedTensor {
     let bytes = values.len() * 4;
     let words = bytes.div_ceil(8);
-    let mut data = vec![0u64; words];
+    let mut data = crate::memory_pool::take_buffer(DType::F32, words);
     unsafe {
         std::ptr::copy_nonoverlapping(
             values.as_ptr() as *const u8,
@@ -638,6 +972,46 @@ fn owned_from_values(values: Vec<f32>, shape: Vec<i64>) -> OwnedTensor {
         data,
         shape,
         dtype: DType::F32,
+    }
+}
+
+/// Convert a Burn `Data<f32, R>` payload into a Rust-owned tensor, casting to target dtype.
+fn owned_from_values_dtype(values: Vec<f32>, shape: Vec<i64>, target_dtype: DType) -> OwnedTensor {
+    match target_dtype {
+        DType::F32 => owned_from_values(values, shape),
+        DType::F16 => {
+            let n = values.len();
+            let bytes = n * 2;
+            let words = bytes.div_ceil(8);
+            let mut data = crate::memory_pool::take_buffer(DType::F16, words);
+            let dst =
+                unsafe { std::slice::from_raw_parts_mut(data.as_mut_ptr() as *mut half::f16, n) };
+            for (d, &s) in dst.iter_mut().zip(values.iter()) {
+                *d = half::f16::from_f32(s);
+            }
+            OwnedTensor {
+                data,
+                shape,
+                dtype: DType::F16,
+            }
+        }
+        DType::BF16 => {
+            let n = values.len();
+            let bytes = n * 2;
+            let words = bytes.div_ceil(8);
+            let mut data = crate::memory_pool::take_buffer(DType::BF16, words);
+            let dst =
+                unsafe { std::slice::from_raw_parts_mut(data.as_mut_ptr() as *mut half::bf16, n) };
+            for (d, &s) in dst.iter_mut().zip(values.iter()) {
+                *d = half::bf16::from_f32(s);
+            }
+            OwnedTensor {
+                data,
+                shape,
+                dtype: DType::BF16,
+            }
+        }
+        _ => owned_from_values(values, shape),
     }
 }
 
@@ -767,14 +1141,14 @@ fn execute_burn_generic<B>(
 where
     B: BurnBackend<FloatElem = f32>,
 {
-    let inputs = read_inputs(payload, capsules)?;
+    let (inputs, target_dtype) = read_inputs(payload, capsules)?;
     let rank = payload.inputs.first().map(|i| i.shape.len()).unwrap_or(2);
     // Release GIL during the Burn computation (pure Rust, no Python interaction).
     let owned = py.allow_threads(|| match rank {
-        1 => run_rank::<B, 1>(payload, inputs),
-        2 => run_rank::<B, 2>(payload, inputs),
-        3 => run_rank::<B, 3>(payload, inputs),
-        4 => run_rank::<B, 4>(payload, inputs),
+        1 => run_rank::<B, 1>(payload, inputs, target_dtype),
+        2 => run_rank::<B, 2>(payload, inputs, target_dtype),
+        3 => run_rank::<B, 3>(payload, inputs, target_dtype),
+        4 => run_rank::<B, 4>(payload, inputs, target_dtype),
         r => Err(unsupported(&format!(
             "burn engine supports ranks 1-4, got {r}"
         ))),

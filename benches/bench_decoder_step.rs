@@ -43,7 +43,7 @@ fn bench_decode_step(c: &mut Criterion) {
 
         // Layer 1 (representative): qkv 896→2688, o 896→896, gate/up 896→4864, down 4864→896
         let mut x = vec![0.0f32; HIDDEN];
-        let mut norm_w = vec![1.0f32; HIDDEN];
+        let norm_w = vec![1.0f32; HIDDEN];
         let mut norm_out = vec![0.0f32; HIDDEN];
 
         let make_w = |n: usize, k: usize, rng: &mut Lcg| -> (Vec<u8>, Vec<f32>) {
@@ -67,7 +67,7 @@ fn bench_decode_step(c: &mut Criterion) {
         let (lm_head_w, lm_head_s) = make_w(VOCAB, HIDDEN, &mut rng);
 
         let mut qkv_out = vec![0.0f32; 3 * HIDDEN];
-        let mut attn_out = vec![0.0f32; HIDDEN];
+        let attn_out = vec![0.0f32; HIDDEN];
         let mut o_out = vec![0.0f32; HIDDEN];
         let mut gate_out = vec![0.0f32; INTERMEDIATE];
         let mut up_out = vec![0.0f32; INTERMEDIATE];

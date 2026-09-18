@@ -50,6 +50,10 @@ fn reduce_to_shape(grad: &OwnedTensor, target: &[i64]) -> OwnedTensor {
     while result.shape.len() > target.len() {
         let n = elem_count(&result.shape);
         let dim0 = result.shape[0] as usize;
+        // Guard: empty tensor or zero-sized leading dim → nothing to reduce.
+        if dim0 == 0 || n == 0 {
+            return result;
+        }
         let trimmed_len = n / dim0;
         let mut trimmed = OwnedTensor::new(result.dtype, result.shape[1..].to_vec());
         match result.dtype {
@@ -85,6 +89,42 @@ fn reduce_to_shape(grad: &OwnedTensor, target: &[i64]) -> OwnedTensor {
                         s += src[j * trimmed_len + i];
                     }
                     dst[i] = s;
+                }
+            }
+            DType::F16 => {
+                let src = unsafe {
+                    std::slice::from_raw_parts(result.data.as_ptr() as *const half::f16, n)
+                };
+                let dst = unsafe {
+                    std::slice::from_raw_parts_mut(
+                        trimmed.data.as_mut_ptr() as *mut half::f16,
+                        trimmed_len,
+                    )
+                };
+                for i in 0..trimmed_len {
+                    let mut s = 0.0f32;
+                    for j in 0..dim0 {
+                        s += src[j * trimmed_len + i].to_f32();
+                    }
+                    dst[i] = half::f16::from_f32(s);
+                }
+            }
+            DType::BF16 => {
+                let src = unsafe {
+                    std::slice::from_raw_parts(result.data.as_ptr() as *const half::bf16, n)
+                };
+                let dst = unsafe {
+                    std::slice::from_raw_parts_mut(
+                        trimmed.data.as_mut_ptr() as *mut half::bf16,
+                        trimmed_len,
+                    )
+                };
+                for i in 0..trimmed_len {
+                    let mut s = 0.0f32;
+                    for j in 0..dim0 {
+                        s += src[j * trimmed_len + i].to_f32();
+                    }
+                    dst[i] = half::bf16::from_f32(s);
                 }
             }
             _ => {}
@@ -147,6 +187,48 @@ fn reduce_to_shape(grad: &OwnedTensor, target: &[i64]) -> OwnedTensor {
                         }
                     }
                 }
+                DType::F16 => {
+                    let src = unsafe {
+                        std::slice::from_raw_parts(result.data.as_ptr() as *const half::f16, n)
+                    };
+                    let dst = unsafe {
+                        std::slice::from_raw_parts_mut(
+                            out.data.as_mut_ptr() as *mut half::f16,
+                            outer * inner,
+                        )
+                    };
+                    dst.fill(half::f16::from_f32(0.0));
+                    for o in 0..outer {
+                        for d in 0..dim_size {
+                            for k in 0..inner {
+                                let curr = dst[o * inner + k].to_f32();
+                                let added = src[o * dim_size * inner + d * inner + k].to_f32();
+                                dst[o * inner + k] = half::f16::from_f32(curr + added);
+                            }
+                        }
+                    }
+                }
+                DType::BF16 => {
+                    let src = unsafe {
+                        std::slice::from_raw_parts(result.data.as_ptr() as *const half::bf16, n)
+                    };
+                    let dst = unsafe {
+                        std::slice::from_raw_parts_mut(
+                            out.data.as_mut_ptr() as *mut half::bf16,
+                            outer * inner,
+                        )
+                    };
+                    dst.fill(half::bf16::from_f32(0.0));
+                    for o in 0..outer {
+                        for d in 0..dim_size {
+                            for k in 0..inner {
+                                let curr = dst[o * inner + k].to_f32();
+                                let added = src[o * dim_size * inner + d * inner + k].to_f32();
+                                dst[o * inner + k] = half::bf16::from_f32(curr + added);
+                            }
+                        }
+                    }
+                }
                 _ => {}
             }
             result = out;
@@ -191,77 +273,110 @@ pub fn backward_batch(
         let per_input = backward_single(&entry.target, &upstream, &saved_refs, &entry.kwargs);
 
         // Accumulate gradients into the input tensor IDs
-        for (i, tid) in entry.input_ids.iter().enumerate() {
-            if i < per_input.len() {
-                let mut pg = per_input[i].clone();
-
-                // Broadcast shape reduction: if the saved input had a
-                // different shape than the upstream (e.g. b=(4,) was
-                // broadcast to (3,4)), reduce the gradient back.
-                if i < entry.saved_shapes.len() {
-                    let target = &entry.saved_shapes[i];
-                    let pg_shape: Vec<i64> = pg.shape.iter().map(|&d| d as i64).collect();
-                    if pg_shape != *target {
-                        pg = reduce_to_shape(&pg, target);
-                    }
+        for (i, (tid, mut pg)) in entry
+            .input_ids
+            .iter()
+            .zip(per_input.into_iter())
+            .enumerate()
+        {
+            // Broadcast shape reduction: if the saved input had a
+            // different shape than the upstream (e.g. b=(4,) was
+            // broadcast to (3,4)), reduce the gradient back.
+            if i < entry.saved_shapes.len() {
+                let target = &entry.saved_shapes[i];
+                let pg_shape: Vec<i64> = pg.shape.iter().map(|&d| d as i64).collect();
+                if pg_shape != *target {
+                    pg = reduce_to_shape(&pg, target);
                 }
+            }
 
-                if let Some(existing) = grads.get_mut(tid) {
-                    // Require exact element match after reduction — never
-                    // silently truncate partial grads (was n.min(p.len())).
-                    let n = elem_count(&existing.shape);
-                    let m = elem_count(&pg.shape);
-                    if n != m || existing.dtype != pg.dtype {
-                        continue;
-                    }
-                    match existing.dtype {
-                        DType::F32 => {
-                            let e = unsafe {
-                                std::slice::from_raw_parts_mut(
-                                    existing.data.as_mut_ptr() as *mut f32,
-                                    n,
-                                )
-                            };
-                            let p = unsafe {
-                                std::slice::from_raw_parts(pg.data.as_ptr() as *const f32, m)
-                            };
-                            if n >= 16_384 {
-                                use rayon::prelude::*;
-                                e.par_iter_mut()
-                                    .zip(p.par_iter())
-                                    .for_each(|(x, y)| *x += *y);
-                            } else {
-                                for j in 0..n {
-                                    e[j] += p[j];
-                                }
+            if let Some(existing) = grads.get_mut(tid) {
+                // Require exact element match after reduction — never
+                // silently truncate partial grads (was n.min(p.len())).
+                let n = elem_count(&existing.shape);
+                let m = elem_count(&pg.shape);
+                if n != m || existing.dtype != pg.dtype {
+                    eprintln!(
+                        "TorchBurn warning: backward_batch gradient mismatch for tensor {tid}: existing shape={:?} dtype={:?} vs incoming shape={:?} dtype={:?}; dropping mismatched contribution",
+                        existing.shape, existing.dtype, pg.shape, pg.dtype
+                    );
+                    continue;
+                }
+                match existing.dtype {
+                    DType::F32 => {
+                        let e = unsafe {
+                            std::slice::from_raw_parts_mut(
+                                existing.data.as_mut_ptr() as *mut f32,
+                                n,
+                            )
+                        };
+                        let p = unsafe {
+                            std::slice::from_raw_parts(pg.data.as_ptr() as *const f32, m)
+                        };
+                        if n >= 256 * 1024 {
+                            use rayon::prelude::*;
+                            e.par_iter_mut()
+                                .zip(p.par_iter())
+                                .for_each(|(x, y)| *x += *y);
+                        } else {
+                            for j in 0..n {
+                                e[j] += p[j];
                             }
                         }
-                        DType::F64 => {
-                            let e = unsafe {
-                                std::slice::from_raw_parts_mut(
-                                    existing.data.as_mut_ptr() as *mut f64,
-                                    n,
-                                )
-                            };
-                            let p = unsafe {
-                                std::slice::from_raw_parts(pg.data.as_ptr() as *const f64, m)
-                            };
-                            if n >= 16_384 {
-                                use rayon::prelude::*;
-                                e.par_iter_mut()
-                                    .zip(p.par_iter())
-                                    .for_each(|(x, y)| *x += *y);
-                            } else {
-                                for j in 0..n {
-                                    e[j] += p[j];
-                                }
+                    }
+                    DType::F64 => {
+                        let e = unsafe {
+                            std::slice::from_raw_parts_mut(
+                                existing.data.as_mut_ptr() as *mut f64,
+                                n,
+                            )
+                        };
+                        let p = unsafe {
+                            std::slice::from_raw_parts(pg.data.as_ptr() as *const f64, m)
+                        };
+                        if n >= 256 * 1024 {
+                            use rayon::prelude::*;
+                            e.par_iter_mut()
+                                .zip(p.par_iter())
+                                .for_each(|(x, y)| *x += *y);
+                        } else {
+                            for j in 0..n {
+                                e[j] += p[j];
                             }
                         }
-                        _ => {}
                     }
-                } else {
-                    grads.insert(*tid, pg);
+                    DType::F16 => {
+                        let e = unsafe {
+                            std::slice::from_raw_parts_mut(
+                                existing.data.as_mut_ptr() as *mut half::f16,
+                                n,
+                            )
+                        };
+                        let p = unsafe {
+                            std::slice::from_raw_parts(pg.data.as_ptr() as *const half::f16, m)
+                        };
+                        for j in 0..n {
+                            e[j] = half::f16::from_f32(e[j].to_f32() + p[j].to_f32());
+                        }
+                    }
+                    DType::BF16 => {
+                        let e = unsafe {
+                            std::slice::from_raw_parts_mut(
+                                existing.data.as_mut_ptr() as *mut half::bf16,
+                                n,
+                            )
+                        };
+                        let p = unsafe {
+                            std::slice::from_raw_parts(pg.data.as_ptr() as *const half::bf16, m)
+                        };
+                        for j in 0..n {
+                            e[j] = half::bf16::from_f32(e[j].to_f32() + p[j].to_f32());
+                        }
+                    }
+                    _ => {}
                 }
+            } else {
+                grads.insert(*tid, pg);
             }
         }
     }

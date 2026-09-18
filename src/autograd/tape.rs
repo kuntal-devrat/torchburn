@@ -1,8 +1,20 @@
 //! Autograd tape: recording infrastructure and gradient storage.
 //!
-//! Thread-local tape, tensor metadata, enable/disable, record and
-//! save helpers, the reverse-mode backward walk, plus reset/tape_len.
-//! Inherits the autograd root imports via super; pure move.
+//! ## Thread-Safety Contract
+//!
+//! Autograd recording (`enable()`, `record()`, `save_data()`) and the reverse-mode
+//! pass (`backward()`) operate on thread-local tape storage. This design ensures
+//! that concurrent Python threads training separate models or graphs never corrupt
+//! each other's gradient tapes.
+//!
+//! **Concurrency Guidelines:**
+//! 1. A single model forward + backward execution must happen on the same thread
+//!    where `torchburn.autograd.enable()` was called.
+//! 2. Multi-threaded worker pools (such as Rayon workers used internally by TorchBurn
+//!    for parallel matrix multiplications and reductions) do NOT record ops to the
+//!    tape, preventing worker threads from scattering operations across separate tapes.
+//! 3. If training multiple models concurrently, each training loop should run on its
+//!    own dedicated thread with its own `enable()` / `disable()` cycle.
 
 use super::*;
 // ---------------------------------------------------------------------------
@@ -11,6 +23,10 @@ use super::*;
 
 /// Global monotonically increasing tensor ID counter.
 static NEXT_ID: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Global counter of active recording threads to diagnose cross-thread usage.
+static ACTIVE_RECORDING_THREADS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
 
 /// Per-tensor metadata stored alongside its data.
 pub struct TensorMeta {
@@ -51,9 +67,8 @@ thread_local! {
     static TAPE: RefCell<Vec<Box<dyn BackwardOp>>> = RefCell::new(Vec::new());
     static TAPE_META: RefCell<Vec<TapeEntryMeta>> = RefCell::new(Vec::new());
     static ENABLED: RefCell<bool> = RefCell::new(false);
-    /// Saved tensor data indexed by tensor ID (leaked into static for the
-    /// backward lifetime).
-    static SAVED_DATA: RefCell<HashMap<usize, *mut OwnedTensor>> = RefCell::new(HashMap::new());
+    /// Saved tensor data indexed by tensor ID.
+    static SAVED_DATA: RefCell<HashMap<usize, Box<OwnedTensor>>> = RefCell::new(HashMap::new());
 }
 
 struct TapeEntryMeta {
@@ -63,21 +78,27 @@ struct TapeEntryMeta {
 
 /// Enable autograd recording for the current thread.
 pub fn enable() {
-    ENABLED.with(|e| *e.borrow_mut() = true);
+    ENABLED.with(|e| {
+        let mut en = e.borrow_mut();
+        if !*en {
+            *en = true;
+            ACTIVE_RECORDING_THREADS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    });
 }
 
 /// Disable autograd recording for the current thread.
 pub fn disable() {
-    ENABLED.with(|e| *e.borrow_mut() = false);
-    // Release any leaked saved tensors to prevent unbounded growth if user enabled
-    // but never called backward().
-    SAVED_DATA.with(|s| {
-        for (_, ptr) in s.borrow_mut().drain() {
-            unsafe {
-                drop(Box::from_raw(ptr));
-            }
+    ENABLED.with(|e| {
+        let mut en = e.borrow_mut();
+        if *en {
+            *en = false;
+            ACTIVE_RECORDING_THREADS.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
         }
     });
+    // Release any saved tensors to prevent unbounded growth if user enabled
+    // but never called backward().
+    SAVED_DATA.with(|s| s.borrow_mut().clear());
     TAPE.with(|t| t.borrow_mut().clear());
     TAPE_META.with(|m| m.borrow_mut().clear());
 }
@@ -109,34 +130,18 @@ pub fn save_data(id: usize, data: &OwnedTensor) {
         return;
     }
     SAVED_DATA.with(|s| {
-        // Leak a clone of the data.  The clone is freed when the tape is consumed.
-        // If an old entry exists for the same id, free it to avoid leak.
-        let owned = data.clone();
-        let ptr = Box::into_raw(Box::new(owned));
-        let mut map = s.borrow_mut();
-        if let Some(old_ptr) = map.insert(id, ptr) {
-            unsafe {
-                drop(Box::from_raw(old_ptr));
-            }
-        }
+        s.borrow_mut().insert(id, Box::new(data.clone()));
     });
 }
 
-/// Save borrowed tensor data by cloning it into a leaked owned tensor.
+/// Save borrowed tensor data by cloning it into a safe owned tensor.
 pub fn save_borrowed(id: usize, data: &BorrowedTensor) {
     if !is_enabled() {
         return;
     }
     let owned = unsafe { owned_from_borrowed(data) };
-    // save_data re-checks enabled; direct insert to avoid double check cost is fine
     SAVED_DATA.with(|s| {
-        let ptr = Box::into_raw(Box::new(owned));
-        let mut map = s.borrow_mut();
-        if let Some(old_ptr) = map.insert(id, ptr) {
-            unsafe {
-                drop(Box::from_raw(old_ptr));
-            }
-        }
+        s.borrow_mut().insert(id, Box::new(owned));
     });
 }
 
@@ -179,81 +184,103 @@ unsafe fn owned_from_borrowed(b: &BorrowedTensor) -> OwnedTensor {
 /// Leaf tensors (parameters) accumulate into this map; intermediate
 /// gradients are consumed and freed after each op.
 pub fn backward(grad_output: &OwnedTensor, leaf_grads: &mut HashMap<usize, OwnedTensor>) {
+    if !is_enabled() && ACTIVE_RECORDING_THREADS.load(std::sync::atomic::Ordering::Relaxed) > 0 {
+        eprintln!(
+            "torchburn: autograd: backward() called on a thread where autograd is not enabled, \
+             but another thread has an active recording session. \
+             Autograd forward and backward must be executed on the same thread."
+        );
+    }
     // Map to accumulate intermediate gradients by tensor ID across branches.
-    // Fix: avoid O(N^2) current_upstream.clone() per op; route strictly by
-    // output_id, fallback only for the final op (initial upstream).
     let mut node_grads: HashMap<usize, OwnedTensor> = HashMap::new();
 
-    TAPE.with(|t| {
-        TAPE_META.with(|m| {
-            let tape = t.borrow();
-            let meta = m.borrow();
-            let len = tape.len();
-            for rev_idx in 0..len {
-                let i = len - 1 - rev_idx;
-                let op: &(dyn BackwardOp + 'static) = &*tape[i];
-                let me = &meta[i];
+    // Seed the initial gradient by the last op's output tensor ID.
+    // This correctly handles DAG-shaped graphs (multiple roots, branching)
+    // where the old positional approach (rev_idx == 0) would miss ops.
+    TAPE_META.with(|m| {
+        let meta = m.borrow();
+        if let Some(last_meta) = meta.last() {
+            for id in &last_meta.output_ids {
+                match node_grads.entry(*id) {
+                    std::collections::hash_map::Entry::Occupied(mut o) => {
+                        add_in_place(o.get_mut(), grad_output);
+                    }
+                    std::collections::hash_map::Entry::Vacant(v) => {
+                        v.insert(grad_output.clone());
+                    }
+                }
+            }
+        }
+    });
 
-                // Sum all output grads (fan-out: same tensor consumed twice)
-                let mut upstream_opt: Option<OwnedTensor> = None;
-                for id in me.output_ids.iter() {
-                    if let Some(g) = node_grads.remove(id) {
-                        match upstream_opt.take() {
-                            None => upstream_opt = Some(g),
-                            Some(mut acc) => {
-                                add_in_place(&mut acc, &g);
-                                upstream_opt = Some(acc);
+    SAVED_DATA.with(|s| {
+        let saved_map = s.borrow();
+        TAPE.with(|t| {
+            TAPE_META.with(|m| {
+                let tape = t.borrow();
+                let meta = m.borrow();
+                let len = tape.len();
+                for rev_idx in 0..len {
+                    let i = len - 1 - rev_idx;
+                    let op: &(dyn BackwardOp + 'static) = &*tape[i];
+                    let me = &meta[i];
+
+                    // Sum all output grads (fan-out: same tensor consumed twice)
+                    let mut upstream_opt: Option<OwnedTensor> = None;
+                    for id in me.output_ids.iter() {
+                        if let Some(g) = node_grads.remove(id) {
+                            match upstream_opt.take() {
+                                None => upstream_opt = Some(g),
+                                Some(mut acc) => {
+                                    add_in_place(&mut acc, &g);
+                                    upstream_opt = Some(acc);
+                                }
+                            }
+                        }
+                    }
+                    let upstream = match upstream_opt {
+                        Some(u) => u,
+                        None => continue,
+                    };
+
+                    // Collect saved inputs safely from the immutably borrowed map.
+                    let saved_refs: Vec<&OwnedTensor> = me
+                        .input_ids
+                        .iter()
+                        .filter_map(|&id| saved_map.get(&id).map(|b| b.as_ref()))
+                        .collect();
+
+                    let grads = op.backward(&upstream, &saved_refs);
+
+                    for (tensor_id, grad) in grads {
+                        // Accumulate into leaf_grads first (always needed).
+                        match leaf_grads.entry(tensor_id) {
+                            std::collections::hash_map::Entry::Occupied(mut o) => {
+                                add_in_place(o.get_mut(), &grad);
+                            }
+                            std::collections::hash_map::Entry::Vacant(v) => {
+                                v.insert(grad.clone());
+                            }
+                        }
+
+                        // Accumulate into node_grads (for upstream routing).
+                        // Move the grad here to avoid a second clone.
+                        match node_grads.entry(tensor_id) {
+                            std::collections::hash_map::Entry::Occupied(mut o) => {
+                                add_in_place(o.get_mut(), &grad);
+                            }
+                            std::collections::hash_map::Entry::Vacant(v) => {
+                                v.insert(grad); // move, no clone
                             }
                         }
                     }
                 }
-                // Fallback only for the last recorded op (first in reverse)
-                if upstream_opt.is_none() && rev_idx == 0 {
-                    upstream_opt = Some(grad_output.clone());
-                }
-                let upstream = match upstream_opt {
-                    Some(u) => u,
-                    None => continue,
-                };
-
-                // Collect saved inputs.
-                let saved_refs: Vec<&OwnedTensor> = me
-                    .input_ids
-                    .iter()
-                    .filter_map(|&id| {
-                        SAVED_DATA.with(|s| s.borrow().get(&id).map(|ptr| unsafe { &**ptr }))
-                    })
-                    .collect();
-
-                let grads = op.backward(&upstream, &saved_refs);
-
-                for (tensor_id, grad) in grads {
-                    node_grads
-                        .entry(tensor_id)
-                        .and_modify(|existing| {
-                            add_in_place(existing, &grad);
-                        })
-                        .or_insert_with(|| grad.clone());
-
-                    leaf_grads
-                        .entry(tensor_id)
-                        .and_modify(|existing| {
-                            add_in_place(existing, &grad);
-                        })
-                        .or_insert(grad);
-                }
-            }
-        })
+            })
+        });
     });
 
     // Free saved data.
-    SAVED_DATA.with(|s| {
-        for (_, ptr) in s.borrow_mut().drain() {
-            unsafe {
-                drop(Box::from_raw(ptr));
-            }
-        }
-    });
+    SAVED_DATA.with(|s| s.borrow_mut().clear());
 
     // Clear the tape.
     TAPE.with(|t| t.borrow_mut().clear());
@@ -268,7 +295,7 @@ fn add_in_place(a: &mut OwnedTensor, b: &OwnedTensor) {
             let a_data =
                 unsafe { std::slice::from_raw_parts_mut(a.data.as_mut_ptr() as *mut f32, n) };
             let b_data = unsafe { std::slice::from_raw_parts(b.data.as_ptr() as *const f32, n) };
-            if n >= 16 * 1024 {
+            if n >= 256 * 1024 {
                 use rayon::prelude::*;
                 a_data
                     .par_iter_mut()
@@ -286,7 +313,7 @@ fn add_in_place(a: &mut OwnedTensor, b: &OwnedTensor) {
             let a_data =
                 unsafe { std::slice::from_raw_parts_mut(a.data.as_mut_ptr() as *mut f64, n) };
             let b_data = unsafe { std::slice::from_raw_parts(b.data.as_ptr() as *const f64, n) };
-            if n >= 16 * 1024 {
+            if n >= 256 * 1024 {
                 use rayon::prelude::*;
                 a_data
                     .par_iter_mut()
@@ -300,6 +327,45 @@ fn add_in_place(a: &mut OwnedTensor, b: &OwnedTensor) {
                 }
             }
         }
+        DType::F16 => {
+            let a_data =
+                unsafe { std::slice::from_raw_parts_mut(a.data.as_mut_ptr() as *mut half::f16, n) };
+            let b_data =
+                unsafe { std::slice::from_raw_parts(b.data.as_ptr() as *const half::f16, n) };
+            if n >= 64 * 1024 {
+                use rayon::prelude::*;
+                a_data
+                    .par_iter_mut()
+                    .zip(b_data.par_iter())
+                    .for_each(|(x, y)| {
+                        *x = half::f16::from_f32(x.to_f32() + y.to_f32());
+                    });
+            } else {
+                for (x, y) in a_data.iter_mut().zip(b_data.iter()) {
+                    *x = half::f16::from_f32(x.to_f32() + y.to_f32());
+                }
+            }
+        }
+        DType::BF16 => {
+            let a_data = unsafe {
+                std::slice::from_raw_parts_mut(a.data.as_mut_ptr() as *mut half::bf16, n)
+            };
+            let b_data =
+                unsafe { std::slice::from_raw_parts(b.data.as_ptr() as *const half::bf16, n) };
+            if n >= 64 * 1024 {
+                use rayon::prelude::*;
+                a_data
+                    .par_iter_mut()
+                    .zip(b_data.par_iter())
+                    .for_each(|(x, y)| {
+                        *x = half::bf16::from_f32(x.to_f32() + y.to_f32());
+                    });
+            } else {
+                for (x, y) in a_data.iter_mut().zip(b_data.iter()) {
+                    *x = half::bf16::from_f32(x.to_f32() + y.to_f32());
+                }
+            }
+        }
         _ => {}
     }
 }
@@ -310,13 +376,7 @@ fn add_in_place(a: &mut OwnedTensor, b: &OwnedTensor) {
 
 /// Clear the tape and free saved data without computing gradients.
 pub fn reset() {
-    SAVED_DATA.with(|s| {
-        for (_, ptr) in s.borrow_mut().drain() {
-            unsafe {
-                drop(Box::from_raw(ptr));
-            }
-        }
-    });
+    SAVED_DATA.with(|s| s.borrow_mut().clear());
     TAPE.with(|t| t.borrow_mut().clear());
     TAPE_META.with(|m| m.borrow_mut().clear());
 }

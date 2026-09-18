@@ -14,6 +14,7 @@ The mixin holds all shared state; subclasses provide `gm`/`function_map`/`plan`.
 
 from __future__ import annotations
 
+import collections
 import os
 import threading
 import warnings
@@ -26,7 +27,7 @@ from . import _torchburn as _native
 from ._cache import _LOCK, lookup, store
 from ._parser import payload_json, parse_graph
 
-_WARNED: set[tuple[str, str]] = set()
+_WARNED: collections.OrderedDict[str, None] = collections.OrderedDict()
 _WARN_LOCK = threading.Lock()
 _MAX_WARN_ENTRIES = 128
 
@@ -44,12 +45,12 @@ def _warn_fallback(target: str, reason: str = "") -> None:
     key = target
     with _WARN_LOCK:
         if key in _WARNED:
+            _WARNED.move_to_end(key)
             return
-        # Bound growth to prevent memory leak in long-running serving
+        # Bound growth with LRU eviction to prevent memory leak in long-running serving
         if len(_WARNED) >= _MAX_WARN_ENTRIES:
-            # Evict an arbitrary entry (set pop) to make room
-            _WARNED.pop()
-        _WARNED.add(key)
+            _WARNED.popitem(last=False)
+        _WARNED[key] = None
     detail = f" ({reason})" if reason else ""
     warnings.warn(
         UserWarning(
@@ -107,6 +108,7 @@ class _BaseInterpreter:
         self._combined_output_ids = []
         self._node_phase = {}
         self._needed_cache: dict[tuple, set[int]] = {}
+        self._needed_lock = threading.Lock()
         self._graph_handle = None
         self._precompute_plan()
         if self._graph_handle is not None:
@@ -209,8 +211,19 @@ class _BaseInterpreter:
         self._combined_input_keys = all_input_keys
         self._combined_output_ids = sorted(needed)
         self._combined_payload_template = payload
+        def _infer_const_tensor(val: Any) -> torch.Tensor:
+            if isinstance(val, bool):
+                return torch.tensor(val, dtype=torch.bool)
+            elif isinstance(val, int):
+                return torch.tensor(val, dtype=torch.int64)
+            elif isinstance(val, float):
+                return torch.tensor(val, dtype=torch.float32)
+            else:
+                t = torch.tensor(val)
+                return t.to(torch.float32) if t.dtype.is_floating_point else t
+
         self._cached_const_tensors = {
-            i: torch.tensor(k[2], dtype=torch.float32)
+            i: _infer_const_tensor(k[2])
             for i, k in enumerate(all_input_keys)
             if k[0] == "const" and k[2] is not None
         }
@@ -288,7 +301,7 @@ class _BaseInterpreter:
             self._exec_phases_sequentially(env)
             return
         if torch.is_grad_enabled() and any(
-            isinstance(env.get(k[1]), torch.Tensor) and env[k[1]].requires_grad
+            (t := env.get(k[1])) is not None and isinstance(t, torch.Tensor) and t.requires_grad
             for k in self._combined_input_keys if k[0] != "const"
         ):
             self._exec_phases_sequentially(env)
@@ -296,7 +309,7 @@ class _BaseInterpreter:
         try:
             capsules = [t.__dlpack__() for t in run_inputs]
             out_capsules = _native.execute_prepared(self._graph_handle, capsules)
-        except Exception:
+        except RuntimeError:
             self._exec_phases_sequentially(env)
             return
         by_id = dict(zip(self._combined_output_ids, out_capsules))
@@ -480,15 +493,17 @@ class _BaseInterpreter:
     # -------------------------------------------------------- output helpers
     def _needed_outputs(self, chunk_ids: set[int]) -> set[int]:
         key = tuple(sorted(chunk_ids))
-        cached = self._needed_cache.get(key)
-        if cached is not None:
-            return cached
+        with self._needed_lock:
+            cached = self._needed_cache.get(key)
+            if cached is not None:
+                return cached
         needed: set[int] = set()
         for node in self.plan["nodes"]:
             if node["id"] in chunk_ids:
                 continue
             self._collect_refs(node.get("args", []), chunk_ids, needed)
-        self._needed_cache[key] = needed
+        with self._needed_lock:
+            self._needed_cache[key] = needed
         return needed
 
     def _collect_refs(self, args: Any, chunk_ids: set[int], needed: set[int]) -> None:
@@ -504,7 +519,10 @@ class _BaseInterpreter:
 
     def _tensor_for(self, arg: dict[str, Any], node: dict[str, Any], env: dict[int, Any]) -> torch.Tensor:
         if arg["kind"] == "const":
-            return torch.tensor(arg["value"], dtype=self._scalar_dtype(node, env))
+            val = arg["value"]
+            if node.get("target") in ("repeat_interleave", "repeat") and isinstance(val, int) and not isinstance(val, bool):
+                return torch.tensor(val, dtype=torch.int64)
+            return torch.tensor(val, dtype=self._scalar_dtype(node, env))
         value = env[arg["index"]]
         if not isinstance(value, torch.Tensor):
             raise TypeError(f"torchburn: expected tensor operand, got {type(value).__name__}")
@@ -525,7 +543,7 @@ class _BaseInterpreter:
         return {"shape": [int(s) for s in t.shape], "dtype": dtype_map.get(t.dtype, "f32")}
 
     def _resolve(self, refs: Any, env: dict[int, Any]) -> Any:
-        if isinstance(refs, dict):
+        if isinstance(refs, dict) and "kind" in refs:
             kind = refs["kind"]
             if kind == "seq":
                 resolved = [self._resolve(x, env) for x in refs["value"]]

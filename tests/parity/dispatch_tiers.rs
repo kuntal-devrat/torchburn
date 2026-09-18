@@ -86,9 +86,9 @@ fn host_supports(tier: CpuTier) -> bool {
                     && std::arch::is_x86_feature_detected!("avx512bf16")
                     && std::arch::is_x86_feature_detected!("avx512fp16")
             }
-            // NEON is ARM-only; AMX needs nightly intrinsics (not detected on
+            // NEON and SVE are ARM-only; AMX needs nightly intrinsics (not detected on
             // stable), so neither can be exercised on an x86-64 host.
-            CpuTier::Neon | CpuTier::Amx => false,
+            CpuTier::Neon | CpuTier::NeonSve | CpuTier::NeonSve2 | CpuTier::Amx => false,
         }
     }
     #[cfg(not(target_arch = "x86_64"))]
@@ -98,10 +98,12 @@ fn host_supports(tier: CpuTier) -> bool {
     }
 }
 
-fn all_tiers() -> [CpuTier; 8] {
+fn all_tiers() -> [CpuTier; 10] {
     [
         CpuTier::Scalar,
         CpuTier::Neon,
+        CpuTier::NeonSve,
+        CpuTier::NeonSve2,
         CpuTier::Avx2,
         CpuTier::Avx512,
         CpuTier::Avx512Vnni,

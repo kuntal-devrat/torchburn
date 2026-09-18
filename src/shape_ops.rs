@@ -248,55 +248,25 @@ pub fn reshape(a: &BorrowedTensor, new_shape: &[i64]) -> PyResult<OwnedTensor> {
             std::ptr::copy_nonoverlapping(a.data, out.data.as_mut_ptr() as *mut u8, bytes);
         }
     } else {
-        // Non-contiguous: copy element-by-element in logical order
-        match a.dtype {
-            DType::F32 => {
-                let src = unsafe { typed_slice::<f32>(a) };
-                let dst = unsafe { typed_mut_slice::<f32>(&mut out) };
-                let n = elem_count(&a.shape);
-                let rank = a.shape.len();
-                let mut coords = vec![0usize; rank];
-                for i in 0..n {
-                    let mut rem = i;
-                    for d in (0..rank).rev() {
-                        coords[d] = rem % (a.shape[d].max(1) as usize);
-                        rem /= a.shape[d].max(1) as usize;
-                    }
-                    let mut ai = 0usize;
-                    for d in 0..rank {
-                        ai += coords[d] * a.strides[d] as usize;
-                    }
-                    dst[i] = src[ai];
-                }
+        // Non-contiguous: copy element-by-element in logical order using dtype element size
+        let es = a.dtype.elem_size();
+        let src_ptr = a.data;
+        let dst_ptr = out.data.as_mut_ptr() as *mut u8;
+        let n = elem_count(&a.shape);
+        let rank = a.shape.len();
+        let mut coords = vec![0usize; rank];
+        for i in 0..n {
+            let mut rem = i;
+            for d in (0..rank).rev() {
+                coords[d] = rem % (a.shape[d].max(1) as usize);
+                rem /= a.shape[d].max(1) as usize;
             }
-            DType::F64 => {
-                let src = unsafe { typed_slice::<f64>(a) };
-                let dst = unsafe { typed_mut_slice::<f64>(&mut out) };
-                let n = elem_count(&a.shape);
-                let rank = a.shape.len();
-                let mut coords = vec![0usize; rank];
-                for i in 0..n {
-                    let mut rem = i;
-                    for d in (0..rank).rev() {
-                        coords[d] = rem % (a.shape[d].max(1) as usize);
-                        rem /= a.shape[d].max(1) as usize;
-                    }
-                    let mut ai = 0usize;
-                    for d in 0..rank {
-                        ai += coords[d] * a.strides[d] as usize;
-                    }
-                    dst[i] = src[ai];
-                }
+            let mut ai = 0usize;
+            for d in 0..rank {
+                ai += coords[d] * a.strides[d] as usize;
             }
-
-            DType::I64
-            | DType::I32
-            | DType::I8
-            | DType::U8
-            | DType::Bool
-            | DType::F16
-            | DType::BF16 => {
-                return Err(unsupported("this kernel only supports f32/f64 tensors"));
+            unsafe {
+                std::ptr::copy_nonoverlapping(src_ptr.add(ai * es), dst_ptr.add(i * es), es);
             }
         }
     }
@@ -825,6 +795,11 @@ pub fn narrow(
         return Err(unsupported("narrow: dim out of range"));
     }
 
+    let dim_len = a.shape[d].max(0) as usize;
+    if start + length > dim_len {
+        return Err(unsupported("narrow: start + length exceeds dim size"));
+    }
+
     let mut out_shape = a.shape.clone();
     out_shape[d] = length as i64;
 
@@ -857,7 +832,7 @@ pub fn narrow(
 
 /// select(dim, index): drop dim ``dim`` at position ``index`` (aten.select).
 /// Equivalent to ``narrow(dim, index, 1)`` followed by ``squeeze(dim)``.
-pub fn select(a: &BorrowedTensor, dim: isize, index: usize) -> PyResult<OwnedTensor> {
+pub fn select(a: &BorrowedTensor, dim: isize, index: isize) -> PyResult<OwnedTensor> {
     let a_contig;
     let a = if a.is_contiguous() {
         a
@@ -874,7 +849,17 @@ pub fn select(a: &BorrowedTensor, dim: isize, index: usize) -> PyResult<OwnedTen
     if d >= rank {
         return Err(unsupported("select: dim out of range"));
     }
-    if index >= a.shape[d].max(0) as usize {
+    let dim_len = a.shape[d].max(0) as usize;
+    let idx = if index < 0 {
+        let normalized = (dim_len as isize) + index;
+        if normalized < 0 {
+            return Err(unsupported("select: index out of range"));
+        }
+        normalized as usize
+    } else {
+        index as usize
+    };
+    if idx >= dim_len {
         return Err(unsupported("select: index out of range"));
     }
 
@@ -887,11 +872,10 @@ pub fn select(a: &BorrowedTensor, dim: isize, index: usize) -> PyResult<OwnedTen
         .iter()
         .map(|&s| s.max(0) as usize)
         .product();
-    let dim_len = a.shape[d] as usize;
 
     for o in 0..outer {
         for inn in 0..inner {
-            let src_idx = o * dim_len * inner + index * inner + inn;
+            let src_idx = o * dim_len * inner + idx * inner + inn;
             let dst_idx = o * inner + inn;
             unsafe {
                 std::ptr::copy_nonoverlapping(

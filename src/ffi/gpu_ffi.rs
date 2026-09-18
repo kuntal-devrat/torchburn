@@ -65,3 +65,22 @@ pub fn gpu_available() -> bool {
         false
     }
 }
+
+/// Clear the persistent GPU weight buffer cache and buffer pool.
+#[pyfunction]
+pub fn wgpu_clear_weight_cache() {
+    #[cfg(feature = "burn-wgpu")]
+    {
+        crate::wgpu::backend::wgpu_clear_weight_cache();
+    }
+}
+
+/// Clear the GPU buffer reuse pool.
+#[pyfunction]
+pub fn wgpu_clear_buffer_pool() {
+    #[cfg(feature = "burn-wgpu")]
+    {
+        crate::wgpu::backend::wgpu_clear_buffer_pool();
+    }
+}
+

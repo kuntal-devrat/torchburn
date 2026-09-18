@@ -5,6 +5,8 @@
 //! imports via super; pure move, no logic changes.
 
 use super::*;
+use std::sync::Arc;
+
 pub(crate) struct PreplannedExecution {
     pub nodes: Vec<Node>,
     pub fp: fusion::FusionPlan,
@@ -17,34 +19,146 @@ pub(crate) struct PreparedGraph {
     preplanned: Option<PreplannedExecution>,
 }
 
+struct LruEntry {
+    handle: i64,
+    graph: Option<Arc<PreparedGraph>>,
+    prev: usize,
+    next: usize,
+}
+
+const NIL: usize = usize::MAX;
+
 struct GraphCache {
-    graphs: HashMap<i64, PreparedGraph>,
-    order: std::collections::VecDeque<i64>,
+    map: HashMap<i64, usize>,
+    entries: Vec<LruEntry>,
+    free: Vec<usize>,
+    head: usize, // LRU (oldest)
+    tail: usize, // MRU (newest)
 }
 
 impl GraphCache {
-    /// Promote a handle to the back of the eviction queue (most recently used).
-    /// If the handle is not in the queue, this is a no-op.
-    fn touch(&mut self, handle: i64) {
-        // Remove from current position and push to back (most recently used).
-        // VecDeque::retain is O(n) but n <= 1024, which is negligible.
-        let len = self.order.len();
-        self.order.retain(|&h| h != handle);
-        // Only re-add if it was actually in the queue (i.e., we removed something).
-        if self.order.len() < len {
-            self.order.push_back(handle);
+    fn new() -> Self {
+        Self {
+            map: HashMap::new(),
+            entries: Vec::new(),
+            free: Vec::new(),
+            head: NIL,
+            tail: NIL,
         }
+    }
+
+    #[inline]
+    fn is_mru(&self, handle: i64) -> bool {
+        self.tail != NIL && self.entries[self.tail].handle == handle
+    }
+
+    #[inline]
+    fn get(&self, handle: i64) -> Option<Arc<PreparedGraph>> {
+        let &idx = self.map.get(&handle)?;
+        self.entries[idx].graph.clone()
+    }
+
+    /// Promote a handle to MRU in O(1).
+    fn touch(&mut self, handle: i64) {
+        let &idx = match self.map.get(&handle) {
+            Some(i) => i,
+            None => return,
+        };
+        if idx == self.tail {
+            return;
+        }
+
+        // Unlink from current position
+        let prev = self.entries[idx].prev;
+        let next = self.entries[idx].next;
+        if prev != NIL {
+            self.entries[prev].next = next;
+        } else {
+            self.head = next;
+        }
+        if next != NIL {
+            self.entries[next].prev = prev;
+        }
+
+        // Attach to tail (MRU)
+        self.entries[idx].prev = self.tail;
+        self.entries[idx].next = NIL;
+        if self.tail != NIL {
+            self.entries[self.tail].next = idx;
+        }
+        self.tail = idx;
+    }
+
+    fn insert(&mut self, handle: i64, graph: Arc<PreparedGraph>) {
+        if let Some(&idx) = self.map.get(&handle) {
+            self.entries[idx].graph = Some(graph);
+            self.touch(handle);
+            return;
+        }
+
+        let idx = if let Some(i) = self.free.pop() {
+            self.entries[i] = LruEntry {
+                handle,
+                graph: Some(graph),
+                prev: self.tail,
+                next: NIL,
+            };
+            i
+        } else {
+            let i = self.entries.len();
+            self.entries.push(LruEntry {
+                handle,
+                graph: Some(graph),
+                prev: self.tail,
+                next: NIL,
+            });
+            i
+        };
+
+        if self.tail != NIL {
+            self.entries[self.tail].next = idx;
+        }
+        self.tail = idx;
+        if self.head == NIL {
+            self.head = idx;
+        }
+        self.map.insert(handle, idx);
+
+        // Evict LRU (head) if over 1024 prepared graphs
+        while self.map.len() > 1024 && self.head != NIL {
+            let evict_idx = self.head;
+            let evict_handle = self.entries[evict_idx].handle;
+            self.remove(evict_handle);
+        }
+    }
+
+    fn remove(&mut self, handle: i64) {
+        let idx = match self.map.remove(&handle) {
+            Some(i) => i,
+            None => return,
+        };
+
+        let prev = self.entries[idx].prev;
+        let next = self.entries[idx].next;
+        if prev != NIL {
+            self.entries[prev].next = next;
+        } else {
+            self.head = next;
+        }
+        if next != NIL {
+            self.entries[next].prev = prev;
+        } else {
+            self.tail = prev;
+        }
+
+        self.entries[idx].graph = None;
+        self.free.push(idx);
     }
 }
 
 fn graph_cache() -> &'static RwLock<GraphCache> {
     static INSTANCE: OnceLock<RwLock<GraphCache>> = OnceLock::new();
-    INSTANCE.get_or_init(|| {
-        RwLock::new(GraphCache {
-            graphs: HashMap::new(),
-            order: std::collections::VecDeque::new(),
-        })
-    })
+    INSTANCE.get_or_init(|| RwLock::new(GraphCache::new()))
 }
 
 static NEXT_HANDLE: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(1);
@@ -130,30 +244,20 @@ pub fn prepare_graph(dict: &Bound<'_, pyo3::types::PyDict>) -> PyResult<i64> {
 
     let handle = NEXT_HANDLE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let mut cache = graph_cache().write().unwrap_or_else(|e| e.into_inner());
-    cache.graphs.insert(
+    cache.insert(
         handle,
-        PreparedGraph {
+        Arc::new(PreparedGraph {
             payload,
             preplanned,
-        },
+        }),
     );
-    cache.order.push_back(handle);
-    // Evict oldest if over 1024 prepared graphs.
-    while cache.graphs.len() > 1024 {
-        if let Some(old_handle) = cache.order.pop_front() {
-            cache.graphs.remove(&old_handle);
-        } else {
-            break;
-        }
-    }
     Ok(handle)
 }
 
 /// Release a prepared graph from the cache.
 pub fn release_graph(handle: i64) {
     let mut cache = graph_cache().write().unwrap_or_else(|e| e.into_inner());
-    cache.graphs.remove(&handle);
-    cache.order.retain(|&h| h != handle);
+    cache.remove(handle);
 }
 
 pub(crate) fn execute_prepared_native(
@@ -186,21 +290,26 @@ pub fn execute_prepared(
     handle: i64,
     capsules: &[Bound<'_, PyCapsule>],
 ) -> PyResult<Vec<Py<PyCapsule>>> {
-    // LRU promotion: take write lock briefly to promote, then downcast to read lock.
-    {
-        let mut cache = graph_cache().write().unwrap_or_else(|e| e.into_inner());
-        if !cache.graphs.contains_key(&handle) {
-            return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                "invalid graph handle {handle}"
-            )));
+    // Check MRU and fetch Arc<PreparedGraph> under read lock first
+    let (graph, needs_touch) = {
+        let cache = graph_cache().read().unwrap_or_else(|e| e.into_inner());
+        match cache.get(handle) {
+            Some(g) => {
+                let is_mru = cache.is_mru(handle);
+                (g, !is_mru)
+            }
+            None => {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "invalid graph handle {handle}"
+                )));
+            }
         }
+    };
+
+    if needs_touch {
+        let mut cache = graph_cache().write().unwrap_or_else(|e| e.into_inner());
         cache.touch(handle);
     }
-
-    let cache = graph_cache().read().unwrap_or_else(|e| e.into_inner());
-    let graph = cache.graphs.get(&handle).ok_or_else(|| {
-        pyo3::exceptions::PyValueError::new_err(format!("invalid graph handle {handle}"))
-    })?;
 
     #[cfg(feature = "burn")]
     if engine_is_burn() {
@@ -211,7 +320,7 @@ pub fn execute_prepared(
         .iter()
         .map(crate::dlpack::capsule_ref)
         .collect::<PyResult<_>>()?;
-    let native_out = py.allow_threads(|| execute_prepared_native(graph, &refs))?;
+    let native_out = py.allow_threads(|| execute_prepared_native(&graph, &refs))?;
 
     let mut out = Vec::with_capacity(native_out.len());
     for owned in native_out {

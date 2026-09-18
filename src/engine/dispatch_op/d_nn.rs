@@ -100,6 +100,42 @@ pub(crate) fn try_dispatch(
             let indices = slot_view(slots, capsules, arg_index(node, 1)?)?;
             slots.push(Slot::Owned(embedding::embedding(&weight, &indices)?));
         }
+        "embedding_backward" => {
+            let grad = slot_view(slots, capsules, arg_index(node, 0)?)?;
+            let indices = slot_view(slots, capsules, arg_index(node, 1)?)?;
+            let num_weights = if node.kwargs.contains_key("num_weights") {
+                kw_usize(node, "num_weights", 0)
+            } else if let Some(arg) = node.args.get(2) {
+                arg.value
+                    .as_ref()
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(0)
+                    .max(0) as usize
+            } else {
+                0
+            };
+            let padding_idx = if node.kwargs.contains_key("padding_idx") {
+                kw_i64(node, "padding_idx", -1)
+            } else if let Some(arg) = node.args.get(3) {
+                arg.value.as_ref().and_then(|v| v.as_i64()).unwrap_or(-1)
+            } else {
+                -1
+            };
+            let scale_grad = if node.kwargs.contains_key("scale_grad_by_freq") {
+                kw_bool(node, "scale_grad_by_freq", false)
+            } else if let Some(arg) = node.args.get(4) {
+                arg.value.as_ref().and_then(|v| v.as_bool()).unwrap_or(false)
+            } else {
+                false
+            };
+            slots.push(Slot::Owned(embedding::embedding_backward(
+                &grad,
+                &indices,
+                num_weights,
+                padding_idx,
+                scale_grad,
+            )?));
+        }
 
         // Phase 4: attention
         "scaled_dot_product_attention" => {

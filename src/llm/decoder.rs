@@ -19,6 +19,9 @@ use crate::quantization::{
 
 thread_local! {
     static THREAD_SCORES: std::cell::RefCell<Vec<f32>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// Reusable buffer for `sample_logits` top-k candidates, avoiding a
+    /// per-token allocation + free at high throughput.
+    static THREAD_TOPK: std::cell::RefCell<Vec<(usize, f32)>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
 #[inline(always)]
@@ -174,6 +177,29 @@ impl RustQwenDecoder {
         rope_theta: f64,
     ) -> PyResult<Self> {
         let _ = py;
+
+        // G8 fix: validate dimension constraints before allocating large buffers.
+        if hidden_size % 4 != 0 {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "hidden_size ({hidden_size}) must be divisible by 4 (SIMD alignment)"
+            )));
+        }
+        if hidden_size % group_size != 0 {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "hidden_size ({hidden_size}) must be divisible by group_size ({group_size})"
+            )));
+        }
+        if head_dim % 2 != 0 {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "head_dim ({head_dim}) must be even for RoPE half_dim computation"
+            )));
+        }
+        if num_heads % num_kv_heads != 0 {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "num_heads ({num_heads}) must be divisible by num_kv_heads ({num_kv_heads}) for GQA"
+            )));
+        }
+
         let emb_view = unsafe { dlpack::BorrowedTensor::from_capsule(embed_tokens)? };
         let vocab_size = emb_view.shape[0] as usize;
         let emb_slice = unsafe { typed_slice::<f32>(&emb_view) };
@@ -273,16 +299,17 @@ impl RustQwenDecoder {
             });
         }
 
-        // Precompute RoPE tables
+        // Precompute RoPE tables — use f64 intermediates for large rope_theta
+        // values (1M for Qwen) to preserve precision at long context lengths.
         let half_dim = head_dim / 2;
         let mut cos_table = vec![0.0f32; max_seq_len * head_dim];
         let mut sin_table = vec![0.0f32; max_seq_len * head_dim];
         for pos in 0..max_seq_len {
             for i in 0..half_dim {
-                let freq = 1.0f32 / (rope_theta as f32).powf((2.0 * i as f32) / (head_dim as f32));
-                let val = (pos as f32) * freq;
-                let c = val.cos();
-                let s = val.sin();
+                let freq = 1.0f64 / rope_theta.powf((2.0 * i as f64) / (head_dim as f64));
+                let val = (pos as f64) * freq;
+                let c = val.cos() as f32;
+                let s = val.sin() as f32;
                 cos_table[pos * head_dim + i] = c;
                 cos_table[pos * head_dim + i + half_dim] = c;
                 sin_table[pos * head_dim + i] = s;
@@ -468,6 +495,11 @@ impl RustQwenDecoder {
     /// to skip re-prefilling resident prefixes across multi-turn chat.
     pub fn kv_len(&self) -> usize {
         self.kv_used
+    }
+
+    /// Return the logits from the last computed step or prefill token.
+    pub fn get_logits(&self) -> Vec<f32> {
+        self.logits.clone()
     }
 
     /// `SpeculativeDecoder` adapter: single-token step returning logits vec.
@@ -755,20 +787,38 @@ impl RustQwenDecoder {
         top_p: f32,
     ) -> usize {
         self.step_internal(token_id, offset);
-        if repetition_penalty > 1.0 {
-            let mut seen = std::collections::HashSet::new();
-            for &t in recent_tokens {
-                if t < self.logits.len() && seen.insert(t) {
-                    let l = self.logits[t];
-                    if l > 0.0 {
-                        self.logits[t] = l / repetition_penalty;
-                    } else {
-                        self.logits[t] = l * repetition_penalty;
-                    }
-                }
+        apply_repetition_penalty(&mut self.logits, recent_tokens, repetition_penalty);
+        sample_logits(&self.logits, temperature, top_k, top_p)
+    }
+}
+
+/// Applies repetition penalty to candidate logits in-place.
+///
+/// For positive logits, divides by `penalty`; for negative logits, multiplies by `penalty`.
+/// Skips duplicate tokens within `recent_tokens` to avoid compounding the penalty.
+/// Uses a zero-allocation linear scan for typical context windows (<= 32 tokens)
+/// and pre-allocated deduplication for larger contexts.
+#[inline]
+pub fn apply_repetition_penalty(logits: &mut [f32], recent_tokens: &[usize], penalty: f32) {
+    if penalty <= 1.0 || recent_tokens.is_empty() {
+        return;
+    }
+    let vocab_size = logits.len();
+    if recent_tokens.len() <= 32 {
+        for (i, &t) in recent_tokens.iter().enumerate() {
+            if t < vocab_size && !recent_tokens[..i].contains(&t) {
+                let l = logits[t];
+                logits[t] = if l > 0.0 { l / penalty } else { l * penalty };
             }
         }
-        sample_logits(&self.logits, temperature, top_k, top_p)
+    } else {
+        let mut seen = std::collections::HashSet::with_capacity(recent_tokens.len().min(512));
+        for &t in recent_tokens {
+            if t < vocab_size && seen.insert(t) {
+                let l = logits[t];
+                logits[t] = if l > 0.0 { l / penalty } else { l * penalty };
+            }
+        }
     }
 }
 
@@ -798,11 +848,11 @@ pub fn sample_logits(logits: &[f32], temperature: f32, top_k: usize, top_p: f32)
         return best_idx;
     }
 
-    // Top-k: NaN-safe, no huge alloc. Small-k linear scan; large-k partial select.
+    // Top-k: NaN-safe, reuses a thread-local buffer to avoid per-token allocation.
     let k = top_k.min(vocab_size).max(1);
-    // Filter non-finite logits to -inf (NaN would poison max/softmax)
-    // Fast path: k >= vocab -> keep all (no selection)
-    let mut top_items: Vec<(usize, f32)> = Vec::with_capacity(k.min(4096) + 1);
+    THREAD_TOPK.with(|cell| {
+    let mut top_items = cell.borrow_mut();
+    top_items.clear();
     if k >= vocab_size {
         top_items.extend(
             logits
@@ -856,22 +906,26 @@ pub fn sample_logits(logits: &[f32], temperature: f32, top_k: usize, top_p: f32)
         .map(|&(_, v)| v)
         .fold(f32::NEG_INFINITY, f32::max);
     let inv_temp = 1.0 / temperature;
-    for item in &mut top_items {
+    for item in top_items.iter_mut() {
         let p = ((item.1 - max_logit) * inv_temp).exp();
         item.1 = p;
     }
 
     // Optional nucleus (top-p) filtering on the temperature-scaled distribution.
+    // B8 fix: normalize probabilities before cumulative sum so top_p threshold
+    // is compared against actual probability mass (not unnormalized softmax).
+    let pre_sum: f32 = top_items.iter().map(|&(_, p)| p).sum();
     let mut kept_end = top_items.len();
-    if top_p > 0.0 && top_p < 1.0 && kept_end > 1 {
+    if top_p > 0.0 && top_p < 1.0 && kept_end > 1 && pre_sum > 0.0 {
+        let inv_sum = 1.0 / pre_sum;
         top_items.sort_unstable_by(|a, b| b.1.total_cmp(&a.1));
-        let mut prev = 0.0f32;
+        let mut cum = 0.0f32;
         for (i, &(_, p)) in top_items.iter().enumerate() {
-            if prev > top_p {
+            if cum > top_p {
                 kept_end = i;
                 break;
             }
-            prev += p;
+            cum += p * inv_sum;
         }
     }
 
@@ -886,6 +940,7 @@ pub fn sample_logits(logits: &[f32], temperature: f32, top_k: usize, top_p: f32)
         }
     }
     kept[0].0
+    }) // end THREAD_TOPK.with
 }
 
 impl RustQwenDecoder {

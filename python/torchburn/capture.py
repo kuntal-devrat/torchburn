@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 from typing import Any
 
 import torch
@@ -29,7 +30,12 @@ class TorchBurnModule(_BaseInterpreter, nn.Module):
             raise TypeError(
                 f"TorchBurnModule received unexpected keyword arguments {sorted(kwargs)}"
             )
-        with torch.inference_mode():
+        grad_active = torch.is_grad_enabled() and (
+            any(isinstance(a, torch.Tensor) and a.requires_grad for a in args)
+            or any(p.requires_grad for p in self.parameters())
+        )
+        ctx = contextlib.nullcontext() if grad_active else torch.inference_mode()
+        with ctx:
             env: dict[int, Any] = {}
             for node in self.plan["nodes"]:
                 if node["op"] == "placeholder":

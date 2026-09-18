@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "torchburn"
-version = "0.6.3"
+version = "0.6.4"
 description = "A hardware-agnostic, Rust-compiled PyTorch compilation backend. Zero-copy DLPack FFI, BLAKE3 structural graph caching, and safe eager fallback for unsupported operators."
 readme = "README.md"
 requires-python = ">=3.9"
@@ -34,12 +34,13 @@ Repository = "https://github.com/kuntal-devrat/torchburn"
 Issues = "https://github.com/kuntal-devrat/torchburn/issues"
 
 [project.optional-dependencies]
-dev = ["pytest", "pytest-timeout", "numpy"]
+dev = ["pytest", "pytest-timeout", "numpy", "psutil>=5.8"]
 llm = [
     "huggingface-hub>=0.20",
     "safetensors>=0.4",
     "tokenizers>=0.15",
     "transformers>=4.40",
+    "psutil>=5.8",
 ]
 gpu = []
 all = [
@@ -47,6 +48,7 @@ all = [
     "safetensors>=0.4",
     "tokenizers>=0.15",
     "transformers>=4.40",
+    "psutil>=5.8",
 ]
 
 [tool.maturin]

@@ -31,7 +31,7 @@ fn bench_gemm_f32(c: &mut Criterion) {
         let mut b = vec![0.25f32; n * k];
         let mut out = vec![0.0f32; m * n];
         group.bench_function(format!("m{m}_k{k}_n{n}"), |bb| {
-            bb.iter(|| unsafe {
+            bb.iter(|| {
                 gemm_f32_trans_b_into_accum(
                     a.as_mut_ptr(),
                     m,
@@ -55,7 +55,7 @@ fn bench_gemm_f64(c: &mut Criterion) {
         let mut b = vec![0.25f64; n * k];
         let mut out = vec![0.0f64; m * n];
         group.bench_function(format!("m{m}_k{k}_n{n}"), |bb| {
-            bb.iter(|| unsafe {
+            bb.iter(|| {
                 gemm_f64_trans_b_into_accum(
                     a.as_mut_ptr(),
                     m,

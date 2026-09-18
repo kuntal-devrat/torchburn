@@ -88,6 +88,35 @@ pub fn split(a: &BorrowedTensor, split_size: usize, dim: isize) -> PyResult<Vec<
     }
     Ok(res)
 }
+pub fn split_with_sizes(
+    a: &BorrowedTensor,
+    split_sizes: &[usize],
+    dim: isize,
+) -> PyResult<Vec<OwnedTensor>> {
+    let rank = a.shape.len() as isize;
+    let d = if dim < 0 {
+        (rank + dim) as usize
+    } else {
+        dim as usize
+    };
+    if d >= a.shape.len() {
+        return Err(unsupported("split_with_sizes dim oob"));
+    }
+    let dim_size = a.shape[d] as usize;
+    let total: usize = split_sizes.iter().sum();
+    if total != dim_size {
+        return Err(unsupported(&format!(
+            "split_with_sizes: sum of split sizes ({total}) must equal dim size ({dim_size})"
+        )));
+    }
+    let mut res = Vec::with_capacity(split_sizes.len());
+    let mut start = 0;
+    for &len in split_sizes {
+        res.push(crate::shape_ops::narrow(a, dim, start, len)?);
+        start += len;
+    }
+    Ok(res)
+}
 pub fn vsplit(a: &BorrowedTensor, sections: usize) -> PyResult<Vec<OwnedTensor>> {
     split(a, (a.shape[0] as usize + sections - 1) / sections, 0)
 }

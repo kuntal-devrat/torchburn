@@ -574,16 +574,34 @@ pub fn repeat_interleave(
     } else {
         dim as usize
     };
-    let rep_data = unsafe { ts::<i64>(repeats) };
     let rep_n = elem_count(&repeats.shape);
+    let rep_data: Vec<usize> = match repeats.dtype {
+        DType::I64 => {
+            let s = unsafe { ts::<i64>(repeats) };
+            s.iter().map(|&x| x.max(0) as usize).collect()
+        }
+        DType::I32 => {
+            let s = unsafe { ts::<i32>(repeats) };
+            s.iter().map(|&x| x.max(0) as usize).collect()
+        }
+        DType::F32 => {
+            let s = unsafe { ts::<f32>(repeats) };
+            s.iter().map(|&x| x.max(0.0) as usize).collect()
+        }
+        DType::F64 => {
+            let s = unsafe { ts::<f64>(repeats) };
+            s.iter().map(|&x| x.max(0.0) as usize).collect()
+        }
+        _ => return Err(unsupported("repeat_interleave: unsupported repeats dtype")),
+    };
     let dim_size = input.shape[dim] as usize;
 
     // Compute total output size along dim
     let total: usize = if rep_n == 1 {
-        dim_size * (rep_data[0] as usize)
+        dim_size * rep_data.first().copied().unwrap_or(1)
     } else {
         (0..dim_size)
-            .map(|i| rep_data[i.min(rep_n - 1)] as usize)
+            .map(|i| rep_data[i.min(rep_n - 1)])
             .sum()
     };
 
@@ -609,9 +627,9 @@ pub fn repeat_interleave(
             let mut out_offset = 0usize;
             for d in 0..dim_size {
                 let rep = if rep_n == 1 {
-                    rep_data[0] as usize
+                    rep_data[0]
                 } else {
-                    rep_data[d.min(rep_n - 1)] as usize
+                    rep_data[d.min(rep_n - 1)]
                 };
                 for _r in 0..rep {
                     for i in 0..inner {
@@ -639,9 +657,9 @@ pub fn repeat_interleave(
             let mut out_offset = 0usize;
             for d in 0..dim_size {
                 let rep = if rep_n == 1 {
-                    rep_data[0] as usize
+                    rep_data[0]
                 } else {
-                    rep_data[d.min(rep_n - 1)] as usize
+                    rep_data[d.min(rep_n - 1)]
                 };
                 for _r in 0..rep {
                     for i in 0..inner {

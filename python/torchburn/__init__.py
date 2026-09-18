@@ -22,6 +22,7 @@ re-registers it explicitly if needed.
 
 from __future__ import annotations
 
+import atexit
 import os
 import sys
 
@@ -61,9 +62,10 @@ from . import _torchburn as _native
 if "RAYON_NUM_THREADS" not in os.environ:
     try:
         import psutil
-        _phys_cores = psutil.cpu_count(logical=False) or 4
+        _phys_cores = psutil.cpu_count(logical=False) or max((os.cpu_count() or 8) // 2, 1)
     except Exception:
-        _phys_cores = 4
+        # psutil unavailable: estimate physical cores as half of logical (hyperthreading)
+        _phys_cores = max((os.cpu_count() or 8) // 2, 1)
     os.environ["RAYON_NUM_THREADS"] = str(_phys_cores)
 
 from ._backend import register, torchburn_backend
@@ -84,6 +86,7 @@ from .profiler import (
     op_coverage,
     visualize,
     GraphVisualization,
+    export_telemetry,
 )
 from . import ops
 from . import quantization
@@ -101,7 +104,6 @@ from .quantization import (
     fused_transformer_layer_step,
     create_rust_qwen_decoder,
     create_wgpu_qwen_decoder,
-    create_cuda_qwen_decoder,
     quantize_weight_int8,
     quantize_weight_int4,
     quantize_weight_int4_grouped,
@@ -147,11 +149,25 @@ def rayon_threads() -> int:
     return _native.rayon_threads()
 
 
+def wgpu_clear_weight_cache() -> None:
+    """Clear the persistent GPU weight buffer cache and buffer pool."""
+    if hasattr(_native, "wgpu_clear_weight_cache"):
+        _native.wgpu_clear_weight_cache()
+
+
+def wgpu_clear_buffer_pool() -> None:
+    """Clear the GPU buffer reuse pool."""
+    if hasattr(_native, "wgpu_clear_buffer_pool"):
+        _native.wgpu_clear_buffer_pool()
+
+
 __all__ = [
     "BurnCompiledCallable",
     "TorchBurnModule",
     "cache_clear",
     "cache_stats",
+    "wgpu_clear_weight_cache",
+    "wgpu_clear_buffer_pool",
     "rayon_threads",
     "capture",
     "compile",
@@ -178,13 +194,13 @@ __all__ = [
     "w8a32_linear",
     "w4a32_linear",
     "w4a32_grouped_linear",
+    "wgpu_w4a32_grouped_linear",
     "fused_swiglu_mlp",
     "fused_swiglu_mlp_batched",
     "fused_attention_step",
     "fused_transformer_layer_step",
     "create_rust_qwen_decoder",
     "create_wgpu_qwen_decoder",
-    "create_cuda_qwen_decoder",
     "quantize_weight_int8",
     "quantize_weight_int4",
     "quantize_weight_int4_grouped",
@@ -200,6 +216,7 @@ __all__ = [
     "ops",
     "visualize",
     "GraphVisualization",
+    "export_telemetry",
 ]
 
 
@@ -246,3 +263,16 @@ def export(model, args=None, kwargs=None, dynamic_shapes=None, **compile_kwargs)
 
 
 register()
+
+
+def _shutdown_cleanup() -> None:
+    try:
+        clear_memory_pool()
+        cache_clear()
+        wgpu_clear_weight_cache()
+        wgpu_clear_buffer_pool()
+    except Exception:
+        pass
+
+
+atexit.register(_shutdown_cleanup)

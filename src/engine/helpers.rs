@@ -180,6 +180,19 @@ pub(crate) fn kw_isize_vec(node: &Node, key: &str) -> Vec<isize> {
         .unwrap_or_default()
 }
 
+pub(crate) fn kw_usize_vec(node: &Node, key: &str) -> Option<Vec<usize>> {
+    node.kwargs.get(key).and_then(|v| {
+        v.as_array().map(|arr| {
+            arr.iter()
+                .filter_map(|v| {
+                    v.as_i64()
+                        .and_then(|x| if x >= 0 { Some(x as usize) } else { None })
+                })
+                .collect()
+        })
+    })
+}
+
 pub(crate) fn kw_usize(node: &Node, key: &str, default: usize) -> usize {
     node.kwargs
         .get(key)

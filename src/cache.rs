@@ -24,57 +24,152 @@ use std::sync::RwLock;
 ///   `order.retain`).
 /// * LRU promotion uses positional `remove` (single shift) instead of
 ///   `retain` closure over the whole queue.
+struct LruNode {
+    key: String,
+    value: String,
+    prev: usize,
+    next: usize,
+}
+
+const NIL: usize = usize::MAX;
+
 struct LruCache {
-    map: std::collections::HashMap<String, String, ahash::RandomState>,
-    order: std::collections::VecDeque<String>,
+    map: std::collections::HashMap<String, usize, ahash::RandomState>,
+    nodes: Vec<LruNode>,
+    free: Vec<usize>,
+    head: usize, // LRU
+    tail: usize, // MRU
+    capacity: usize,
 }
 
 impl LruCache {
     fn new() -> Self {
+        let capacity = std::env::var("TORCHBURN_CACHE_SIZE")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .unwrap_or(1024);
         Self {
             map: std::collections::HashMap::with_hasher(ahash::RandomState::new()),
-            order: std::collections::VecDeque::new(),
+            nodes: Vec::new(),
+            free: Vec::new(),
+            head: NIL,
+            tail: NIL,
+            capacity,
         }
     }
+
     /// Read-only probe (no LRU promotion). Returns cloned payload on hit.
     #[inline]
     fn get_readonly(&self, key: &str) -> Option<String> {
-        self.map.get(key).cloned()
+        let &idx = self.map.get(key)?;
+        Some(self.nodes[idx].value.clone())
     }
+
     /// Check whether `key` is already MRU (no promotion needed).
     #[inline]
     fn is_mru(&self, key: &str) -> bool {
-        self.order.back().is_some_and(|k| k == key)
+        if self.tail == NIL {
+            return false;
+        }
+        self.nodes[self.tail].key == key
     }
-    /// Promote `key` to MRU. Caller must hold the write lock and `key` must
-    /// exist in `map`.
+
+    /// Promote `key` to MRU in O(1). Caller must hold the write lock and `key`
+    /// must exist in `map`.
     fn promote(&mut self, key: &str) {
-        if self.is_mru(key) {
+        let &idx = match self.map.get(key) {
+            Some(i) => i,
+            None => return,
+        };
+        if idx == self.tail {
             return;
         }
-        if let Some(pos) = self.order.iter().position(|k| k == key) {
-            self.order.remove(pos);
+
+        // Unlink from current position
+        let prev = self.nodes[idx].prev;
+        let next = self.nodes[idx].next;
+        if prev != NIL {
+            self.nodes[prev].next = next;
+        } else {
+            self.head = next;
         }
-        self.order.push_back(key.to_string());
+        if next != NIL {
+            self.nodes[next].prev = prev;
+        }
+
+        // Attach to tail (MRU)
+        self.nodes[idx].prev = self.tail;
+        self.nodes[idx].next = NIL;
+        if self.tail != NIL {
+            self.nodes[self.tail].next = idx;
+        }
+        self.tail = idx;
+        if self.head == NIL {
+            self.head = idx;
+        }
     }
+
     fn insert(&mut self, key: String, value: String) {
         if self.map.contains_key(&key) {
             return; // first-write-wins
         }
-        if self.map.len() >= 1024 {
-            if let Some(old) = self.order.pop_front() {
-                self.map.remove(&old);
+
+        // Evict LRU (head) if at capacity
+        if self.map.len() >= self.capacity && self.head != NIL {
+            let evict_idx = self.head;
+            let evict_key = self.nodes[evict_idx].key.clone();
+            self.map.remove(&evict_key);
+
+            let next = self.nodes[evict_idx].next;
+            self.head = next;
+            if next != NIL {
+                self.nodes[next].prev = NIL;
+            } else {
+                self.tail = NIL;
             }
+            self.free.push(evict_idx);
         }
-        self.order.push_back(key.clone());
-        self.map.insert(key, value);
+
+        // Allocate slot for new node
+        let idx = if let Some(free_idx) = self.free.pop() {
+            self.nodes[free_idx] = LruNode {
+                key: key.clone(),
+                value,
+                prev: self.tail,
+                next: NIL,
+            };
+            free_idx
+        } else {
+            let new_idx = self.nodes.len();
+            self.nodes.push(LruNode {
+                key: key.clone(),
+                value,
+                prev: self.tail,
+                next: NIL,
+            });
+            new_idx
+        };
+
+        if self.tail != NIL {
+            self.nodes[self.tail].next = idx;
+        }
+        self.tail = idx;
+        if self.head == NIL {
+            self.head = idx;
+        }
+        self.map.insert(key, idx);
     }
+
     fn len(&self) -> usize {
         self.map.len()
     }
+
     fn clear(&mut self) {
         self.map.clear();
-        self.order.clear();
+        self.nodes.clear();
+        self.free.clear();
+        self.head = NIL;
+        self.tail = NIL;
     }
 }
 
