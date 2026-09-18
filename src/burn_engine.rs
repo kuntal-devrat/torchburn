@@ -478,6 +478,30 @@ where
         }
     };
 
+    let check_spatial_out = |in_size: usize,
+                             kernel: usize,
+                             stride: usize,
+                             padding: usize,
+                             dilation: usize,
+                             op: &str|
+     -> PyResult<usize> {
+        if stride == 0 {
+            return Err(unsupported(&format!("{op}: stride must be non-zero")));
+        }
+        let effective = dilation.saturating_mul(kernel.saturating_sub(1)) + 1;
+        let padded = in_size + 2 * padding;
+        if padded < effective {
+            return Err(unsupported(&format!(
+                "{op}: output size is non-positive (input={in_size}, kernel={kernel}, stride={stride}, padding={padding}, dilation={dilation})"
+            )));
+        }
+        let out = (padded - effective) / stride + 1;
+        if out == 0 {
+            return Err(unsupported(&format!("{op}: output size is 0")));
+        }
+        Ok(out)
+    };
+
     match node.target.as_str() {
         // Phase 1: binary elementwise (with same-rank broadcasting)
         "add" | "sub" | "mul" | "div" => {
@@ -708,6 +732,22 @@ where
                     "conv2d: groups={groups} must divide channels (C_in={cin}, C_out={cout})"
                 )));
             }
+            check_spatial_out(
+                x_dims[2],
+                w_dims[2],
+                stride[0],
+                padding[0],
+                dilation[0],
+                "conv2d",
+            )?;
+            check_spatial_out(
+                x_dims[3],
+                w_dims[3],
+                stride[1],
+                padding[1],
+                dilation[1],
+                "conv2d",
+            )?;
             let options = ConvOptions::new(stride, padding, dilation, groups);
             x.do_conv2d(weight, bias, options)
         }
@@ -734,6 +774,25 @@ where
                     "conv_transpose2d: groups={groups} must divide channels (C_in={cin})"
                 )));
             }
+            let w_dims = weight.dims();
+            let base_h = (x_dims[2].saturating_sub(1)).saturating_mul(stride[0])
+                + dilation[0].saturating_mul(w_dims[2].saturating_sub(1))
+                + out_pad[0]
+                + 1;
+            if base_h <= 2 * padding[0] {
+                return Err(unsupported(
+                    "conv_transpose2d: output height is non-positive",
+                ));
+            }
+            let base_w = (x_dims[3].saturating_sub(1)).saturating_mul(stride[1])
+                + dilation[1].saturating_mul(w_dims[3].saturating_sub(1))
+                + out_pad[1]
+                + 1;
+            if base_w <= 2 * padding[1] {
+                return Err(unsupported(
+                    "conv_transpose2d: output width is non-positive",
+                ));
+            }
             let options = ConvTransposeOptions::new(stride, padding, out_pad, dilation, groups);
             x.do_conv_transpose2d(weight, bias, options)
         }
@@ -747,6 +806,25 @@ where
             let stride = kw_2d("stride", kernel_size);
             let padding = kw_2d("padding", [0, 0]);
             let dilation = kw_2d("dilation", [1, 1]);
+            if R >= 2 {
+                let x_dims = x.dims();
+                check_spatial_out(
+                    x_dims[R - 2],
+                    kernel_size[0],
+                    stride[0],
+                    padding[0],
+                    dilation[0],
+                    "max_pool2d",
+                )?;
+                check_spatial_out(
+                    x_dims[R - 1],
+                    kernel_size[1],
+                    stride[1],
+                    padding[1],
+                    dilation[1],
+                    "max_pool2d",
+                )?;
+            }
             x.do_max_pool2d(kernel_size, stride, padding, dilation)
         }
         "avg_pool2d" => {
@@ -763,6 +841,25 @@ where
                 .get("count_include_pad")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(true);
+            if R >= 2 {
+                let x_dims = x.dims();
+                check_spatial_out(
+                    x_dims[R - 2],
+                    kernel_size[0],
+                    stride[0],
+                    padding[0],
+                    1,
+                    "avg_pool2d",
+                )?;
+                check_spatial_out(
+                    x_dims[R - 1],
+                    kernel_size[1],
+                    stride[1],
+                    padding[1],
+                    1,
+                    "avg_pool2d",
+                )?;
+            }
             x.do_avg_pool2d(kernel_size, stride, padding, count_include_pad)
         }
         "adaptive_avg_pool2d" => {
