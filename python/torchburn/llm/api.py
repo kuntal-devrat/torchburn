@@ -93,10 +93,21 @@ class LLM:
         device: str = "auto",
         num_threads: Optional[int] = None,
     ) -> LLM:
-        """Constructs an LLM directly from an in-memory PyTorch nn.Module (e.g. locally trained)."""
+        """Constructs an LLM directly from an in-memory PyTorch nn.Module (e.g. locally trained).
+
+        Automatically adapts custom model interfaces:
+        - Aliases ``wte`` → ``embed_tokens``, ``blocks`` → ``layers``, ``ln_f`` → ``norm``
+        - Handles flexible ``forward()`` output signatures (logits, (logits, loss), etc.)
+        """
+        from ._adapter import adapt_model_interface
+
         engine_cfg = EngineConfig(device=device, quantization=quant, num_threads=num_threads)
         if not isinstance(tokenizer, UniversalTokenizer):
             tokenizer = UniversalTokenizer(tokenizer)
+
+        # Adapt model interface for compatibility with TorchBurn's expected attribute names
+        model = adapt_model_interface(model)
+
         return cls(model, tokenizer, engine_cfg)
 
     def generate(

@@ -140,3 +140,42 @@ def test_wgpu_prefill_and_kv_len(quantized_model):
     spec = SpeculativeDecoder(draft=gpu, target=gpu, K=2)
     toks = spec.generate(prompt_ids=prompt, max_new_tokens=4)
     assert len(toks) == 4
+
+
+def test_wgpu_chunked_passes(quantized_model):
+    from torchburn.quantization import create_wgpu_qwen_decoder
+
+    try:
+        dec_default = create_wgpu_qwen_decoder(quantized_model, max_seq_len=256)
+    except MemoryError as e:
+        pytest.skip(f"wgpu OOM: {e}")
+
+    assert dec_default.layers_per_pass == 6
+
+    # Test explicit layers_per_pass
+    try:
+        dec_chunk3 = create_wgpu_qwen_decoder(quantized_model, max_seq_len=256, layers_per_pass=3)
+    except MemoryError as e:
+        pytest.skip(f"wgpu OOM: {e}")
+
+    assert dec_chunk3.layers_per_pass == 3
+
+    # Output parity between chunked pass counts
+    dec_default.reset_kv_cache()
+    dec_chunk3.reset_kv_cache()
+    tokens_default = _greedy_stream(dec_default, n=8, start=42)
+    tokens_chunk3 = _greedy_stream(dec_chunk3, n=8, start=42)
+    assert tokens_default == tokens_chunk3, "Chunked passes (3 layers/pass) diverged from default (6 layers/pass)"
+
+    # Test env var override
+    old_val = os.environ.get("TORCHBURN_WGPU_CHUNK_LAYERS")
+    try:
+        os.environ["TORCHBURN_WGPU_CHUNK_LAYERS"] = "4"
+        dec_env = create_wgpu_qwen_decoder(quantized_model, max_seq_len=256)
+        assert dec_env.layers_per_pass == 4
+    finally:
+        if old_val is None:
+            os.environ.pop("TORCHBURN_WGPU_CHUNK_LAYERS", None)
+        else:
+            os.environ["TORCHBURN_WGPU_CHUNK_LAYERS"] = old_val
+

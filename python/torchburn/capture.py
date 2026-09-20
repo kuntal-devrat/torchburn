@@ -50,11 +50,25 @@ def capture(
     model: nn.Module,
     *example_inputs: torch.Tensor,
     strict: bool = True,
+    dynamic_shapes: dict | None = None,
 ) -> TorchBurnModule:
-    """Capture a model's computation graph and return a Rust-executed module."""
+    """Capture a model's computation graph and return a Rust-executed module.
+
+    Args:
+        model: The model to capture.
+        *example_inputs: Example input tensors for tracing.
+        strict: If True, tries torch.export first (supports dynamic shapes).
+        dynamic_shapes: Optional dynamic shape specifications for torch.export.
+            Use ``torch.export.Dim`` to mark batch dimensions as dynamic,
+            preventing recompilation storms with MoE token routing.
+    """
     if strict:
         try:
-            ep = torch.export.export(model, tuple(example_inputs))
+            ep = torch.export.export(
+                model,
+                tuple(example_inputs),
+                dynamic_shapes=dynamic_shapes,
+            )
             gm = ep.graph_module
             # Export lifts parameters as placeholders; we use symbolic_trace path
             # which correctly models them as get_attr. If lifted, fallback.

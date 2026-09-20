@@ -220,8 +220,18 @@ __all__ = [
 ]
 
 
-def compile(model, **kwargs):
-    """Convenience wrapper: ``torchburn.compile(model)`` == ``torch.compile(model, backend="torchburn")``."""
+def compile(model, dynamic=None, **kwargs):
+    """Convenience wrapper: ``torchburn.compile(model)`` == ``torch.compile(model, backend="torchburn")``.
+
+    Args:
+        model: The model to compile.
+        dynamic: If True, uses dynamic shapes to avoid recompilation on varying
+            input dimensions (e.g. MoE token routing). Can also be a dict of
+            ``torch.export.Dim`` specifications per argument name.
+        **kwargs: Additional keyword arguments forwarded to ``torch.compile``.
+    """
+    if dynamic is not None:
+        kwargs["dynamic"] = dynamic
     return torch.compile(model, backend="torchburn", **kwargs)
 
 

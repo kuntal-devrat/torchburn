@@ -580,7 +580,11 @@ def create_rust_qwen_decoder(model: nn.Module, max_seq_len: int = 4096) -> Any:
     return decoder
 
 
-def create_wgpu_qwen_decoder(model: nn.Module, max_seq_len: int = 2048) -> Any:
+def create_wgpu_qwen_decoder(
+    model: nn.Module,
+    max_seq_len: int = 2048,
+    layers_per_pass: int | None = None,
+) -> Any:
     """Instantiate zero-Python end-to-end WgpuQwenDecoder for GPU (Vulkan/Metal/DX12).
 
     OOM-safe: embed tables >64MB stay on CPU by default
@@ -646,6 +650,7 @@ def create_wgpu_qwen_decoder(model: nn.Module, max_seq_len: int = 2048) -> Any:
             cfg.rms_norm_eps,
             max_seq_len,
             cfg.rope_theta,
+            layers_per_pass=layers_per_pass,
         )
     except BaseException as e:
         # wgpu raises PanicException on staging/OOM validation; map to MemoryError

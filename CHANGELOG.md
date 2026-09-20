@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.5] - 2026-09-20
+
+### Added
+- **ATen Operator Aliases & Backward Support**: Mapped missing ATen backward overloads (`threshold_backward`, `gelu_backward`, `silu_backward`, `sigmoid_backward`, `tanh_backward`, `leaky_relu_backward`, `embedding_dense_backward`) to native kernels; added `arange.start`, `arange.start_step`, `add.Scalar`, `eq.Scalar`, and `pow.Scalar` aliases.
+- **FX Graph Partitioning via `torch.fx.passes.split_module`**: Replaced per-node interpreter fallback loop with cycle-free graph partitioning. Supported subgraphs are compiled into native Rust SIMD modules while unsupported subgraphs run efficiently as PyTorch eager submodules without GIL ping-pong. Pinned tuple-unpacking (`getitem`) nodes to parent tuple partitions.
+- **Dynamic Shape & MoE Support**: Forwarded `dynamic` flag in `torchburn.compile()` and `dynamic_shapes` in `torchburn.capture()`, avoiding TorchDynamo recompilation storms on variable sequence lengths and expert routing.
+- **Universal LLM Architectural Adapter**: Added `_AdaptedModel` wrapper in `torchburn.llm._adapter` supporting arbitrary Transformer naming conventions (`wte`, `blocks`, `ln_f`, `head`), flexible return signatures (`logits`, `(logits, loss)`, `ModelOutput` dataclass), and robust tokenizer fallback for `skip_special_tokens`.
+- **WGPU Command Buffer Slicing**: Sliced single monolithic decode compute pass in `WgpuQwenDecoder` into configurable passes (`layers_per_pass`, default 6, configurable via `TORCHBURN_WGPU_CHUNK_LAYERS`), preventing Windows DWM/TDR timeouts on integrated GPUs (Intel Iris Xe, AMD APUs).
+
+### Fixed
+- **Integer & Mixed-Precision Autocasting**: Added `nll_loss_forward` and `cross_entropy` to native integer-index ops; strictly restricted integer auto-casting to `_INT_AUTOCAST_OPS` for all-integer inputs, ensuring float model losses and intermediate activations are never truncated to integers.
+- **`arange` Positional Argument Order**: Fixed argument unpacking when `start`, `end`, and `step` are provided positionally.
+
 ## [0.6.4] - 2026-09-18
 
 ### Added

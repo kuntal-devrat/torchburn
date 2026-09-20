@@ -509,12 +509,15 @@ def parse_graph(
                     for a in args:
                         if isinstance(a, dict) and a.get("kind") == "const":
                             vals.append(a["value"])
-                    if len(vals) >= 1:
-                        extracted_kwargs["end"] = vals[-1]
-                    if len(vals) >= 2:
+                    if len(vals) == 1:
+                        extracted_kwargs["end"] = vals[0]
+                    elif len(vals) == 2:
                         extracted_kwargs["start"] = vals[0]
-                    if len(vals) >= 3:
-                        extracted_kwargs["step"] = vals[1]
+                        extracted_kwargs["end"] = vals[1]
+                    elif len(vals) >= 3:
+                        extracted_kwargs["start"] = vals[0]
+                        extracted_kwargs["end"] = vals[1]
+                        extracted_kwargs["step"] = vals[2]
                     args = []
                     # torch.arange defaults to int64; the engine defaults to f32.
                     # Emit i64 when every bound is integral so index tensors fed

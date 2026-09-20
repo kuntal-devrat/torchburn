@@ -935,6 +935,31 @@ _ATEN_TO_OP: dict[str, str] = {
     "aten._native_batch_norm_legit.default": "batch_norm",
     "aten._native_batch_norm_legit.no_stats": "batch_norm",
     "aten.div.Scalar": "div",
+    # AOTAutograd arange overloads
+    "aten.arange.start": "arange",
+    "aten.arange.start_step": "arange",
+    # Backward graph operator overloads (for kernels natively supported in Rust)
+    "aten.threshold_backward": "threshold_backward",
+    "aten.gelu_backward": "gelu_backward",
+    "aten.silu_backward": "silu_backward",
+    "aten.sigmoid_backward": "sigmoid_backward",
+    "aten.tanh_backward": "tanh_backward",
+    "aten.leaky_relu_backward": "leaky_relu_backward",
+    "aten.embedding_dense_backward": "embedding_backward",
+    # In-place scalar ops
+    "aten.add.Scalar": "add",
+    "aten.sub.Scalar": "sub",
+    "aten.mul.Scalar": "mul",
+    # Scalar comparison variants
+    "aten.eq.Scalar": "eq",
+    "aten.ne.Scalar": "ne",
+    "aten.lt.Scalar": "lt",
+    "aten.le.Scalar": "le",
+    "aten.gt.Scalar": "gt",
+    "aten.ge.Scalar": "ge",
+    # Pow overloads
+    "aten.pow.Scalar": "pow",
+    "aten.pow.Tensor_Tensor": "pow",
 }
 
 # Tensor method names (call_method nodes) -> canonical op names
@@ -1048,7 +1073,7 @@ def canonical_op(node: torch.fx.Node) -> tuple[str, str] | None:
         op = _FUNCTION_TO_OP.get(key) or _ATEN_TO_OP.get(key)
         if op is not None:
             return op, key
-        return None
+        return _getitem_as_select(node)
     if node.op == "call_method":
         op = _METHOD_TO_OP.get(str(node.target))
         if op is not None:

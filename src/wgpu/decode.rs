@@ -43,6 +43,8 @@ pub struct WgpuQwenDecoder {
     pub max_seq_len: usize,
     #[pyo3(get)]
     pub rows_per_wg: u32,
+    #[pyo3(get)]
+    pub layers_per_pass: usize,
     // Token-embedding table: GPU-resident only when small or explicitly
     // requested. The 151936×896×4 ≈ 540MB table exceeds D3D12/Vulkan staging
     // limits ("Not enough memory left") and wastes iGPU shared RAM, so tables
@@ -200,79 +202,86 @@ impl WgpuQwenDecoder {
         include_lm_head: bool,
     ) {
         let total_qkv = (self.num_heads * self.head_dim) + 2 * (self.num_kv_heads * self.head_dim);
-        {
-            let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("wgpu_qwen_token_pass"),
-                timestamp_writes: None,
-            });
+        let chunk_size = self.layers_per_pass.max(1);
 
-            // Step 0: embedding lookup. GPU path reads token_id_buf via shader;
-            // CPU path (large tables) skips the shader — x_buf was filled by
-            // the host 3.5KB write in record_and_submit_step.
-            if self.use_gpu_embed {
-                cpass.set_pipeline(&self.pipelines.embed_lookup_pipeline);
-                cpass.set_bind_group(0, &self.bg_embed_lookup, &[]);
-                let embed_wgs = (self.hidden_size as u32 + 255) / 256;
-                cpass.dispatch_workgroups(embed_wgs, 1, 1);
-            }
+        for chunk_start in (0..self.num_layers).step_by(chunk_size) {
+            let chunk_end = (chunk_start + chunk_size).min(self.num_layers);
+            {
+                let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("wgpu_qwen_token_chunk_pass"),
+                    timestamp_writes: None,
+                });
 
-            // Layer 0 starts with RMSNorm on x_buf (populated by embed lookup above)
-            cpass.set_pipeline(&self.pipelines.rmsnorm_pipeline);
-            cpass.set_bind_group(0, &self.layer_bgs[0].bg_rmsnorm_in, &[]);
-            cpass.dispatch_workgroups(1, 1, 1);
+                if chunk_start == 0 {
+                    // Step 0: embedding lookup. GPU path reads token_id_buf via shader;
+                    // CPU path (large tables) skips the shader — x_buf was filled by
+                    // the host 3.5KB write in record_and_submit_step.
+                    if self.use_gpu_embed {
+                        cpass.set_pipeline(&self.pipelines.embed_lookup_pipeline);
+                        cpass.set_bind_group(0, &self.bg_embed_lookup, &[]);
+                        let embed_wgs = (self.hidden_size as u32 + 255) / 256;
+                        cpass.dispatch_workgroups(embed_wgs, 1, 1);
+                    }
 
-            for l in 0..self.num_layers {
-                let bgs = &self.layer_bgs[l];
+                    // Layer 0 starts with RMSNorm on x_buf (populated by embed lookup above)
+                    cpass.set_pipeline(&self.pipelines.rmsnorm_pipeline);
+                    cpass.set_bind_group(0, &self.layer_bgs[0].bg_rmsnorm_in, &[]);
+                    cpass.dispatch_workgroups(1, 1, 1);
+                }
 
-                // A. QKV GEMV
-                cpass.set_pipeline(&self.pipelines.gemv_pipeline);
-                cpass.set_bind_group(0, &bgs.bg_gemv_qkv, &[]);
-                dispatch_gemv_tiled(&mut cpass, total_qkv, self.rows_per_wg);
+                for l in chunk_start..chunk_end {
+                    let bgs = &self.layer_bgs[l];
 
-                // B. RoPE & KV-Cache Append
-                cpass.set_pipeline(&self.pipelines.rope_pipeline);
-                cpass.set_bind_group(0, &bgs.bg_rope, &[]);
-                cpass.dispatch_workgroups((self.num_heads + self.num_kv_heads) as u32, 1, 1);
+                    // A. QKV GEMV
+                    cpass.set_pipeline(&self.pipelines.gemv_pipeline);
+                    cpass.set_bind_group(0, &bgs.bg_gemv_qkv, &[]);
+                    dispatch_gemv_tiled(&mut cpass, total_qkv, self.rows_per_wg);
 
-                // C. Decode Attention
-                cpass.set_pipeline(&self.pipelines.attn_pipeline);
-                cpass.set_bind_group(0, &bgs.bg_attn, &[]);
-                cpass.dispatch_workgroups(self.num_heads as u32, 1, 1);
+                    // B. RoPE & KV-Cache Append
+                    cpass.set_pipeline(&self.pipelines.rope_pipeline);
+                    cpass.set_bind_group(0, &bgs.bg_rope, &[]);
+                    cpass.dispatch_workgroups((self.num_heads + self.num_kv_heads) as u32, 1, 1);
 
-                // D. Out GEMV
-                cpass.set_pipeline(&self.pipelines.gemv_pipeline);
-                cpass.set_bind_group(0, &bgs.bg_gemv_o, &[]);
-                dispatch_gemv_tiled(&mut cpass, self.hidden_size, self.rows_per_wg);
+                    // C. Decode Attention
+                    cpass.set_pipeline(&self.pipelines.attn_pipeline);
+                    cpass.set_bind_group(0, &bgs.bg_attn, &[]);
+                    cpass.dispatch_workgroups(self.num_heads as u32, 1, 1);
 
-                // E. Fused Attn Residual Add + Post-RMSNorm
-                cpass.set_pipeline(&self.pipelines.fused_add_rmsnorm_pipeline);
-                cpass.set_bind_group(0, &bgs.bg_fused_add_rmsnorm_attn, &[]);
-                cpass.dispatch_workgroups(1, 1, 1);
+                    // D. Out GEMV
+                    cpass.set_pipeline(&self.pipelines.gemv_pipeline);
+                    cpass.set_bind_group(0, &bgs.bg_gemv_o, &[]);
+                    dispatch_gemv_tiled(&mut cpass, self.hidden_size, self.rows_per_wg);
 
-                // F. Fused Gate + Up GEMV + SwiGLU
-                cpass.set_pipeline(&self.pipelines.gemv_swiglu_pipeline);
-                cpass.set_bind_group(0, &bgs.bg_gemv_swiglu, &[]);
-                dispatch_gemv_tiled(&mut cpass, self.intermediate_size, self.rows_per_wg);
+                    // E. Fused Attn Residual Add + Post-RMSNorm
+                    cpass.set_pipeline(&self.pipelines.fused_add_rmsnorm_pipeline);
+                    cpass.set_bind_group(0, &bgs.bg_fused_add_rmsnorm_attn, &[]);
+                    cpass.dispatch_workgroups(1, 1, 1);
 
-                // G. Down GEMV
-                cpass.set_pipeline(&self.pipelines.gemv_pipeline);
-                cpass.set_bind_group(0, &bgs.bg_gemv_down, &[]);
-                dispatch_gemv_tiled(&mut cpass, self.hidden_size, self.rows_per_wg);
+                    // F. Fused Gate + Up GEMV + SwiGLU
+                    cpass.set_pipeline(&self.pipelines.gemv_swiglu_pipeline);
+                    cpass.set_bind_group(0, &bgs.bg_gemv_swiglu, &[]);
+                    dispatch_gemv_tiled(&mut cpass, self.intermediate_size, self.rows_per_wg);
 
-                // H. Fused MLP Residual Add + Next-Layer Pre-RMSNorm
-                //    (layer N-1's also applies the final RMSNorm)
-                cpass.set_pipeline(&self.pipelines.fused_add_rmsnorm_pipeline);
-                cpass.set_bind_group(0, &bgs.bg_fused_add_rmsnorm_mlp, &[]);
-                cpass.dispatch_workgroups(1, 1, 1);
-            }
+                    // G. Down GEMV
+                    cpass.set_pipeline(&self.pipelines.gemv_pipeline);
+                    cpass.set_bind_group(0, &bgs.bg_gemv_down, &[]);
+                    dispatch_gemv_tiled(&mut cpass, self.hidden_size, self.rows_per_wg);
 
-            if include_lm_head {
-                // LM Head GEMV
-                cpass.set_pipeline(&self.pipelines.gemv_pipeline);
-                cpass.set_bind_group(0, &self.bg_gemv_lm_head, &[]);
-                dispatch_gemv_tiled(&mut cpass, self.vocab_size, self.rows_per_wg);
-            }
-        } // compute pass ends here
+                    // H. Fused MLP Residual Add + Next-Layer Pre-RMSNorm
+                    //    (layer N-1's also applies the final RMSNorm)
+                    cpass.set_pipeline(&self.pipelines.fused_add_rmsnorm_pipeline);
+                    cpass.set_bind_group(0, &bgs.bg_fused_add_rmsnorm_mlp, &[]);
+                    cpass.dispatch_workgroups(1, 1, 1);
+                }
+
+                if include_lm_head && chunk_end == self.num_layers {
+                    // LM Head GEMV
+                    cpass.set_pipeline(&self.pipelines.gemv_pipeline);
+                    cpass.set_bind_group(0, &self.bg_gemv_lm_head, &[]);
+                    dispatch_gemv_tiled(&mut cpass, self.vocab_size, self.rows_per_wg);
+                }
+            } // compute pass ends here
+        }
     }
 }
 
@@ -294,7 +303,8 @@ impl WgpuQwenDecoder {
         group_size=64,
         rms_norm_eps=1e-6,
         max_seq_len=2048,
-        rope_theta=1000000.0
+        rope_theta=1000000.0,
+        layers_per_pass=None
     ))]
     pub fn new(
         py: Python<'_>,
@@ -313,6 +323,7 @@ impl WgpuQwenDecoder {
         rms_norm_eps: f64,
         max_seq_len: usize,
         rope_theta: f64,
+        layers_per_pass: Option<usize>,
     ) -> PyResult<Self> {
         let _ = py;
 
@@ -371,6 +382,14 @@ impl WgpuQwenDecoder {
             "cpu" => false,
             _ => embed_bytes <= 64 * 1024 * 1024,
         };
+        let layers_per_pass = layers_per_pass
+            .or_else(|| {
+                std::env::var("TORCHBURN_WGPU_CHUNK_LAYERS")
+                    .ok()
+                    .and_then(|v| v.parse::<usize>().ok())
+            })
+            .filter(|&v| v > 0)
+            .unwrap_or(6);
         let (embed_table_buf, embed_cpu): (wgpu::Buffer, Option<Vec<f32>>) = if use_gpu_embed {
             let buf = create_and_upload_storage_buffer(&device, &queue, unsafe {
                 std::slice::from_raw_parts(emb_slice.as_ptr() as *const u8, emb_slice.len() * 4)
@@ -624,6 +643,7 @@ impl WgpuQwenDecoder {
             group_size,
             max_seq_len,
             rows_per_wg,
+            layers_per_pass,
             embed_table_buf,
             embed_cpu,
             use_gpu_embed,

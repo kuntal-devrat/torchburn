@@ -33,7 +33,48 @@ _MAX_WARN_ENTRIES = 128
 
 _F32_F64 = (torch.float32, torch.float64)
 _INT_BOOL = (torch.int64, torch.int32, torch.bool)
+_INT_DTYPES = (torch.int64, torch.int32)
 _MIXED_FLOAT = (torch.float16, torch.bfloat16)
+
+# Ops whose Rust engine kernels natively accept integer (i64/i32) tensor inputs.
+# These must NOT have their integer tensors cast to float.
+_INT_NATIVE_OPS = frozenset({
+    "embedding", "embedding_backward", "index_select", "gather",
+    "scatter", "scatter_add", "where", "arange", "getitem", "select",
+    "to_dtype", "contiguous", "reshape", "expand", "permute", "transpose",
+    "squeeze", "unsqueeze", "cat", "stack", "narrow", "unbind", "chunk",
+    "repeat", "repeat_interleave", "eq", "ne", "lt", "le", "gt", "ge",
+    "nonzero", "masked_fill", "masked_select", "nll_loss_forward", "cross_entropy",
+})
+
+# Ops where integer inputs should be auto-cast to float32, computed, then cast back.
+_INT_AUTOCAST_OPS = frozenset({
+    "add", "sub", "mul", "div", "clamp", "clamp_min", "clamp_max",
+    "abs", "neg", "min_reduce", "max_reduce", "sum", "mean",
+})
+
+
+def _should_cast_to_int(node: dict[str, Any], env: dict[int, Any]) -> torch.dtype | None:
+    """If this op is an integer-compatible arithmetic op and all tensor arguments
+    were integer tensors, return their integer dtype so the output is cast back.
+    Otherwise return None so floating-point outputs are preserved."""
+    if node.get("target") not in _INT_AUTOCAST_OPS:
+        return None
+    found_tensor = False
+    int_dtype = None
+    for a in node.get("args", []):
+        if isinstance(a, dict) and a.get("kind") in ("input", "node", "attr"):
+            val = env.get(a.get("index"))
+            if isinstance(val, torch.Tensor):
+                found_tensor = True
+                if val.dtype in _INT_DTYPES:
+                    if int_dtype is None:
+                        int_dtype = val.dtype
+                    elif int_dtype != val.dtype:
+                        return None  # mixed integer dtypes
+                else:
+                    return None  # has float tensor input!
+    return int_dtype if found_tensor else None
 
 
 def _warn_fallback(target: str, reason: str = "") -> None:
@@ -271,8 +312,12 @@ class _BaseInterpreter:
     def _exec_all_native(self, env: dict[int, Any]) -> None:
         run_inputs: list[torch.Tensor] = []
         cast_map: dict[int, torch.dtype] = {}
+        int_cast_map: dict[int, torch.dtype] = {}  # integer inputs that were auto-cast
         bad_keys: set[int] = set()
         cached_consts = self._cached_const_tensors
+        # Collect the set of ops in this batch to decide integer handling
+        all_ops = {n.get("target", "") for p in self._phases if p["kind"] == "native" for n in p["nodes"]}
+        any_int_native = bool(all_ops & _INT_NATIVE_OPS)
         for i, key in enumerate(self._combined_input_keys):
             kind = key[0]
             if kind == "const":
@@ -292,6 +337,11 @@ class _BaseInterpreter:
                     tensor = tensor.contiguous()
                 if tensor.dtype in _MIXED_FLOAT:
                     cast_map[len(run_inputs)] = tensor.dtype
+                    tensor = tensor.to(torch.float32)
+                elif tensor.dtype in _INT_DTYPES and not any_int_native:
+                    # Auto-cast integer tensors to float32 for ops that don't
+                    # natively support integers, then cast back after execution.
+                    int_cast_map[len(run_inputs)] = tensor.dtype
                     tensor = tensor.to(torch.float32)
                 run_inputs.append(tensor)
         if bad_keys:
@@ -313,19 +363,20 @@ class _BaseInterpreter:
             self._exec_phases_sequentially(env)
             return
         by_id = dict(zip(self._combined_output_ids, out_capsules))
-        for node_id in self._all_native_ids:
+        for node in self.plan["nodes"]:
+            node_id = node["id"]
+            if node_id not in self._all_native_ids:
+                continue
             capsule = by_id.get(node_id)
             if capsule is not None:
                 t = torch.from_dlpack(capsule)
                 if cast_map and t.dtype == torch.float32:
-                    # Preserve original mixed precision dtype: use first encountered
-                    # mixed dtype instead of majority vote to avoid incorrect casting
-                    # when inputs have heterogeneous f16/bf16.
                     first_dtype = next(iter(cast_map.values()))
-                    # Only cast if all mixed inputs share the same dtype; otherwise
-                    # keep f32 to avoid precision loss.
                     if all(dt == first_dtype for dt in cast_map.values()):
                         t = t.to(first_dtype)
+                target_int_dtype = _should_cast_to_int(node, env)
+                if target_int_dtype is not None and t.dtype == torch.float32:
+                    t = t.to(target_int_dtype)
                 env[node_id] = t
 
     def _exec_phases_sequentially(self, env: dict[int, Any]) -> None:
@@ -404,6 +455,10 @@ class _BaseInterpreter:
         run_inputs: list[torch.Tensor] = []
         seen: dict[tuple, int] = {}
         cast_map: dict[int, torch.dtype] = {}
+        int_cast_map: dict[int, torch.dtype] = {}
+        # Check if any node in this chunk natively supports integer inputs
+        chunk_ops = {n.get("target", "") for n in nodes}
+        has_int_native = bool(chunk_ops & _INT_NATIVE_OPS)
 
         def _add(arg, node):
             k = _arg_key(arg)
@@ -423,6 +478,9 @@ class _BaseInterpreter:
                 tensor = tensor.contiguous()
             if tensor.dtype in _MIXED_FLOAT:
                 cast_map[len(run_inputs)] = tensor.dtype
+                tensor = tensor.to(torch.float32)
+            elif tensor.dtype in _INT_DTYPES and not has_int_native:
+                int_cast_map[len(run_inputs)] = tensor.dtype
                 tensor = tensor.to(torch.float32)
             idx = len(run_inputs)
             run_inputs.append(tensor)
@@ -488,6 +546,9 @@ class _BaseInterpreter:
                     first_dtype = next(iter(cast_map.values()))
                     if all(dt == first_dtype for dt in cast_map.values()):
                         t = t.to(first_dtype)
+                target_int_dtype = _should_cast_to_int(node, env)
+                if target_int_dtype is not None and t.dtype == torch.float32:
+                    t = t.to(target_int_dtype)
                 env[node["id"]] = t
 
     # -------------------------------------------------------- output helpers

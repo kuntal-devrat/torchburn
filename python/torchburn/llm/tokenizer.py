@@ -139,6 +139,11 @@ class UniversalTokenizer:
             raise TypeError("Tokenizer does not provide a decode method")
         try:
             return decode(token_ids, skip_special_tokens=skip_special_tokens)
+        except TypeError:
+            try:
+                return decode(token_ids)
+            except Exception as exc:
+                raise RuntimeError("Tokenizer failed to decode token IDs") from exc
         except Exception as exc:
             raise RuntimeError("Tokenizer failed to decode token IDs") from exc
 
