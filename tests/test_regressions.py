@@ -159,6 +159,21 @@ class TestProfilingAPI:
         assert stats["calls"] == 0
         assert stats["total_ms"] == 0.0
 
+    def test_reset_stats(self):
+        import torchburn
+        torchburn.reset_stats()
+        with torchburn.profile() as p:
+            pass
+
+        stats = torchburn.profiling_stats()
+        assert stats["calls"] > 0
+
+        torchburn.reset_stats()
+        stats_after = torchburn.profiling_stats()
+        assert stats_after["calls"] == 0
+        assert stats_after["total_ms"] == 0.0
+        assert stats_after["total_nodes"] == 0
+
     def test_supported_ops(self):
         import torchburn
         ops = torchburn.supported_ops()
