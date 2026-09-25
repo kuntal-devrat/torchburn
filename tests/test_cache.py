@@ -98,3 +98,37 @@ def test_rust_cache_lookup_roundtrip():
     assert tb.cache_get(sig) is not None
     size, hits, misses = tb.cache_stats()
     assert size == 1 and hits == 1 and misses == 1
+
+
+def test_cache_stats_structure():
+    torchburn.cache_clear()
+    stats = torchburn.cache_stats()
+
+    assert isinstance(stats, dict)
+    assert "size" in stats
+    assert "hits" in stats
+    assert "misses" in stats
+    assert "python_size" in stats
+
+    assert isinstance(stats["size"], int)
+    assert isinstance(stats["hits"], int)
+    assert isinstance(stats["misses"], int)
+    assert isinstance(stats["python_size"], int)
+
+    # After clear, sizes should be 0
+    assert stats["size"] == 0
+    assert stats["python_size"] == 0
+
+    # Populate cache
+    payload = json.dumps(
+        {"inputs": [{"shape": [2], "dtype": "f32"}], "nodes": [{"id": 0, "target": "relu", "args": []}], "outputs": [0]},
+        sort_keys=True,
+    )
+    sig = tb.signature(payload)
+
+    from torchburn._cache import store
+    store(sig, {"test": "data"})
+
+    stats2 = torchburn.cache_stats()
+    assert stats2["size"] == 1
+    assert stats2["python_size"] == 1
