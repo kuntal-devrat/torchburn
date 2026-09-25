@@ -516,36 +516,15 @@ fn is_fusable_node(node: &Node) -> bool {
     is_fusable_unary(&node.target) || is_fusable_binary(&node.target)
 }
 
-/// Count, per payload node, how many *later* nodes reference its output slot.
-fn consumer_counts(nodes: &[Node], base: usize) -> Vec<usize> {
+/// Count, per payload node, how many *later* nodes reference its output slot,
+/// and track the index of the consumer if there is exactly one.
+/// Returns (counts, single_consumers) where both are `Vec`s of length `n`.
+fn consumer_stats(nodes: &[Node], base: usize) -> (Vec<usize>, Vec<Option<usize>>) {
     let n = nodes.len();
     let mut counts = vec![0usize; n];
-    for node in nodes {
-        for arg in &node.args {
-            if let Some(s) = arg.index {
-                if s >= base && s - base < n {
-                    counts[s - base] += 1;
-                }
-            }
-            if let Some(Value::Array(arr)) = &arg.value {
-                for v in arr {
-                    if let Some(u) = v.as_u64() {
-                        let s = u as usize;
-                        if s >= base && s - base < n {
-                            counts[s - base] += 1;
-                        }
-                    }
-                }
-            }
-        }
-    }
-    counts
-}
+    let mut single_consumer = vec![None; n];
 
-/// The single consumer of node `i`, if any (a later node referencing its slot).
-fn single_consumer(nodes: &[Node], i: usize, base: usize) -> Option<usize> {
-    let mut found = None;
-    for (j, node) in nodes.iter().enumerate().skip(i + 1) {
+    for (j, node) in nodes.iter().enumerate() {
         let mut refs = Vec::new();
         for arg in &node.args {
             if let Some(s) = arg.index {
@@ -556,15 +535,23 @@ fn single_consumer(nodes: &[Node], i: usize, base: usize) -> Option<usize> {
             }
         }
         for s in refs {
-            if s >= base && s - base == i {
-                if found.is_some() {
-                    return None; // more than one consumer
+            if s >= base && s - base < n {
+                let idx = s - base;
+                // Only count backward edges or forward edges (a consumer must be later to be a "single_consumer" in the original logic?
+                // Wait, the original `single_consumer` only checked `nodes.iter().enumerate().skip(i + 1)` which is strictly later nodes.
+                // It was finding later consumers.
+                if j > idx {
+                    counts[idx] += 1;
+                    if counts[idx] == 1 {
+                        single_consumer[idx] = Some(j);
+                    } else {
+                        single_consumer[idx] = None;
+                    }
                 }
-                found = Some(j);
             }
         }
     }
-    found
+    (counts, single_consumer)
 }
 
 /// Check that all consumers of node `m` (if any) reside within `chain`.
@@ -598,7 +585,7 @@ pub fn plan(nodes: &[Node], base: usize) -> FusionPlan {
     let n = nodes.len();
     let mut node_step = vec![0usize; n];
     let mut steps: Vec<Step> = Vec::new();
-    let consumers = consumer_counts(nodes, base);
+    let (consumers, single_consumers) = consumer_stats(nodes, base);
     let mut i = 0usize;
     while i < n {
         let node = &nodes[i];
@@ -614,8 +601,8 @@ pub fn plan(nodes: &[Node], base: usize) -> FusionPlan {
             && nodes[i + 2].target == "relu"
             && consumers[i] == 1
             && consumers[i + 1] == 1
-            && single_consumer(nodes, i, base) == Some(i + 1)
-            && single_consumer(nodes, i + 1, base) == Some(i + 2)
+            && single_consumers[i] == Some(i + 1)
+            && single_consumers[i + 1] == Some(i + 2)
         {
             // Check that BN is in inference mode (training=false).
             let bn_node = &nodes[i + 1];
@@ -647,7 +634,7 @@ pub fn plan(nodes: &[Node], base: usize) -> FusionPlan {
             && consumers[i] == 1
             && i + 1 < n
             && is_fusable_unary(&nodes[i + 1].target)
-            && single_consumer(nodes, i, base) == Some(i + 1)
+            && single_consumers[i] == Some(i + 1)
         {
             let act = &nodes[i + 1];
             let kind = UnaryKind::from_target(&act.target)
