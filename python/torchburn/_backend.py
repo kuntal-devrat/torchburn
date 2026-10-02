@@ -143,13 +143,20 @@ def _partition_graph(gm: torch.fx.GraphModule, example_inputs: list[torch.Tensor
         h = child.register_forward_pre_hook(make_hook(name))
         handles.append(h)
 
+    # The probe run is compile-time bookkeeping: it must not train anything,
+    # consume RNG state (dropout advances it), or flip module training flags.
+    was_training = split_gm.training
     try:
-        split_gm(*example_inputs)
+        split_gm.eval()
+        with torch.no_grad(), torch.random.fork_rng(devices=[]):
+            split_gm(*example_inputs)
     except Exception as exc:
         _LOG.debug("Submodule input tracing pass failed: %s", exc)
     finally:
         for h in handles:
             h.remove()
+        if was_training:
+            split_gm.train()
 
     # Compile supported submodules with TorchBurn
     for name, child in list(split_gm.named_children()):

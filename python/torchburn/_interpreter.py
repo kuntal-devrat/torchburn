@@ -246,7 +246,11 @@ class _BaseInterpreter:
             })
 
         needed = self._needed_outputs(all_native_ids)
-        input_specs = [{"shape": [0], "dtype": "f32"} for _ in all_input_keys]
+        # Wildcard dtype + zero shape: the engine plans fusion from graph
+        # structure only, and concrete dtypes/shapes are validated per call
+        # in Rust ("*" is accepted by init_input_slots). Pinning f32 here
+        # made the fast path dead for f16/bf16/i64 inputs.
+        input_specs = [{"shape": [0], "dtype": "*"} for _ in all_input_keys]
         payload = {"inputs": input_specs, "nodes": payload_nodes, "outputs": sorted(needed)}
         self._phases = phases
         self._combined_input_keys = all_input_keys
@@ -269,6 +273,7 @@ class _BaseInterpreter:
             if k[0] == "const" and k[2] is not None
         }
         self._all_native_ids = {n["id"] for p in self._phases if p["kind"] == "native" for n in p["nodes"]}
+        self._combined_key_pos = {k: i for i, k in enumerate(all_input_keys)}
         try:
             self._graph_handle = _native.prepare_graph(payload)
         except Exception:
@@ -359,7 +364,11 @@ class _BaseInterpreter:
         try:
             capsules = [t.__dlpack__() for t in run_inputs]
             out_capsules = _native.execute_prepared(self._graph_handle, capsules)
-        except RuntimeError:
+        except Exception:
+            # RuntimeError = engine-reported failure; ValueError = evicted or
+            # otherwise invalid graph handle; PanicException/BaseException
+            # subclasses can no longer escape (Rust catches panics), but any
+            # exotic exception still degrades to eager instead of crashing.
             self._exec_phases_sequentially(env)
             return
         by_id = dict(zip(self._combined_output_ids, out_capsules))
@@ -370,14 +379,52 @@ class _BaseInterpreter:
             capsule = by_id.get(node_id)
             if capsule is not None:
                 t = torch.from_dlpack(capsule)
-                if cast_map and t.dtype == torch.float32:
-                    first_dtype = next(iter(cast_map.values()))
-                    if all(dt == first_dtype for dt in cast_map.values()):
-                        t = t.to(first_dtype)
-                target_int_dtype = _should_cast_to_int(node, env)
-                if target_int_dtype is not None and t.dtype == torch.float32:
-                    t = t.to(target_int_dtype)
+                # Cast back only tensors that feed a node whose inputs were
+                # cast (mixed-precision or int-autocast); casting every f32
+                # output corrupted genuinely-f32 outputs of f64/int graphs.
+                if t.dtype == torch.float32:
+                    target = _should_cast_to_int(node, env)
+                    if target is None:
+                        target = self._mixed_cast_target(node, cast_map, self._combined_key_pos, env)
+                    if target is not None:
+                        t = t.to(target)
                 env[node_id] = t
+
+    def _mixed_cast_target(
+        self,
+        node: dict[str, Any],
+        cast_map: dict[int, torch.dtype],
+        key_pos: dict[tuple, int],
+        env: dict[int, Any],
+    ) -> torch.dtype | None:
+        """Dtype an f32 native output must be cast back to, or None.
+
+        Mirrors PyTorch type promotion: the output is cast back only when
+        *every* float tensor operand of the node was upcast to f32 and all
+        of them agree on the original dtype. A node with any genuinely-f32
+        operand (weights, f32 inputs) keeps an f32 output, matching eager
+        promotion (f16 x f32 -> f32). Unrelated f32 outputs are untouched.
+        """
+        if not cast_map:
+            return None
+        target: torch.dtype | None = None
+        for a in node.get("args", []):
+            if not isinstance(a, dict) or a.get("kind") not in ("input", "node", "attr"):
+                continue
+            pos = key_pos.get((a.get("kind"), a.get("index")))
+            if pos is None:
+                continue  # node-to-node operand, const, or seq
+            orig = cast_map.get(pos)
+            if orig is not None:
+                if target is None:
+                    target = orig
+                elif target != orig:
+                    return None  # conflicting cast targets
+            else:
+                val = env.get(a.get("index"))
+                if isinstance(val, torch.Tensor) and val.dtype.is_floating_point:
+                    return None  # genuine f32/f64 operand: promotion keeps it
+        return target
 
     def _exec_phases_sequentially(self, env: dict[int, Any]) -> None:
         for p in self._phases:
@@ -542,13 +589,12 @@ class _BaseInterpreter:
             capsule = by_id.get(node["id"])
             if capsule is not None:
                 t = torch.from_dlpack(capsule)
-                if cast_map and t.dtype == torch.float32:
-                    first_dtype = next(iter(cast_map.values()))
-                    if all(dt == first_dtype for dt in cast_map.values()):
-                        t = t.to(first_dtype)
-                target_int_dtype = _should_cast_to_int(node, env)
-                if target_int_dtype is not None and t.dtype == torch.float32:
-                    t = t.to(target_int_dtype)
+                if t.dtype == torch.float32:
+                    target = _should_cast_to_int(node, env)
+                    if target is None:
+                        target = self._mixed_cast_target(node, cast_map, seen, env)
+                    if target is not None:
+                        t = t.to(target)
                 env[node["id"]] = t
 
     # -------------------------------------------------------- output helpers

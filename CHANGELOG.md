@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **GGUF parser lifetime refactor completed**: `GgufParser::parse_file`/`parse_bytes` moved into the `GgufParser<'static>` impl so the Cow-based zero-copy `from_slice` path typechecks; hostile-count and truncated-input tests pass.
+- **Tuple-output node-id overflow**: `Payload::validate` rejects node ids >= 65536, which would alias the `(node_id << 16) | elem` tuple-output encoding.
+- **Prepared-graph fast path for non-f32 inputs**: `_precompute_plan` now emits `"*"` wildcard dtype input specs (instead of hardcoded f32), and the Rust `init_input_slots` accepts the wildcard, so f16/bf16/i64 graphs hit the pre-planned path instead of falling back.
+- **Eager fallback on any native error**: `_exec_all_native` catches `Exception` (not just `RuntimeError`) around `execute_prepared`, so evicted-handle `ValueError`s and native `PanicException`s degrade to eager instead of escaping.
+- **Mixed-precision cast-back correctness**: f32 native outputs are cast back to f16/bf16 (or the int dtype for integer-autocast ops) only when *every* float operand of the node was upcast, matching eager type promotion; genuinely-f32/f64 outputs are left alone.
+- **Compile-time side effects removed from `_partition_graph`**: the submodule input probe now runs under `torch.no_grad()`, `torch.random.fork_rng`, and eval mode, restoring training mode afterwards — compilation no longer advances RNG or flips BN/dropout state.
+- **Python-first graph cache**: `_cache.lookup` no longer depends on Rust-side state; it self-heals native-cache eviction by re-persisting the plan via the new `cache_contains` probe.
+- **LLM global-state hygiene**: `GenerationConfig.seed` defaults to `None` and generates into a request-local `torch.Generator` (never `torch.manual_seed`); `UniversalEngine` only calls `torch.set_num_threads` when `num_threads` is explicitly configured; `api.LLM.stream` no longer hardcodes `seed=42`; engine/loader print chatter routed through `logging`.
+- **CI hardening**: the lint job's version-sync step now fails on pyproject/Cargo version drift (real check, not a print); `.kilo/` workspace dirs ignored.
+
+### Added
+- `SECURITY.md` vulnerability reporting policy.
+- Boundary regression tests for `UnsupportedOpError` (RuntimeError subclass) and invalid-handle fallback.
+
 ## [0.6.5] - 2026-09-20
 
 ### Added

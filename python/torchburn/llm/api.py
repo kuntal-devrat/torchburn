@@ -117,7 +117,7 @@ class LLM:
         temperature: float = 0.7,
         top_p: float = 0.9,
         top_k: int = 40,
-        seed: Optional[int] = 42,
+        seed: Optional[int] = None,
     ) -> str:
         """Generates text completion for the given prompt."""
         cfg = GenerationConfig(
@@ -136,7 +136,7 @@ class LLM:
         temperature: float = 0.7,
         top_p: float = 0.9,
         top_k: int = 40,
-        seed: Optional[int] = 42,
+        seed: Optional[int] = None,
     ) -> Generator[str, None, None]:
         """Streams generated text tokens one by one."""
         cfg = GenerationConfig(
@@ -172,6 +172,7 @@ class LLM:
             top_p=top_p,
             top_k=top_k,
             repetition_penalty=repetition_penalty,
+            seed=None,
         )
 
         print("\n\033[92m=== TorchBurn LLM Interactive Chat Started ===\033[0m")
@@ -192,6 +193,22 @@ class LLM:
                 break
 
             history.append({"role": "user", "content": user_msg})
+
+            # Context window enforcement: truncate oldest messages (keeping
+            # system prompt) when the tokenized history exceeds the model's
+            # max_seq_len minus room for the response.
+            model_config = getattr(self.model, "config", None)
+            max_ctx = getattr(model_config, "max_position_embeddings", 32768)
+            budget = max(256, max_ctx - max_tokens - 64)
+            while len(history) > 2:
+                trial_prompt = self.tokenizer.apply_chat_template(history, add_generation_prompt=True)
+                trial_ids = self.tokenizer.encode(trial_prompt)
+                if len(trial_ids) <= budget:
+                    break
+                # Remove the oldest non-system message
+                idx = 1 if history[0].get("role") == "system" else 0
+                history.pop(idx)
+
             formatted_prompt = self.tokenizer.apply_chat_template(history, add_generation_prompt=True)
 
             print("\033[96m\033[1mAI\033[0m: ", end="", flush=True)

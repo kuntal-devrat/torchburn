@@ -236,6 +236,18 @@ pub fn cache_put(signature: &str, payload: &str) {
     }
 }
 
+/// Membership probe: does `signature` exist in the Rust cache?
+/// Used by the Python-side cache for Python-first lookup without
+/// deserialising the stored payload.
+#[pyfunction]
+pub fn cache_contains(signature: &str) -> bool {
+    GRAPH_CACHE
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .map
+        .contains_key(signature)
+}
+
 /// (size, hits, misses) — used by `torchburn.cache_stats()`.
 #[pyfunction]
 pub fn cache_stats() -> (usize, u64, u64) {

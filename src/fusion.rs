@@ -581,7 +581,18 @@ fn all_consumers_in_chain(nodes: &[Node], m: usize, chain: &[usize], base: usize
 /// `nodes` are the payload nodes (slot indices: inputs are `0..base`, node
 /// outputs are `base + node_position`).  The returned plan owns its steps;
 /// the caller (engine) is responsible for executing them and remapping slots.
-pub fn plan(nodes: &[Node], base: usize) -> FusionPlan {
+///
+/// `must_materialize` lists node ids whose *own* output tensor the caller
+/// requested (payload.outputs).  A fused group only materialises its last
+/// member's output, so a requested node is never fused as an intermediate:
+/// it either heads its own step or terminates the group.  This lets prepared
+/// graphs keep their pre-planned execution even when intermediate results
+/// feed eager subgraphs, instead of falling back to per-call re-planning.
+pub fn plan(
+    nodes: &[Node],
+    base: usize,
+    must_materialize: &std::collections::HashSet<u32>,
+) -> FusionPlan {
     let n = nodes.len();
     let mut node_step = vec![0usize; n];
     let mut steps: Vec<Step> = Vec::new();
@@ -633,6 +644,9 @@ pub fn plan(nodes: &[Node], base: usize) -> FusionPlan {
         if (node.target == "linear" || node.target == "addmm")
             && consumers[i] == 1
             && i + 1 < n
+            // The linear's own output is swallowed by the fused epilogue; if
+            // the caller requested it, keep matmul and activation separate.
+            && !must_materialize.contains(&nodes[i].id)
             && is_fusable_unary(&nodes[i + 1].target)
             && single_consumers[i] == Some(i + 1)
         {
@@ -663,8 +677,13 @@ pub fn plan(nodes: &[Node], base: usize) -> FusionPlan {
                 j += 1;
             }
             while chain.len() >= 2 {
-                let all_internals_safe = (0..chain.len() - 1)
-                    .all(|idx| all_consumers_in_chain(nodes, chain[idx], &chain, base));
+                let all_internals_safe = (0..chain.len() - 1).all(|idx| {
+                    // Requested outputs must remain materialisable: an
+                    // intermediate member's tensor only exists when it ends
+                    // the group, so trim the chain until it does.
+                    !must_materialize.contains(&nodes[chain[idx]].id)
+                        && all_consumers_in_chain(nodes, chain[idx], &chain, base)
+                });
                 if all_internals_safe {
                     break;
                 }

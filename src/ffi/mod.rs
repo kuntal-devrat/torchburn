@@ -16,6 +16,23 @@ pub mod quantization_ffi;
 
 use crate::dlpack;
 
+/// Convert a caught Rust panic payload into a fallback-eligible Python error.
+///
+/// PyO3 converts uncaught panics into `PanicException`, which derives from
+/// `BaseException` (like `SystemExit`) and therefore *not* caught by the
+/// Python interpreter's `except Exception` fallback net. Wrapping engine entry
+/// points in `catch_unwind` + this mapper turns a would-be process-killing
+/// panic into a `TB_UNSUPPORTED` `RuntimeError`, so the Python side degrades
+/// to eager PyTorch execution instead of crashing the host application.
+pub(crate) fn panic_to_pyerr(payload: Box<dyn std::any::Any + Send>) -> pyo3::PyErr {
+    let msg = payload
+        .downcast_ref::<&str>()
+        .map(|s| (*s).to_string())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "unknown panic payload".to_string());
+    dlpack::unsupported(&format!("native engine panic: {msg}"))
+}
+
 /// Copy data from a `BorrowedTensor` into an owned allocation.
 /// Handles non-contiguous (strided) views via gather; contiguous fast-path memcpys.
 pub(crate) unsafe fn capsule_to_owned(view: &dlpack::BorrowedTensor) -> dlpack::OwnedTensor {

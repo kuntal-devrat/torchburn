@@ -2,6 +2,11 @@
 
 A structural BLAKE3 signature (computed in Rust) keys the cache. On a hit,
 tracing/parsing is skipped entirely and the existing compiled plan is reused.
+
+Lookup is Python-first: the Python map is authoritative for the *parsed*
+plan, so a Rust-side LRU eviction or `cache_clear` in another process cannot
+desync the two layers. If Python holds a plan the Rust side no longer has,
+the entry is re-persisted (self-healing) so native `cache_get` hits resume.
 """
 
 from __future__ import annotations
@@ -22,11 +27,19 @@ _LOCK = threading.RLock()
 
 
 def lookup(signature: str) -> dict[str, Any] | None:
+    """Return the cached plan for `signature`, independent of Rust state.
+
+    Self-heals Rust-side eviction: if Python still has the plan but the
+    native cache dropped it (LRU eviction >1024 graphs, or `cache_clear`),
+    re-persist it so `cache_get`-based consumers hit again.
+    """
     with _LOCK:
-        cached = _native.cache_get(signature)
-        if cached is not None and signature in GRAPH_CACHE:
+        cached = GRAPH_CACHE.get(signature)
+        if cached is not None:
             GRAPH_CACHE.move_to_end(signature)
-            return GRAPH_CACHE[signature]
+            if not _native.cache_contains(signature):
+                _native.cache_put(signature, payload_json(cached["plan"]))
+            return cached
         return None
 
 
@@ -38,6 +51,9 @@ def store(signature: str, plan: dict[str, Any]) -> None:
         GRAPH_CACHE[signature] = {"plan": plan}
         while len(GRAPH_CACHE) > MAX_PYTHON_CACHE_SIZE:
             GRAPH_CACHE.popitem(last=False)
+            # Deliberately no Rust-side eviction: Python eviction is the LRU
+            # tail, and a native entry left behind is inert — it only costs a
+            # slot until the Rust LRU (same 1024 bound) evicts it itself.
 
 
 def cache_stats() -> dict[str, int]:

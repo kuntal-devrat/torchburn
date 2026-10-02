@@ -62,8 +62,15 @@ fn init_input_slots(payload: &Payload, capsules: &[CapsuleRef]) -> PyResult<Vec<
     for (i, cap) in capsules.iter().enumerate() {
         let spec = &payload.inputs[i];
         let t = unsafe { BorrowedTensor::from_managed(cap.0) }?;
-        let want = dtype_from_spec(&spec.dtype)
-            .ok_or_else(|| unsupported(&format!("unknown input dtype '{}'", spec.dtype)))?;
+        // A "*" dtype spec is the prepared-graph wildcard: the Python
+        // pre-planner cannot know concrete dtypes at compile time, so
+        // accept whatever the caller passes instead of failing.
+        let want = if spec.dtype == "*" {
+            t.dtype
+        } else {
+            dtype_from_spec(&spec.dtype)
+                .ok_or_else(|| unsupported(&format!("unknown input dtype '{}'", spec.dtype)))?
+        };
         if t.dtype != want {
             return Err(unsupported(&format!(
                 "input {i} dtype {} does not match payload spec {}",
@@ -370,7 +377,10 @@ pub fn execute_native(payload: &Payload, capsules: &[CapsuleRef]) -> PyResult<Ve
         return collect_outputs(payload, &node_slot, &mut slots);
     }
 
-    let mut fp = fusion::plan(&payload.nodes, base);
+    // Outputs the caller wants back verbatim — computed before planning so
+    // the fusion planner can keep those nodes materialised as their own step.
+    let requested: std::collections::HashSet<u32> = payload.outputs.iter().copied().collect();
+    let mut fp = fusion::plan(&payload.nodes, base, &requested);
 
     // If no nodes can be fused, run the unfused path directly on &payload.nodes (zero clone).
     if fp.steps.len() == payload.nodes.len() {
@@ -383,16 +393,13 @@ pub fn execute_native(payload: &Payload, capsules: &[CapsuleRef]) -> PyResult<Ve
         return collect_outputs(payload, &node_slot, &mut slots);
     }
 
-    // Plan fusion on a clone (the planner rewrites arg slots to group slots).
-    // Defer the clone until after the unsafe_output check so we don't waste
-    // the allocation when fusion will be skipped anyway.
-
     // Safety: a fused chain's *intermediate* members don't materialise their
-    // own output (the group output is the chain's last node).  If the caller
-    // explicitly requested one, fusion would return the wrong tensor — refuse
-    // it and run unfused.  (GEMM epilogue members are safe: the group output
-    // IS the activation's output.)
-    let requested: std::collections::HashSet<u32> = payload.outputs.iter().copied().collect();
+    // own output (the group output is the chain's last node).  The planner
+    // already honours `requested` (see `fusion::plan`), so this check should
+    // never fire — it stays as defence in depth: refuse the pre-planned path
+    // and run unfused if a requested node ever maps to a non-output member.
+    // (GEMM epilogue members are safe: the group output IS the activation's
+    // output.)
     let mut unsafe_output = false;
     for step in &fp.steps {
         if let Step::Chain(plan) = step {
@@ -526,7 +533,15 @@ pub fn execute_plan(
         .iter()
         .map(crate::dlpack::capsule_ref)
         .collect::<PyResult<_>>()?;
-    let native_out = py.allow_threads(|| execute_native(&payload, &refs))?;
+    // catch_unwind: a kernel panic must degrade to eager fallback, never
+    // surface as PyO3's BaseException-derived PanicException.
+    let native_out = py
+        .allow_threads(|| {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                execute_native(&payload, &refs)
+            }))
+        })
+        .map_err(crate::ffi::panic_to_pyerr)??;
 
     let mut out = Vec::with_capacity(native_out.len());
     for owned in native_out {
@@ -556,8 +571,19 @@ pub fn engine_name() -> &'static str {
     "native_cpu"
 }
 
+/// Cached result of `engine_is_burn_inner()`. Probed once per process to
+/// avoid repeated `std::env::var()` calls that acquire the Windows
+/// process-wide environment lock on every `execute_plan` invocation.
+#[cfg(feature = "burn")]
+static ENGINE_IS_BURN: OnceLock<bool> = OnceLock::new();
+
 #[cfg(feature = "burn")]
 fn engine_is_burn() -> bool {
+    *ENGINE_IS_BURN.get_or_init(engine_is_burn_inner)
+}
+
+#[cfg(feature = "burn")]
+fn engine_is_burn_inner() -> bool {
     // If the user explicitly chose CPU, respect that choice:
     if matches!(
         std::env::var("TORCHBURN_DEVICE").as_deref(),
@@ -575,18 +601,22 @@ fn engine_is_burn() -> bool {
     ) {
         return true;
     }
-    // Accept explicit GPU device selection:
+    // Accept explicit GPU device selection (not "auto" — that gets its own
+    // ladder below so we don't force WGPU on software/CPU adapters):
     if matches!(
         std::env::var("TORCHBURN_DEVICE").as_deref(),
-        Ok("gpu")
-            | Ok("wgpu")
-            | Ok("igpu")
-            | Ok("dgpu")
-            | Ok("vulkan")
-            | Ok("dx12")
-            | Ok("metal")
-            | Ok("auto")
+        Ok("gpu") | Ok("wgpu") | Ok("igpu") | Ok("dgpu") | Ok("vulkan") | Ok("dx12") | Ok("metal")
     ) {
+        #[cfg(feature = "burn-wgpu")]
+        {
+            if crate::wgpu::backend::gpu_available() {
+                return true;
+            }
+        }
+    }
+    // "auto": try WGPU only if a real GPU adapter is available; otherwise
+    // fall through to native CPU (the safest default).
+    if matches!(std::env::var("TORCHBURN_DEVICE").as_deref(), Ok("auto")) {
         #[cfg(feature = "burn-wgpu")]
         {
             if crate::wgpu::backend::gpu_available() {
@@ -610,7 +640,8 @@ pub fn execute_from_dict(
     dict: &Bound<'_, PyDict>,
     capsules: &[Bound<'_, PyCapsule>],
 ) -> PyResult<Vec<Py<PyCapsule>>> {
-    let payload = dict_to_payload(dict)?;
+    let payload = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| dict_to_payload(dict)))
+        .map_err(crate::ffi::panic_to_pyerr)??;
 
     #[cfg(feature = "burn")]
     if engine_is_burn() {
@@ -621,7 +652,15 @@ pub fn execute_from_dict(
         .iter()
         .map(crate::dlpack::capsule_ref)
         .collect::<PyResult<_>>()?;
-    let native_out = py.allow_threads(|| execute_native(&payload, &refs))?;
+    // catch_unwind: a kernel panic must degrade to eager fallback, never
+    // surface as PyO3's BaseException-derived PanicException.
+    let native_out = py
+        .allow_threads(|| {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                execute_native(&payload, &refs)
+            }))
+        })
+        .map_err(crate::ffi::panic_to_pyerr)??;
 
     let mut out = Vec::with_capacity(native_out.len());
     for owned in native_out {

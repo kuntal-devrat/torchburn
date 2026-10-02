@@ -13,7 +13,7 @@ use pyo3::prelude::*;
 use pyo3::types::PyCapsule;
 
 use crate::dlpack;
-use crate::quantization::typed_slice;
+use crate::llm::typed_slice;
 use crate::wgpu::backend::get_wgpu_int4_context;
 use crate::wgpu::bind_groups::{
     bake_model_bind_groups, create_and_upload_storage_buffer, create_storage_buffer,
@@ -45,6 +45,8 @@ pub struct WgpuQwenDecoder {
     pub rows_per_wg: u32,
     #[pyo3(get)]
     pub layers_per_pass: usize,
+    #[pyo3(get)]
+    pub is_discrete: bool,
     // Token-embedding table: GPU-resident only when small or explicitly
     // requested. The 151936×896×4 ≈ 540MB table exceeds D3D12/Vulkan staging
     // limits ("Not enough memory left") and wastes iGPU shared RAM, so tables
@@ -133,8 +135,13 @@ impl WgpuQwenDecoder {
             let _ = tx.send(res);
         });
         let _ = self.device.poll(wgpu::PollType::Wait);
-        rx.recv()
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?
+        rx.recv_timeout(std::time::Duration::from_secs(10))
+            .map_err(|_| {
+                self.device_lost.store(true, Ordering::SeqCst);
+                pyo3::exceptions::PyRuntimeError::new_err(
+                    "wgpu read_buffer timed out after 10s (possible GPU hang / TDR)",
+                )
+            })?
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
 
         let mut data = vec![0.0f32; num_floats];
@@ -357,6 +364,7 @@ impl WgpuQwenDecoder {
         let rows_per_wg = ctx.rows_per_wg;
         let has_subgroups = ctx.has_subgroups;
         let use_pipeline_cache = ctx.has_pipeline_cache;
+        let is_discrete = ctx.is_discrete;
         let device = ctx.device.clone(); // Arc clone — shares the same underlying handle
         let queue = ctx.queue.clone(); // Arc clone — same queue, guaranteed FIFO ordering
         let pipelines = Arc::new(WgpuPipelines::new(
@@ -368,7 +376,7 @@ impl WgpuQwenDecoder {
 
         let emb_view = unsafe { dlpack::BorrowedTensor::from_capsule(embed_tokens)? };
         let vocab_size = emb_view.shape[0] as usize;
-        let emb_slice = unsafe { typed_slice::<f32>(&emb_view) };
+        let emb_slice = unsafe { typed_slice::<f32>(&emb_view)? };
         // OOM fix: 151936×896×4 ≈ 540MB in ONE write_buffer exceeds the
         // D3D12/Vulkan staging limit. Tables >64MB default to CPU-side lookup
         // (3.5KB x_buf write per token); GPU table only for small vocabs or
@@ -389,7 +397,7 @@ impl WgpuQwenDecoder {
                     .and_then(|v| v.parse::<usize>().ok())
             })
             .filter(|&v| v > 0)
-            .unwrap_or(6);
+            .unwrap_or(if is_discrete { num_layers } else { 6 });
         let (embed_table_buf, embed_cpu): (wgpu::Buffer, Option<Vec<f32>>) = if use_gpu_embed {
             let buf = create_and_upload_storage_buffer(&device, &queue, unsafe {
                 std::slice::from_raw_parts(emb_slice.as_ptr() as *const u8, emb_slice.len() * 4)
@@ -644,6 +652,7 @@ impl WgpuQwenDecoder {
             max_seq_len,
             rows_per_wg,
             layers_per_pass,
+            is_discrete,
             embed_table_buf,
             embed_cpu,
             use_gpu_embed,
@@ -779,27 +788,32 @@ impl WgpuQwenDecoder {
 
     /// Executes all 24 layers of the transformer model in a single GPU command stream.
     /// Exactly 1 hardware sync / poll per token.
-    pub fn step(&mut self, token_id: usize, offset: usize) -> PyResult<Vec<f32>> {
-        if self.device_lost.load(Ordering::SeqCst) {
-            return Err(pyo3::exceptions::PyRuntimeError::new_err(
-                "WGPU device is lost or in an error state; CPU fallback required",
-            ));
-        }
-        self.kv_used = self.kv_used.max(offset + 1);
-        let slot = match self.record_and_submit_step(token_id, offset) {
-            Ok(s) => s,
-            Err(e) => {
+    pub fn step(&mut self, py: Python<'_>, token_id: usize, offset: usize) -> PyResult<Vec<f32>> {
+        // GIL released for the GPU submit + readback poll: this is the
+        // per-token hot path and holding the GIL would starve other Python
+        // threads for the whole device round-trip.
+        py.allow_threads(|| {
+            if self.device_lost.load(Ordering::SeqCst) {
+                return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                    "WGPU device is lost or in an error state; CPU fallback required",
+                ));
+            }
+            self.kv_used = self.kv_used.max(offset + 1);
+            let slot = match self.record_and_submit_step(token_id, offset) {
+                Ok(s) => s,
+                Err(e) => {
+                    self.device_lost.store(true, Ordering::SeqCst);
+                    return Err(e);
+                }
+            };
+            let mut logits_cpu = std::mem::take(&mut self.logits_cpu);
+            if let Err(e) = readback_into(self, slot, &mut logits_cpu) {
                 self.device_lost.store(true, Ordering::SeqCst);
                 return Err(e);
             }
-        };
-        let mut logits_cpu = std::mem::take(&mut self.logits_cpu);
-        if let Err(e) = readback_into(self, slot, &mut logits_cpu) {
-            self.device_lost.store(true, Ordering::SeqCst);
-            return Err(e);
-        }
-        self.logits_cpu = logits_cpu;
-        Ok(self.logits_cpu.clone())
+            self.logits_cpu = logits_cpu;
+            Ok(self.logits_cpu.clone())
+        })
     }
 
     /// Current KV length (max offset written + 1). Used by prefix-reuse
@@ -815,7 +829,7 @@ impl WgpuQwenDecoder {
 
     /// `SpeculativeDecoder` / LLM adapter: prefill a prompt, return last-token logits.
     /// Resets nothing; caller must `reset_kv_cache()` first for a new sequence.
-    pub fn prefill(&mut self, tokens: Vec<usize>) -> PyResult<Vec<f32>> {
+    pub fn prefill(&mut self, py: Python<'_>, tokens: Vec<usize>) -> PyResult<Vec<f32>> {
         if tokens.is_empty() {
             return Err(pyo3::exceptions::PyValueError::new_err("empty prefill"));
         }
@@ -830,13 +844,18 @@ impl WgpuQwenDecoder {
             self.record_and_submit_step_with_lm_head(tok, i, false)?;
         }
         let last_idx = n - 1;
-        self.step(tokens[last_idx], last_idx)
+        self.step(py, tokens[last_idx], last_idx)
     }
 
     /// Single-FFI prefill of a token chunk into KV cache starting at `start_offset`.
     /// Intermediate tokens skip LM head computation; the final token computes LM head
     /// and reads back logits into `logits_cpu` for immediate sampling.
-    pub fn prefill_tokens(&mut self, tokens: Vec<usize>, start_offset: usize) -> PyResult<usize> {
+    pub fn prefill_tokens(
+        &mut self,
+        py: Python<'_>,
+        tokens: Vec<usize>,
+        start_offset: usize,
+    ) -> PyResult<usize> {
         if tokens.is_empty() {
             return Ok(start_offset);
         }
@@ -854,7 +873,7 @@ impl WgpuQwenDecoder {
         }
         let last_idx = n - 1;
         let last_pos = start_offset + last_idx;
-        self.step(tokens[last_idx], last_pos)?;
+        self.step(py, tokens[last_idx], last_pos)?;
         Ok(end)
     }
 
@@ -893,8 +912,8 @@ impl WgpuQwenDecoder {
         for l in 0..self.num_layers.min(k_tensors.len()) {
             let k_view = unsafe { dlpack::BorrowedTensor::from_capsule(&k_tensors[l])? };
             let v_view = unsafe { dlpack::BorrowedTensor::from_capsule(&v_tensors[l])? };
-            let k_slice = unsafe { typed_slice::<f32>(&k_view) };
-            let v_slice = unsafe { typed_slice::<f32>(&v_view) };
+            let k_slice = unsafe { typed_slice::<f32>(&k_view)? };
+            let v_slice = unsafe { typed_slice::<f32>(&v_view)? };
 
             let k_shape = &k_view.shape;
             let src_max_len = if k_shape.len() >= 2 {
@@ -931,6 +950,7 @@ impl WgpuQwenDecoder {
     #[pyo3(signature = (token_id, offset, temperature=0.7, top_k=40, repetition_penalty=1.0, recent_tokens=None, top_p=1.0))]
     pub fn decode_and_sample(
         &mut self,
+        py: Python<'_>,
         token_id: usize,
         offset: usize,
         temperature: f32,
@@ -939,35 +959,38 @@ impl WgpuQwenDecoder {
         recent_tokens: Option<Vec<usize>>,
         top_p: f32,
     ) -> PyResult<usize> {
-        if self.device_lost.load(Ordering::SeqCst) {
-            return Err(pyo3::exceptions::PyRuntimeError::new_err(
-                "WGPU device is lost or in an error state; CPU fallback required",
-            ));
-        }
-        self.kv_used = self.kv_used.max(offset + 1);
-        let slot = match self.record_and_submit_step(token_id, offset) {
-            Ok(s) => s,
-            Err(e) => {
-                self.device_lost.store(true, Ordering::SeqCst);
-                return Err(e);
+        // GIL released for the same reason as `step`: GPU round-trip + poll.
+        py.allow_threads(|| {
+            if self.device_lost.load(Ordering::SeqCst) {
+                return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                    "WGPU device is lost or in an error state; CPU fallback required",
+                ));
             }
-        };
-        let mut logits = match self.readback_logits(slot) {
-            Ok(l) => l,
-            Err(e) => {
-                self.device_lost.store(true, Ordering::SeqCst);
-                return Err(e);
-            }
-        };
+            self.kv_used = self.kv_used.max(offset + 1);
+            let slot = match self.record_and_submit_step(token_id, offset) {
+                Ok(s) => s,
+                Err(e) => {
+                    self.device_lost.store(true, Ordering::SeqCst);
+                    return Err(e);
+                }
+            };
+            let mut logits = match self.readback_logits(slot) {
+                Ok(l) => l,
+                Err(e) => {
+                    self.device_lost.store(true, Ordering::SeqCst);
+                    return Err(e);
+                }
+            };
 
-        let token = {
-            if let (true, Some(tokens)) = (repetition_penalty > 1.0, recent_tokens) {
-                crate::llm::apply_repetition_penalty(&mut logits, &tokens, repetition_penalty);
-            }
-            crate::llm::sample_logits(&logits, temperature, top_k, top_p)
-        };
+            let token = {
+                if let (true, Some(tokens)) = (repetition_penalty > 1.0, recent_tokens) {
+                    crate::llm::apply_repetition_penalty(&mut logits, &tokens, repetition_penalty);
+                }
+                crate::llm::sample_logits(&logits, temperature, top_k, top_p)
+            };
 
-        Ok(token)
+            Ok(token)
+        })
     }
 
     /// Double-buffered generate loop: submits token N+1 to the GPU while
@@ -982,9 +1005,11 @@ impl WgpuQwenDecoder {
     ///      parallel. Both map_async callbacks are in flight simultaneously
     ///      and the poll loop drives both.
     #[pyo3(signature = (first_token, seq_len, max_new_tokens, temperature=0.7,
-                        top_k=40, repetition_penalty=1.0, top_p=1.0, eos_token_id=None))]
+                        top_k=40, repetition_penalty=1.0, top_p=1.0, eos_token_id=None,
+                        recent_seed=None))]
     pub fn generate_loop(
         &mut self,
+        py: Python<'_>,
         first_token: usize,
         seq_len: usize,
         max_new_tokens: usize,
@@ -993,83 +1018,99 @@ impl WgpuQwenDecoder {
         repetition_penalty: f32,
         top_p: f32,
         eos_token_id: Option<usize>,
+        recent_seed: Option<Vec<usize>>,
     ) -> PyResult<(Vec<usize>, usize)> {
-        if self.device_lost.load(Ordering::SeqCst) {
-            return Err(pyo3::exceptions::PyRuntimeError::new_err(
-                "WGPU device is lost or in an error state; CPU fallback required",
-            ));
-        }
-        if max_new_tokens == 0 {
-            return Ok((vec![], seq_len));
-        }
-
-        let vocab_size = self.vocab_size;
-        let mut tokens = Vec::with_capacity(max_new_tokens);
-        let mut logits_a = vec![0.0f32; vocab_size]; // readback buffer
-
-        // ── Seed: submit token 0 without waiting ─────────────────────────
-        let mut next_token = first_token;
-        let mut generated = 0usize;
-
-        if Some(next_token) == eos_token_id {
-            return Ok((vec![], seq_len));
-        }
-        tokens.push(next_token);
-        generated += 1;
-        let first_offset = seq_len; // offset for token 0 is seq_len + 0
-        let mut pending_slot = self.record_and_submit_step(next_token, first_offset)?;
-
-        while generated < max_new_tokens {
-            // ── Determine the *next* token to submit (if any) before blocking ──
-            // We need the previous logits to sample, but we submit the new
-            // command stream *before* we block on the readback. This is safe
-            // because each step reads the rope/attn params that were written
-            // by `write_token_inputs` before its own submit, so token N+1's
-            // submit overwrites those uniform buffers *after* token N's GPU
-            // pass has already consumed them (same queue, FIFO order).
-            //
-            // Readback from `pending_slot` (token N) → sample → get next_token.
-            readback_into(self, pending_slot, &mut logits_a)?;
-
-            // Apply repetition penalty
-            if repetition_penalty > 1.0 {
-                crate::llm::apply_repetition_penalty(&mut logits_a, &tokens, repetition_penalty);
+        // GIL released for the whole generation: the loop is dominated by
+        // GPU submits + readback polls, and holding the GIL would block every
+        // other Python thread for the full duration of the response.
+        py.allow_threads(|| {
+            if self.device_lost.load(Ordering::SeqCst) {
+                return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                    "WGPU device is lost or in an error state; CPU fallback required",
+                ));
             }
-            next_token = crate::llm::sample_logits(&logits_a, temperature, top_k, top_p);
+            if max_new_tokens == 0 {
+                return Ok((vec![], seq_len));
+            }
+
+            let vocab_size = self.vocab_size;
+            let mut tokens = Vec::with_capacity(max_new_tokens);
+            // Repetition window matches the Python decode loop: prompt tail
+            // (recent_seed) + everything generated, capped at RECENT_WINDOW.
+            let mut recent: Vec<usize> = recent_seed.unwrap_or_default();
+            let mut logits_a = vec![0.0f32; vocab_size]; // readback buffer
+
+            // ── Seed: submit token 0 without waiting ─────────────────────────
+            let mut next_token = first_token;
+            let mut generated = 0usize;
 
             if Some(next_token) == eos_token_id {
-                break;
+                return Ok((vec![], seq_len));
             }
             tokens.push(next_token);
+            crate::llm::push_recent_window(&mut recent, next_token);
             generated += 1;
+            let first_offset = seq_len; // offset for token 0 is seq_len + 0
+            let mut pending_slot = self.record_and_submit_step(next_token, first_offset)?;
 
-            // Submit token `generated` to the GPU — this runs in parallel with
-            // whatever CPU work comes after (sampling, book-keeping).
-            let offset = seq_len + generated - 1;
-            pending_slot = self.record_and_submit_step(next_token, offset)?;
-        }
+            while generated < max_new_tokens {
+                // ── Determine the *next* token to submit (if any) before blocking ──
+                // We need the previous logits to sample, but we submit the new
+                // command stream *before* we block on the readback. This is safe
+                // because each step reads the rope/attn params that were written
+                // by `write_token_inputs` before its own submit, so token N+1's
+                // submit overwrites those uniform buffers *after* token N's GPU
+                // pass has already consumed them (same queue, FIFO order).
+                //
+                // Readback from `pending_slot` (token N) → sample → get next_token.
+                readback_into(self, pending_slot, &mut logits_a)?;
 
-        // B2 fix: If we exited because max_new_tokens was reached (not EOS),
-        // the last `record_and_submit_step` is still in-flight with no readback.
-        // We must drain it so logits_cpu reflects the final token's output and
-        // the staging buffer is unmapped for the next call.
-        //
-        // When the loop exits via `break` (EOS), `pending_slot` is from the
-        // *previous* iteration whose readback already completed — the EOS
-        // token was sampled *from* that readback, so no dangling work.
-        //
-        // When the loop exits because `generated == max_new_tokens`, the last
-        // iteration pushed a token and submitted a new step but never entered
-        // the loop body again to read it back. Drain that slot now.
-        if generated == max_new_tokens && generated > 0 {
-            // Drain the final pending readback (we don't need the logits for
-            // sampling but must unmap the staging buffer).
-            let _ = readback_into(self, pending_slot, &mut logits_a);
-            self.logits_cpu = logits_a;
-        }
+                // Apply repetition penalty (sliding window, not all tokens —
+                // matches `engine.py`'s 64-token recency window).
+                if repetition_penalty > 1.0 {
+                    crate::llm::apply_repetition_penalty(
+                        &mut logits_a,
+                        &recent,
+                        repetition_penalty,
+                    );
+                }
+                next_token = crate::llm::sample_logits(&logits_a, temperature, top_k, top_p);
 
-        self.kv_used = self.kv_used.max(seq_len + generated);
-        Ok((tokens, seq_len + generated))
+                if Some(next_token) == eos_token_id {
+                    break;
+                }
+                tokens.push(next_token);
+                crate::llm::push_recent_window(&mut recent, next_token);
+                generated += 1;
+
+                // Submit token `generated` to the GPU — this runs in parallel with
+                // whatever CPU work comes after (sampling, book-keeping).
+                let offset = seq_len + generated - 1;
+                pending_slot = self.record_and_submit_step(next_token, offset)?;
+            }
+
+            // B2 fix: If we exited because max_new_tokens was reached (not EOS),
+            // the last `record_and_submit_step` is still in-flight with no readback.
+            // We must drain it so logits_cpu reflects the final token's output and
+            // the staging buffer is unmapped for the next call.
+            //
+            // When the loop exits via `break` (EOS), `pending_slot` is from the
+            // *previous* iteration whose readback already completed — the EOS
+            // token was sampled *from* that readback, so no dangling work.
+            //
+            // When the loop exits because `generated == max_new_tokens`, the last
+            // iteration pushed a token and submitted a new step but never entered
+            // the loop body again to read it back. Drain that slot now.
+            if generated == max_new_tokens && generated > 0 {
+                // Drain the final pending readback (we don't need the logits for
+                // sampling but must unmap the staging buffer).
+                let _ = readback_into(self, pending_slot, &mut logits_a);
+                self.logits_cpu = logits_a;
+            }
+
+            self.kv_used = self.kv_used.max(seq_len + generated);
+            Ok((tokens, seq_len + generated))
+        })
     }
 }
 

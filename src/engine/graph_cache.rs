@@ -5,7 +5,11 @@
 //! imports via super; pure move, no logic changes.
 
 use super::*;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+
+/// Counter for probabilistic LRU promotion in `execute_prepared`.
+static PROMOTION_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 pub(crate) struct PreplannedExecution {
     pub nodes: Vec<Node>,
@@ -171,8 +175,11 @@ pub fn prepare_graph(dict: &Bound<'_, pyo3::types::PyDict>) -> PyResult<i64> {
     let payload = dict_to_payload(dict)?;
     let base = payload.inputs.len();
     let mut nodes = payload.nodes.clone();
-    let mut fp = fusion::plan(&nodes, base);
+    // Requested outputs are known before planning; the planner keeps those
+    // nodes materialised so the pre-planned path stays valid (no per-call
+    // re-plan cliff for graphs whose native outputs feed eager subgraphs).
     let requested: std::collections::HashSet<u32> = payload.outputs.iter().copied().collect();
+    let mut fp = fusion::plan(&nodes, base, &requested);
     let mut unsafe_output = false;
     for step in &fp.steps {
         if let Step::Chain(plan) = step {
@@ -307,8 +314,12 @@ pub fn execute_prepared(
     };
 
     if needs_touch {
-        let mut cache = graph_cache().write().unwrap_or_else(|e| e.into_inner());
-        cache.touch(handle);
+        // Probabilistic LRU promotion: only promote on 1 out of 8 non-MRU accesses
+        // to reduce write-lock contention across concurrent execution threads.
+        if PROMOTION_COUNTER.fetch_add(1, Ordering::Relaxed) & 7 == 0 {
+            let mut cache = graph_cache().write().unwrap_or_else(|e| e.into_inner());
+            cache.touch(handle);
+        }
     }
 
     #[cfg(feature = "burn")]
@@ -320,7 +331,15 @@ pub fn execute_prepared(
         .iter()
         .map(crate::dlpack::capsule_ref)
         .collect::<PyResult<_>>()?;
-    let native_out = py.allow_threads(|| execute_prepared_native(&graph, &refs))?;
+    // catch_unwind: a kernel panic must degrade to eager fallback, never
+    // surface as PyO3's BaseException-derived PanicException.
+    let native_out = py
+        .allow_threads(|| {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                execute_prepared_native(&graph, &refs)
+            }))
+        })
+        .map_err(crate::ffi::panic_to_pyerr)??;
 
     let mut out = Vec::with_capacity(native_out.len());
     for owned in native_out {

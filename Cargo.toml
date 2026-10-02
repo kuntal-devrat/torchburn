@@ -68,6 +68,11 @@ panic = "unwind"
 strip = true
 debug = 0
 split-debuginfo = "off"
+# NOTE (M12 audit): overflow-checks is disabled in release builds for maximum throughput in
+# hot inner compute kernels (GEMM tiling, quantization dequantization, SIMD loops). To eliminate
+# integer overflow risks in index/pointer arithmetic, public boundary entry points (such as
+# DLPack shapes and strided offset calculations) validate ranges and use checked arithmetic
+# with explicit error propagation (e.g. `new_checked()` constructors).
 overflow-checks = false
 debug-assertions = false
 incremental = false

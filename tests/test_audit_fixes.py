@@ -9,6 +9,62 @@ import torch
 import torchburn
 from torchburn._parser.op_registry import _ATEN_TO_OP
 
+# ---------------------------------------------------------------------------
+# Regression tests for the security-audit fix campaign
+# ---------------------------------------------------------------------------
+
+
+def test_unsupported_op_error_is_runtimeerror():
+    """UnsupportedOpError must subclass RuntimeError so generic
+    `except RuntimeError` handlers (and pytest.raises(RuntimeError))
+    keep catching engine rejections after the dedicated class landed."""
+    from torchburn import _torchburn as native
+
+    assert issubclass(native.UnsupportedOpError, RuntimeError)
+    assert issubclass(native.UnsupportedOpError, BaseException)
+
+
+def test_unsupported_op_error_carries_marker_and_message():
+    """Engine rejections keep the TB_UNSUPPORTED marker and the payload."""
+    from torchburn import _torchburn as native
+
+    with pytest.raises(native.UnsupportedOpError) as exc_info:
+        native.execute_from_dict(
+            {
+                "inputs": [],
+                "nodes": [{"id": 0, "target": "no_such_op", "args": []}],
+                "outputs": [],
+            },
+            [],
+        )
+    assert "TB_UNSUPPORTED:" in str(exc_info.value)
+    assert "no_such_op" in str(exc_info.value)
+
+
+def test_invalid_graph_handle_raises_valueerror_not_panic():
+    """An evicted/garbage handle raises a clean ValueError (catchable as
+    Exception), never a PanicException (BaseException) or hard crash."""
+    from torchburn import _torchburn as native
+
+    with pytest.raises(ValueError):
+        native.execute_prepared(0xDEADBEEF, [])
+
+
+def test_payload_rejects_node_ids_that_alias_tuple_encoding():
+    """Node ids >= 65536 would collide with the (id << 16) | elem tuple
+    output encoding; the payload validator must reject them loudly."""
+    import json
+
+    from torchburn import _torchburn as native
+
+    payload = {
+        "inputs": [],
+        "nodes": [{"id": 70000, "target": "add", "args": []}],
+        "outputs": [],
+    }
+    with pytest.raises(ValueError):
+        native.execute_from_dict(payload, [])
+
 
 def test_op_registry_prelu_kernel():
     """Verify that aten._prelu_kernel.default is mapped to prelu."""

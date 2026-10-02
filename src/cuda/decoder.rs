@@ -39,7 +39,7 @@ use cudarc::nvrtc::compile_ptx;
 
 use crate::dlpack;
 use crate::llm::sample_logits;
-use crate::quantization::typed_slice;
+use crate::llm::typed_slice;
 
 /// Module name under which the decoder kernels are registered on the device.
 const DECODER_MODULE: &str = "tb_decoder";
@@ -543,23 +543,23 @@ impl CudaQwenDecoder {
         // Embed table — upload full table AND keep CPU mirror for row fetches
         let emb_view = unsafe { dlpack::BorrowedTensor::from_capsule(embed_tokens)? };
         let vocab_size = emb_view.shape[0] as usize;
-        let emb_slice = unsafe { typed_slice::<f32>(&emb_view) };
+        let emb_slice = unsafe { typed_slice::<f32>(&emb_view)? };
         let embed_cpu = emb_slice.to_vec();
         let embed_table = htod_f32(&dev, emb_slice).map_err(PyErr::from)?;
         let embed_row = alloc_f32(&dev, hidden_size).map_err(PyErr::from)?;
 
         // Final norm — device buffer + CPU mirror
         let fnv = unsafe { dlpack::BorrowedTensor::from_capsule(final_norm_w)? };
-        let fns = unsafe { typed_slice::<f32>(&fnv) };
+        let fns = unsafe { typed_slice::<f32>(&fnv)? };
         let final_norm_cpu = fns.to_vec();
 
         // LM head (device only)
         let lmwv = unsafe { dlpack::BorrowedTensor::from_capsule(lm_head_w)? };
         let lm_head_w_buf =
-            htod_u8(&dev, unsafe { typed_slice::<u8>(&lmwv) }).map_err(PyErr::from)?;
+            htod_u8(&dev, unsafe { typed_slice::<u8>(&lmwv)? }).map_err(PyErr::from)?;
         let lmsv = unsafe { dlpack::BorrowedTensor::from_capsule(lm_head_s)? };
         let lm_head_s_buf =
-            htod_f32(&dev, unsafe { typed_slice::<f32>(&lmsv) }).map_err(PyErr::from)?;
+            htod_f32(&dev, unsafe { typed_slice::<f32>(&lmsv)? }).map_err(PyErr::from)?;
 
         // Per-layer buffers
         let kv_elems = num_kv_heads * max_seq_len * head_dim;
@@ -569,19 +569,19 @@ impl CudaQwenDecoder {
             macro_rules! f32_buf {
                 ($idx:expr) => {{
                     let v = unsafe { dlpack::BorrowedTensor::from_capsule(&caps[$idx])? };
-                    htod_f32(&dev, unsafe { typed_slice::<f32>(&v) }).map_err(PyErr::from)?
+                    htod_f32(&dev, unsafe { typed_slice::<f32>(&v)? }).map_err(PyErr::from)?
                 }};
             }
             macro_rules! f32_cpu {
                 ($idx:expr) => {{
                     let v = unsafe { dlpack::BorrowedTensor::from_capsule(&caps[$idx])? };
-                    unsafe { typed_slice::<f32>(&v) }.to_vec()
+                    unsafe { typed_slice::<f32>(&v)? }.to_vec()
                 }};
             }
             macro_rules! u8_buf {
                 ($idx:expr) => {{
                     let v = unsafe { dlpack::BorrowedTensor::from_capsule(&caps[$idx])? };
-                    htod_u8(&dev, unsafe { typed_slice::<u8>(&v) }).map_err(PyErr::from)?
+                    htod_u8(&dev, unsafe { typed_slice::<u8>(&v)? }).map_err(PyErr::from)?
                 }};
             }
 
@@ -590,7 +590,7 @@ impl CudaQwenDecoder {
 
             let (qkv_b, qkv_b_cpu) = if caps.len() > 12 {
                 let v = unsafe { dlpack::BorrowedTensor::from_capsule(&caps[12])? };
-                let cpu = unsafe { typed_slice::<f32>(&v) }.to_vec();
+                let cpu = unsafe { typed_slice::<f32>(&v)? }.to_vec();
                 let dev_buf = htod_f32(&dev, &cpu).map_err(PyErr::from)?;
                 (Some(dev_buf), Some(cpu))
             } else {
@@ -678,7 +678,8 @@ impl CudaQwenDecoder {
     }
 
     #[pyo3(signature = (first_token, seq_len, max_new_tokens, temperature=0.7,
-                        top_k=40, repetition_penalty=1.0, top_p=1.0, eos_token_id=None))]
+                        top_k=40, repetition_penalty=1.0, top_p=1.0, eos_token_id=None,
+                        recent_seed=None))]
     pub fn generate_loop(
         &mut self,
         first_token: usize,
@@ -689,8 +690,12 @@ impl CudaQwenDecoder {
         repetition_penalty: f32,
         top_p: f32,
         eos_token_id: Option<usize>,
+        recent_seed: Option<Vec<usize>>,
     ) -> PyResult<(Vec<usize>, usize)> {
         let mut tokens = Vec::with_capacity(max_new_tokens);
+        // Repetition window matches the Python decode loop: prompt tail
+        // (recent_seed) + everything generated, capped at RECENT_WINDOW.
+        let mut recent: Vec<usize> = recent_seed.unwrap_or_default();
         let mut next = first_token;
         let mut gen = 0usize;
         while gen < max_new_tokens {
@@ -698,12 +703,13 @@ impl CudaQwenDecoder {
                 break;
             }
             tokens.push(next);
+            crate::llm::push_recent_window(&mut recent, next);
             gen += 1;
             let offset = seq_len + gen - 1;
             let mut logits = self.run_step(next, offset)?;
             if repetition_penalty > 1.0 {
                 let mut seen = std::collections::HashSet::new();
-                for &t in &tokens {
+                for &t in &recent {
                     if t < self.vocab_size && seen.insert(t) {
                         let l = logits[t];
                         logits[t] = if l > 0.0 {
@@ -740,8 +746,8 @@ impl CudaQwenDecoder {
         for l in 0..self.num_layers.min(k_tensors.len()) {
             let kv = unsafe { dlpack::BorrowedTensor::from_capsule(&k_tensors[l])? };
             let vv = unsafe { dlpack::BorrowedTensor::from_capsule(&v_tensors[l])? };
-            let ks = unsafe { typed_slice::<f32>(&kv) };
-            let vs = unsafe { typed_slice::<f32>(&vv) };
+            let ks = unsafe { typed_slice::<f32>(&kv)? };
+            let vs = unsafe { typed_slice::<f32>(&vv)? };
             let src_len = kv
                 .shape
                 .get(kv.shape.len().wrapping_sub(2))

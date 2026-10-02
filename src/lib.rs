@@ -121,6 +121,12 @@ use pyo3::prelude::*;
 #[pymodule]
 fn _torchburn(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
+    // Dedicated fallback exception (subclasses RuntimeError; keeps the
+    // TB_UNSUPPORTED marker string for backward compatibility).
+    m.add(
+        "UnsupportedOpError",
+        m.py().get_type::<crate::dlpack::UnsupportedOpError>(),
+    )?;
     m.add_class::<crate::llm::RustQwenDecoder>()?;
     #[cfg(feature = "burn-wgpu")]
     m.add_class::<crate::wgpu::WgpuQwenDecoder>()?;
@@ -166,6 +172,7 @@ fn _torchburn(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     // Cache FFI (still in cache module)
     m.add_function(wrap_pyfunction!(cache::cache_get, m)?)?;
+    m.add_function(wrap_pyfunction!(cache::cache_contains, m)?)?;
     m.add_function(wrap_pyfunction!(cache::cache_put, m)?)?;
     m.add_function(wrap_pyfunction!(cache::cache_stats, m)?)?;
     m.add_function(wrap_pyfunction!(cache::cache_clear, m)?)?;

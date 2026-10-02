@@ -28,9 +28,15 @@ pub fn execute_from_dict(
 }
 
 /// Parse a graph dict once and cache it in Rust. Returns a handle.
+///
+/// Panics during parse/fusion planning are converted to a plain error: the
+/// Python interpreter treats a failed prepare as "no prepared graph" and runs
+/// the sequential path, so a planning panic must not escape as PyO3's
+/// BaseException-derived PanicException.
 #[pyfunction]
 pub fn prepare_graph(dict: &Bound<'_, pyo3::types::PyDict>) -> PyResult<i64> {
-    engine::prepare_graph(dict)
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| engine::prepare_graph(dict)))
+        .map_err(super::panic_to_pyerr)?
 }
 
 /// Execute a previously prepared graph with new input tensors.

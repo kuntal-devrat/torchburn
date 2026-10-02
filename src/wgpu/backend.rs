@@ -140,7 +140,6 @@ pub fn force_gpu() -> bool {
             | Some("wgpu")
             | Some("burn-wgpu")
             | Some("burn_gpu")
-            | Some("auto")
             | Some("igpu")
             | Some("dgpu")
             | Some("metal")
@@ -361,6 +360,9 @@ pub struct WgpuInt4Context {
     /// Flag indicating if the GPU device has entered an unrecoverable error
     /// or device-lost state.
     pub device_lost: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Whether the adapter is a discrete GPU (e.g. NVIDIA/AMD PCIe card) vs
+    /// integrated GPU or software fallback. Used to size decoder chunking passes.
+    pub is_discrete: bool,
 }
 
 #[cfg(feature = "burn-wgpu")]
@@ -422,6 +424,7 @@ pub fn get_wgpu_int4_context() -> Option<&'static WgpuInt4Context> {
         };
 
         let info = adapter.get_info();
+        let is_discrete = matches!(info.device_type, wgpu::DeviceType::DiscreteGpu);
         let default_rows = match info.device_type {
             wgpu::DeviceType::DiscreteGpu => 8u32,
             wgpu::DeviceType::IntegratedGpu => 4u32,
@@ -579,6 +582,7 @@ pub fn get_wgpu_int4_context() -> Option<&'static WgpuInt4Context> {
             has_subgroups,
             has_pipeline_cache,
             device_lost,
+            is_discrete,
         })
     }).as_ref()
 }
@@ -630,35 +634,20 @@ fn weight_cache_cap() -> usize {
         .unwrap_or(256)
 }
 
-/// Cheap, deterministic fingerprint over `data`: FNV-1a over a strided sample
-/// (>=64 words) plus the first and last bytes. Deliberately not a cryptographic
-/// hash — the cost stays ~O(1) per call — while still catching the realistic
-/// "buffer reused with different weights" collisions pointer keys can cause.
+/// Deterministic fingerprint over `data` using BLAKE3 (already a crate
+/// dependency). Hashes the full buffer — BLAKE3 processes ~1 GB/s on modern
+/// CPUs via SIMD, so even a 500 MB weight matrix completes in <500 ms (and
+/// this only runs on cache *miss*, not every decode step). The 256-bit hash
+/// is truncated to `u64` for the cache key; 64 bits gives a ~1e-19 collision
+/// probability per pair, which is negligible for the ~200 weight matrices in
+/// a large model.
 #[cfg(feature = "burn-wgpu")]
 fn content_tag(data: &[u8]) -> u64 {
-    let mut h: u64 = 0xcbf29ce484222325; // FNV-1a offset basis
-    let n = data.len();
-    if n == 0 {
-        return h;
-    }
-    // Sample 256 strided positions (up from 64) for stronger collision resistance
-    // when multiple weight matrices are hot-swapped at the same memory address.
-    let step = (n / 256).max(1);
-    let mut i = 0usize;
-    while i < n {
-        h ^= data[i] as u64;
-        h = h.wrapping_mul(0x100000001b3);
-        i += step;
-    }
-    // Fold the tail too, so equal-length tensors whose only differences are at
-    // the very end of the buffer are still distinguished.
-    let mut j = 0usize;
-    while j < 16 && j < n {
-        h ^= data[n - 1 - j] as u64;
-        h = h.wrapping_mul(0x100000001b3);
-        j += 1;
-    }
-    h
+    let hash = blake3::hash(data);
+    let bytes = hash.as_bytes();
+    u64::from_le_bytes([
+        bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+    ])
 }
 
 /// Thread-safe GPU buffer pool that caches and reuses wgpu buffers across
@@ -726,13 +715,14 @@ impl WgpuBufferPool {
 
     /// Recycle a buffer back into the pool for future reuse.
     pub fn recycle(&self, buffer: wgpu::Buffer, size: u64, usage: wgpu::BufferUsages) {
-        // Limit total pool capacity to 128 buffers to avoid excessive VRAM retention.
-        if self.total_cached.load(std::sync::atomic::Ordering::Relaxed) >= 128 {
-            return;
-        }
         let rounded = Self::round_size(size);
         let key = (rounded, usage);
         if let Ok(mut map) = self.pool.lock() {
+            // Capacity check inside the lock to prevent counter drift when
+            // multiple threads race to recycle buffers.
+            if self.total_cached.load(std::sync::atomic::Ordering::Relaxed) >= 128 {
+                return;
+            }
             let entry = map.entry(key).or_default();
             if entry.len() < 16 {
                 entry.push(buffer);
@@ -1070,7 +1060,9 @@ fn wgpu_gemv_w4a32_inner(
     encoder.copy_buffer_to_buffer(&p.y_buf, 0, &p.staging_buf, 0, (num_rows * 4) as u64);
     queue.submit(Some(encoder.finish()));
 
-    // ── Phase 3: Readback (lock-free) ──────────────────────────────────────
+    // ── Phase 3: Readback with timeout ─────────────────────────────────────
+    // A bounded recv prevents infinite hangs if the GPU enters a TDR / device-
+    // lost state that doesn't trigger the uncaptured-error callback.
     let buffer_slice = p.staging_buf.slice(..(num_rows * 4) as u64);
     let (tx, rx) = std::sync::mpsc::channel();
     buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
@@ -1078,8 +1070,13 @@ fn wgpu_gemv_w4a32_inner(
     });
 
     let _ = device.poll(wgpu::PollType::Wait);
-    rx.recv()
-        .map_err(|e| e.to_string())?
+    rx.recv_timeout(std::time::Duration::from_secs(10))
+        .map_err(|_| {
+            // Mark device as lost so subsequent calls fail fast.
+            ctx.device_lost
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            "wgpu GEMV readback timed out after 10s (possible GPU hang / TDR)".to_string()
+        })?
         .map_err(|e| e.to_string())?;
 
     {

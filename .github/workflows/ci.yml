@@ -67,8 +67,25 @@ jobs:
       - name: Check py.typed and version sync
         run: |
           test -f python/torchburn/py.typed || (echo "py.typed missing" && exit 1)
-          python -c "import tomllib; p=open('pyproject.toml','rb'); d=tomllib.load(p); print(d['project']['version'])"
-          cargo --version
+          python - <<'EOF'
+          import re, tomllib
+          pyproject = tomllib.load(open('pyproject.toml', 'rb'))
+          pyproject_version = pyproject['project']['version']
+          cargo_src = open('Cargo.toml', encoding='utf-8').read()
+          pkg = re.search(r'^\[package\]\s*$', cargo_src, re.MULTILINE)
+          if not pkg:
+              raise SystemExit('Cargo.toml: [package] section not found')
+          cargo_section = cargo_src[pkg.end():]
+          m = re.search(r'^version\s*=\s*"([^"]+)"', cargo_section, re.MULTILINE)
+          if not m:
+              raise SystemExit('Cargo.toml: version not found in [package]')
+          cargo_version = m.group(1)
+          if pyproject_version != cargo_version:
+              raise SystemExit(
+                  f'version mismatch: pyproject.toml {pyproject_version} != Cargo.toml {cargo_version}'
+              )
+          print(f'version sync ok: {cargo_version}')
+          EOF
 
   # ── Test Matrix ────────────────────────────────────────────────────
   # Optimized: 9 jobs in parallel (max 8) vs 19 before — 50% faster, Swatinem cache

@@ -1,6 +1,7 @@
 """Universal Inference Engine for TorchBurn LLM."""
 
 from __future__ import annotations
+import logging
 import os
 import sys
 import time
@@ -13,6 +14,8 @@ import torchburn
 from .config import EngineConfig, GenerationConfig, ModelConfig
 from .model import UniversalTransformer, StaticKVCache
 from .tokenizer import UniversalTokenizer
+
+_LOG = logging.getLogger("torchburn.llm")
 
 
 class UniversalEngine:
@@ -31,10 +34,11 @@ class UniversalEngine:
         self._wgpu_decoder = None
         self._is_compiled = False
 
-        # 1. Device and Threading Setup
-        threads = self.config.num_threads or max(1, os.cpu_count() or 4)
-        torch.set_num_threads(threads)
+        # 1. Device and Threading Setup. `set_num_threads` mutates GLOBAL
+        # torch state, so it is only touched when the caller explicitly
+        # configures it (never implicitly on engine construction).
         if self.config.num_threads is not None:
+            torch.set_num_threads(self.config.num_threads)
             os.environ["RAYON_NUM_THREADS"] = str(self.config.num_threads)
 
         # 2. Hardware and Quantization Dispatch
@@ -54,12 +58,18 @@ class UniversalEngine:
                 if sys.platform == "darwin" and hasattr(_native_check, "MetalBackend"):
                     target_device = "metal"
                 else:
-                    gpu_info = torchburn._torchburn.gpu_info()
-                    target_device = "gpu" if gpu_info.get("available", False) else "cpu"
+                    try:
+                        gpu_result = torchburn._torchburn.gpu_info()
+                        # gpu_info() returns a tuple: (available, adapter_name, backend, vram_bytes)
+                        available = gpu_result[0] if isinstance(gpu_result, (tuple, list)) else gpu_result.get("available", False)
+                        target_device = "gpu" if available else "cpu"
+                    except Exception:
+                        target_device = "cpu"
             except Exception:
                 try:
-                    gpu_info = torchburn._torchburn.gpu_info()
-                    target_device = "gpu" if gpu_info.get("available", False) else "cpu"
+                    gpu_result = torchburn._torchburn.gpu_info()
+                    available = gpu_result[0] if isinstance(gpu_result, (tuple, list)) else gpu_result.get("available", False)
+                    target_device = "gpu" if available else "cpu"
                 except Exception:
                     target_device = "cpu"
         elif target_device == "metal":
@@ -97,10 +107,10 @@ class UniversalEngine:
             if not is_already_quantized:
                 # Fuse QKV for single-pass GEMV
                 if hasattr(self.raw_model, "fuse_qkv"):
-                    print("[\033[94mTorchBurn\033[0m] Fusing QKV projections for single-pass GEMV...")
+                    _LOG.info("Fusing QKV projections for single-pass GEMV...")
                     self.raw_model.fuse_qkv()
 
-                print(f"[\033[92mTorchBurn\033[0m] Quantizing model weights to INT{bits} SIMD [backend={backend}]...")
+                _LOG.info("Quantizing model weights to INT%d SIMD [backend=%s]...", bits, backend)
                 torchburn.quantize_model(self.raw_model, bits=bits, exclude_modules=[], backend=backend)
 
 
@@ -108,19 +118,19 @@ class UniversalEngine:
 
             if self._rust_decoder is None and bits == 4 and native_decoder_supported and backend == "cpu":
                 try:
-                    print("[\033[92mTorchBurn\033[0m] Initializing Zero-Python Pure Rust Decoder (AVX-512 VNNI)...")
+                    _LOG.info("Initializing Zero-Python Pure Rust Decoder (AVX-512 VNNI)...")
                     self._rust_decoder = torchburn.create_rust_qwen_decoder(self.raw_model)
-                    print("[\033[92mTorchBurn\033[0m] Pure Rust Decoder active (45-50+ tok/s).")
+                    _LOG.info("Pure Rust Decoder active (45-50+ tok/s).")
                 except Exception as dec_err:
-                    print(f"[\033[93mWarning\033[0m] Pure-Rust decoder init ({dec_err}), using fused layer SIMD.")
+                    _LOG.warning("Pure-Rust decoder init (%s), using fused layer SIMD.", dec_err)
             elif self._rust_decoder is None and bits == 4 and native_decoder_supported and backend == "igpu":
                 try:
-                    print("[\033[95miGPU Active\033[0m] Initializing End-to-End WGPU GPU Graph Decoder (Vulkan)...")
+                    _LOG.info("Initializing End-to-End WGPU GPU Graph Decoder (Vulkan)...")
                     self._wgpu_decoder = torchburn.create_wgpu_qwen_decoder(self.raw_model)
                     # Warm up GPU pipelines and JIT compile shaders so decode starts immediately
                     self._wgpu_decoder.step(0, 0)
                     self._wgpu_decoder.reset_kv_cache()
-                    print("[\033[95miGPU Active\033[0m] End-to-End GPU Compute Graph active (1-shot command stream).")
+                    _LOG.info("End-to-End GPU Compute Graph active (1-shot command stream).")
                 except Exception as wgpu_err:
                     # Genuine fallback, not a silent no-op: the GPU adapter could
                     # not be initialized (headless box, missing driver, device
@@ -128,14 +138,15 @@ class UniversalEngine:
                     # layout the CPU kernels consume, so re-point every
                     # quantized layer at the portable SIMD CPU backend and hand
                     # decode to the zero-Python Rust decoder instead.
-                    print(f"[\033[93mWarning\033[0m] WGPU decoder init failed ({wgpu_err}); falling back to CPU SIMD decode.")
+                    _LOG.warning("WGPU decoder init failed (%s); falling back to CPU SIMD decode.", wgpu_err)
+                    self._wgpu_decoder = None  # Clear partially-initialized decoder
                     _set_quant_backend(self.raw_model, "cpu")
                     try:
-                        print("[\033[92mTorchBurn\033[0m] Initializing Pure Rust Decoder (CPU fallback)...")
+                        _LOG.info("Initializing Pure Rust Decoder (CPU fallback)...")
                         self._rust_decoder = torchburn.create_rust_qwen_decoder(self.raw_model)
-                        print("[\033[92mTorchBurn\033[0m] Pure Rust Decoder active (CPU fallback).")
+                        _LOG.info("Pure Rust Decoder active (CPU fallback).")
                     except Exception as dec_err:
-                        print(f"[\033[93mWarning\033[0m] Pure-Rust decoder fallback failed ({dec_err}); using fused layer SIMD.")
+                        _LOG.warning("Pure-Rust decoder fallback failed (%s); using fused layer SIMD.", dec_err)
 
             self.model = self.raw_model
             self._is_compiled = True
@@ -188,6 +199,7 @@ class UniversalEngine:
         top_p: float = 0.9,
         repetition_penalty: float = 1.0,
         recent_tokens: Optional[List[int]] = None,
+        generator: Optional[torch.Generator] = None,
     ) -> int:
         """Fast top-k filtered nucleus sampling with repetition penalty."""
         if logits.dim() == 3:
@@ -224,11 +236,11 @@ class UniversalEngine:
                 probs = probs / prob_sum
             else:
                 return int(top_indices[0].item())
-            sample_idx = torch.multinomial(probs, num_samples=1)
+            sample_idx = torch.multinomial(probs, num_samples=1, generator=generator)
             return int(top_indices[sample_idx].item())
         else:
             probs = F.softmax(top_vals, dim=-1)
-            sample_idx = torch.multinomial(probs, num_samples=1)
+            sample_idx = torch.multinomial(probs, num_samples=1, generator=generator)
             return int(top_indices[sample_idx].item())
 
     def generate_stream(
@@ -242,7 +254,11 @@ class UniversalEngine:
         """Streams generated tokens with performance metadata and multi-turn KV-cache consistency."""
         cfg = config or GenerationConfig()
         if cfg.seed is not None:
-            torch.manual_seed(cfg.seed)
+            # Per-request local generator: reseeding the global RNG (manual_seed)
+            # would leak this request's stream into every other consumer of
+            # torch randomness in the process.
+            self._rng = torch.Generator(device="cpu")
+            self._rng.manual_seed(cfg.seed)
 
         input_ids_list = self.tokenizer.encode(prompt)
         if not input_ids_list:
@@ -346,7 +362,7 @@ class UniversalEngine:
                 v_caps = [torch.to_dlpack(v) for v in v_list]
                 decoder.copy_kv_cache_from_tensors(k_caps, v_caps, seq_len)
             except Exception as sync_err:
-                print(f"[\033[93mWarning\033[0m] KV sync to native decoder: {sync_err}")
+                _LOG.warning("KV sync to native decoder: %s", sync_err)
 
         yield {
             "type": "prefill",
@@ -365,6 +381,7 @@ class UniversalEngine:
             cfg.top_p,
             repetition_penalty=cfg.repetition_penalty,
             recent_tokens=all_token_ids[-recent_window:],
+            generator=getattr(self, "_rng", None),
         )
         tokens_generated = 0
         eos_id = cfg.eos_token_id if cfg.eos_token_id is not None else self.tokenizer.eos_token_id
@@ -480,6 +497,7 @@ class UniversalEngine:
                     cfg.top_p,
                     repetition_penalty=cfg.repetition_penalty,
                     recent_tokens=rec_toks,
+                    generator=getattr(self, "_rng", None),
                 )
 
             yield {

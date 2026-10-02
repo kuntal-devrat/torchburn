@@ -150,7 +150,12 @@ def test_wgpu_chunked_passes(quantized_model):
     except MemoryError as e:
         pytest.skip(f"wgpu OOM: {e}")
 
-    assert dec_default.layers_per_pass == 6
+    expected_default = (
+        dec_default.num_layers
+        if getattr(dec_default, "is_discrete", False)
+        else 6
+    )
+    assert dec_default.layers_per_pass == expected_default
 
     # Test explicit layers_per_pass
     try:

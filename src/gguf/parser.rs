@@ -47,27 +47,53 @@ impl From<io::Error> for GgufError {
 }
 
 /// GGUF file parser.
-pub struct GgufParser {
-    reader: Vec<u8>,
+///
+/// The reader borrows its buffer when parsing from memory
+/// ([`GgufParser::from_slice`]) so large model files are never cloned.
+pub struct GgufParser<'a> {
+    reader: std::borrow::Cow<'a, [u8]>,
     pos: usize,
 }
 
-impl GgufParser {
-    /// Create a new parser from a file.
+impl GgufParser<'static> {
+    /// Create a new parser from a file (owns its buffer).
     pub fn from_file(path: &Path) -> Result<Self, GgufError> {
         let mut file = File::open(path)?;
         let mut data = Vec::new();
         file.read_to_end(&mut data)?;
         Ok(Self {
-            reader: data,
+            reader: std::borrow::Cow::Owned(data),
             pos: 0,
         })
     }
 
-    /// Create a new parser from a byte buffer.
+    /// Create a new parser from an owned byte buffer.
     pub fn from_bytes(data: Vec<u8>) -> Self {
         Self {
-            reader: data,
+            reader: std::borrow::Cow::Owned(data),
+            pos: 0,
+        }
+    }
+
+    /// Parse from a file path.
+    pub fn parse_file(path: &Path) -> Result<GgufModel, GgufError> {
+        let mut parser = GgufParser::from_file(path)?;
+        parser.parse()
+    }
+
+    /// Parse from a byte buffer.
+    pub fn parse_bytes(data: Vec<u8>) -> Result<GgufModel, GgufError> {
+        let mut parser = GgufParser::from_bytes(data);
+        parser.parse()
+    }
+}
+
+impl<'a> GgufParser<'a> {
+    /// Create a parser that *borrows* the buffer (zero-copy parsing — used
+    /// by `GgufMmap::open` so a multi-GB model file is held exactly once).
+    pub fn from_slice(data: &'a [u8]) -> Self {
+        Self {
+            reader: std::borrow::Cow::Borrowed(data),
             pos: 0,
         }
     }
@@ -190,6 +216,20 @@ impl GgufParser {
         let tensor_count = self.read_u64()?;
         let kv_count = self.read_u64()?;
 
+        // Reject hostile counts BEFORE any allocation or iteration: each KV
+        // pair costs at least 9 bytes (u64 key length + type + 1-byte value)
+        // and each tensor info at least 24 bytes, so a count larger than the
+        // remaining file can never be satisfied. Without this, a corrupt
+        // header could request a multi-GB `Vec::with_capacity` up front and
+        // abort the process on allocation failure.
+        let remaining = (self.reader.len() - self.pos) as u64;
+        if kv_count > remaining / 9 {
+            return Err(GgufError::TruncatedData);
+        }
+        if tensor_count > remaining / 24 {
+            return Err(GgufError::TruncatedData);
+        }
+
         // Read metadata KV pairs
         let mut metadata = Vec::with_capacity(kv_count.min(1_000_000) as usize);
         for _ in 0..kv_count {
@@ -200,10 +240,18 @@ impl GgufParser {
 
         // Read tensor infos (use header count; do NOT read an extra u64)
         let n_tensors = tensor_count as usize;
-        let mut tensors = Vec::with_capacity(n_tensors);
+        // Capacity is only a perf hint — cap the pre-allocation so a corrupt
+        // (but file-consistent) count cannot force a huge allocation; real
+        // growth happens as reads succeed.
+        let mut tensors = Vec::with_capacity(n_tensors.min(1_000_000));
         for _ in 0..n_tensors {
             let name = self.read_string()?;
             let n_dims = self.read_u32()?;
+            // GGUF tensors have at most 4 dimensions; 64 is a generous bound
+            // that keeps `with_capacity(n_dims)` small even for garbage input.
+            if n_dims > 64 {
+                return Err(GgufError::TruncatedData);
+            }
             let mut dims = Vec::with_capacity(n_dims as usize);
             for _ in 0..n_dims {
                 dims.push(self.read_u64()?);
@@ -231,21 +279,14 @@ impl GgufParser {
             data_offset: data_offset as u64,
         })
     }
-
-    /// Parse from a file path.
-    pub fn parse_file(path: &Path) -> Result<GgufModel, GgufError> {
-        let mut parser = Self::from_file(path)?;
-        parser.parse()
-    }
-
-    /// Parse from a byte buffer.
-    pub fn parse_bytes(data: Vec<u8>) -> Result<GgufModel, GgufError> {
-        let mut parser = Self::from_bytes(data);
-        parser.parse()
-    }
 }
 
-/// Memory-mapped GGUF file for zero-copy tensor access.
+/// GGUF file loaded into memory for fast tensor access.
+///
+/// Note: despite the historical name this is *not* an OS-level mmap — the
+/// file is read into a single `Vec<u8>` and parsed without cloning it, so
+/// peak RAM equals file size (not 2x). True mmap (e.g. `memmap2`) is a
+/// possible future optimization for very large models.
 pub struct GgufMmap {
     data: Vec<u8>,
     model: GgufModel,
@@ -258,10 +299,9 @@ impl GgufMmap {
         let mut data = Vec::new();
         file.read_to_end(&mut data)?;
 
-        let model = {
-            let mut parser = GgufParser::from_bytes(data.clone());
-            parser.parse()?
-        };
+        // Parse by reference — the previous implementation cloned the whole
+        // buffer for the parser, doubling peak memory on multi-GB files.
+        let model = GgufParser::from_slice(&data).parse()?;
 
         Ok(Self { data, model })
     }
@@ -294,5 +334,90 @@ impl GgufMmap {
     /// Get the underlying data buffer.
     pub fn data(&self) -> &[u8] {
         &self.data
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Smallest structurally valid GGUF v3 byte stream (header + 1 KV + 1 tensor).
+    fn minimal_gguf() -> Vec<u8> {
+        let mut b = Vec::new();
+        b.extend_from_slice(b"GGUF");
+        b.extend_from_slice(&super::super::GGUF_VERSION.to_le_bytes());
+        b.extend_from_slice(&1u64.to_le_bytes()); // n_tensors
+        b.extend_from_slice(&1u64.to_le_bytes()); // n_kv
+                                                  // KV pair: key "k", type string, value "v"
+        b.extend_from_slice(&1u64.to_le_bytes());
+        b.extend_from_slice(b"k");
+        b.push(8); // metadata type = string
+        b.extend_from_slice(&1u64.to_le_bytes());
+        b.extend_from_slice(b"v");
+        // Tensor info: name "t", 1 dim of 4 elements, quant 0, offset 0
+        b.extend_from_slice(&1u64.to_le_bytes());
+        b.extend_from_slice(b"t");
+        b.extend_from_slice(&1u32.to_le_bytes());
+        b.extend_from_slice(&4u64.to_le_bytes());
+        b.extend_from_slice(&0u32.to_le_bytes());
+        b.extend_from_slice(&0u64.to_le_bytes());
+        b
+    }
+
+    #[test]
+    fn parses_minimal_gguf() {
+        let model = GgufParser::from_bytes(minimal_gguf())
+            .parse()
+            .expect("minimal gguf must parse");
+        assert_eq!(model.tensors.len(), 1);
+        assert_eq!(model.metadata.len(), 1);
+        assert_eq!(model.tensors[0].name, "t");
+    }
+
+    /// Corrupt/truncated input must always produce Err — never panic or an
+    /// oversized allocation. Exercises every prefix length with and without
+    /// a byte flip at the tail (which perturbs counts/lengths).
+    #[test]
+    fn truncated_or_flipped_input_never_panics() {
+        let full = minimal_gguf();
+        for cut in 0..full.len() {
+            let mut b = full[..cut].to_vec();
+            assert!(
+                GgufParser::from_bytes(b.clone()).parse().is_ok()
+                    || GgufParser::from_bytes(b.clone()).parse().is_err(),
+                "parse must return a result (no panic) for cut={cut}"
+            );
+            if let Some(last) = b.last_mut() {
+                *last ^= 0xFF;
+            }
+            let _ = GgufParser::from_bytes(b).parse(); // must not panic
+        }
+    }
+
+    /// A header claiming absurd KV/tensor counts must be rejected before any
+    /// allocation is attempted.
+    #[test]
+    fn hostile_counts_rejected() {
+        let mut b = Vec::new();
+        b.extend_from_slice(b"GGUF");
+        b.extend_from_slice(&super::super::GGUF_VERSION.to_le_bytes());
+        b.extend_from_slice(&u64::MAX.to_le_bytes()); // n_tensors
+        b.extend_from_slice(&u64::MAX.to_le_bytes()); // n_kv
+        assert!(GgufParser::from_bytes(b).parse().is_err());
+    }
+
+    /// Dim counts beyond any real tensor must not drive `with_capacity`.
+    #[test]
+    fn oversized_dim_count_rejected() {
+        let mut b = Vec::new();
+        b.extend_from_slice(b"GGUF");
+        b.extend_from_slice(&super::super::GGUF_VERSION.to_le_bytes());
+        b.extend_from_slice(&1u64.to_le_bytes()); // n_tensors
+        b.extend_from_slice(&0u64.to_le_bytes()); // n_kv
+        b.extend_from_slice(&1u64.to_le_bytes()); // name len
+        b.extend_from_slice(b"t");
+        b.extend_from_slice(&u32::MAX.to_le_bytes()); // n_dims garbage
+        b.extend_from_slice(&[0u8; 64]);
+        assert!(GgufParser::from_bytes(b).parse().is_err());
     }
 }

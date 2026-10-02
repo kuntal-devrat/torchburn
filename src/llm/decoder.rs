@@ -67,12 +67,45 @@ fn rope_apply_head(head: &mut [f32], cos_p: &[f32], sin_p: &[f32], half_dim: usi
     }
 }
 
-pub(crate) unsafe fn typed_slice<T>(t: &BorrowedTensor) -> &[T] {
-    std::slice::from_raw_parts(t.data as *const T, t.buffer_len())
+/// Reinterpret a validated capsule buffer as `&[T]`.
+///
+/// Memory safety requires `size_of::<T>()` to equal the tensor's element
+/// size: `buffer_len()` counts elements of the *tensor's* dtype, so an
+/// f16/bf16 (2-byte) capsule read as `&[f32]` would otherwise cover twice
+/// the allocation. Callers pass user-supplied capsules, so this is checked
+/// and returned as a Python error instead of asserted.
+pub(crate) unsafe fn typed_slice<T>(t: &BorrowedTensor) -> PyResult<&[T]> {
+    if std::mem::size_of::<T>() != t.dtype.elem_size() {
+        return Err(unsupported(&format!(
+            "decoder: expected a {}-byte dtype, got {} (pass weights whose dtype matches the model format)",
+            std::mem::size_of::<T>(),
+            t.dtype.name()
+        )));
+    }
+    Ok(std::slice::from_raw_parts(
+        t.data as *const T,
+        t.buffer_len(),
+    ))
 }
 
-unsafe fn typed_mut_slice<T>(t: &mut OwnedTensor) -> &mut [T] {
-    std::slice::from_raw_parts_mut(t.data.as_mut_ptr() as *mut T, t.elem_count())
+/// Checked mutable view over an `OwnedTensor` output buffer: rejects
+/// allocation-overflow results (empty data with a non-empty shape) instead
+/// of constructing an out-of-bounds slice.
+unsafe fn typed_mut_slice<T>(t: &mut OwnedTensor) -> PyResult<&mut [T]> {
+    let n = t.elem_count();
+    let want_bytes = n
+        .checked_mul(std::mem::size_of::<T>())
+        .ok_or_else(|| unsupported("decoder: output element count overflow"))?;
+    if t.data.len() * 8 < want_bytes {
+        return Err(unsupported(&format!(
+            "decoder: output buffer too small ({} bytes allocated, {want_bytes} needed)",
+            t.data.len() * 8
+        )));
+    }
+    Ok(std::slice::from_raw_parts_mut(
+        t.data.as_mut_ptr() as *mut T,
+        n,
+    ))
 }
 
 pub struct RustLayerData {
@@ -202,7 +235,7 @@ impl RustQwenDecoder {
 
         let emb_view = unsafe { dlpack::BorrowedTensor::from_capsule(embed_tokens)? };
         let vocab_size = emb_view.shape[0] as usize;
-        let emb_slice = unsafe { typed_slice::<f32>(&emb_view) };
+        let emb_slice = unsafe { typed_slice::<f32>(&emb_view)? };
         let mut embed_tokens_vec = Vec::new();
         embed_tokens_vec
             .try_reserve_exact(emb_slice.len())
@@ -215,13 +248,13 @@ impl RustQwenDecoder {
         embed_tokens_vec.extend_from_slice(emb_slice);
 
         let fnorm_view = unsafe { dlpack::BorrowedTensor::from_capsule(final_norm_w)? };
-        let final_norm_vec = unsafe { typed_slice::<f32>(&fnorm_view) }.to_vec();
+        let final_norm_vec = unsafe { typed_slice::<f32>(&fnorm_view)? }.to_vec();
 
         let lm_w_view = unsafe { dlpack::BorrowedTensor::from_capsule(lm_head_w)? };
-        let lm_head_w_vec = unsafe { typed_slice::<u8>(&lm_w_view) }.to_vec();
+        let lm_head_w_vec = unsafe { typed_slice::<u8>(&lm_w_view)? }.to_vec();
 
         let lm_s_view = unsafe { dlpack::BorrowedTensor::from_capsule(lm_head_s)? };
-        let lm_head_s_vec = unsafe { typed_slice::<f32>(&lm_s_view) }.to_vec();
+        let lm_head_s_vec = unsafe { typed_slice::<f32>(&lm_s_view)? }.to_vec();
 
         let mut rust_layers = Vec::with_capacity(num_layers);
         for l_caps in layers_data {
@@ -229,45 +262,45 @@ impl RustQwenDecoder {
                 return Err(unsupported("Each layer requires 12 capsules: input_norm, qkv_w, qkv_s, o_w, o_s, post_norm, gate_w, gate_s, up_w, up_s, down_w, down_s"));
             }
             let in_norm =
-                unsafe { typed_slice::<f32>(&dlpack::BorrowedTensor::from_capsule(&l_caps[0])?) }
+                unsafe { typed_slice::<f32>(&dlpack::BorrowedTensor::from_capsule(&l_caps[0])?)? }
                     .to_vec();
             let qkv_w =
-                unsafe { typed_slice::<u8>(&dlpack::BorrowedTensor::from_capsule(&l_caps[1])?) }
+                unsafe { typed_slice::<u8>(&dlpack::BorrowedTensor::from_capsule(&l_caps[1])?)? }
                     .to_vec();
             let qkv_s =
-                unsafe { typed_slice::<f32>(&dlpack::BorrowedTensor::from_capsule(&l_caps[2])?) }
+                unsafe { typed_slice::<f32>(&dlpack::BorrowedTensor::from_capsule(&l_caps[2])?)? }
                     .to_vec();
             let o_w =
-                unsafe { typed_slice::<u8>(&dlpack::BorrowedTensor::from_capsule(&l_caps[3])?) }
+                unsafe { typed_slice::<u8>(&dlpack::BorrowedTensor::from_capsule(&l_caps[3])?)? }
                     .to_vec();
             let o_s =
-                unsafe { typed_slice::<f32>(&dlpack::BorrowedTensor::from_capsule(&l_caps[4])?) }
+                unsafe { typed_slice::<f32>(&dlpack::BorrowedTensor::from_capsule(&l_caps[4])?)? }
                     .to_vec();
             let post_norm =
-                unsafe { typed_slice::<f32>(&dlpack::BorrowedTensor::from_capsule(&l_caps[5])?) }
+                unsafe { typed_slice::<f32>(&dlpack::BorrowedTensor::from_capsule(&l_caps[5])?)? }
                     .to_vec();
             let gate_w =
-                unsafe { typed_slice::<u8>(&dlpack::BorrowedTensor::from_capsule(&l_caps[6])?) }
+                unsafe { typed_slice::<u8>(&dlpack::BorrowedTensor::from_capsule(&l_caps[6])?)? }
                     .to_vec();
             let gate_s =
-                unsafe { typed_slice::<f32>(&dlpack::BorrowedTensor::from_capsule(&l_caps[7])?) }
+                unsafe { typed_slice::<f32>(&dlpack::BorrowedTensor::from_capsule(&l_caps[7])?)? }
                     .to_vec();
             let up_w =
-                unsafe { typed_slice::<u8>(&dlpack::BorrowedTensor::from_capsule(&l_caps[8])?) }
+                unsafe { typed_slice::<u8>(&dlpack::BorrowedTensor::from_capsule(&l_caps[8])?)? }
                     .to_vec();
             let up_s =
-                unsafe { typed_slice::<f32>(&dlpack::BorrowedTensor::from_capsule(&l_caps[9])?) }
+                unsafe { typed_slice::<f32>(&dlpack::BorrowedTensor::from_capsule(&l_caps[9])?)? }
                     .to_vec();
             let down_w =
-                unsafe { typed_slice::<u8>(&dlpack::BorrowedTensor::from_capsule(&l_caps[10])?) }
+                unsafe { typed_slice::<u8>(&dlpack::BorrowedTensor::from_capsule(&l_caps[10])?)? }
                     .to_vec();
             let down_s =
-                unsafe { typed_slice::<f32>(&dlpack::BorrowedTensor::from_capsule(&l_caps[11])?) }
+                unsafe { typed_slice::<f32>(&dlpack::BorrowedTensor::from_capsule(&l_caps[11])?)? }
                     .to_vec();
             let qkv_b = if l_caps.len() >= 13 {
                 Some(
                     unsafe {
-                        typed_slice::<f32>(&dlpack::BorrowedTensor::from_capsule(&l_caps[12])?)
+                        typed_slice::<f32>(&dlpack::BorrowedTensor::from_capsule(&l_caps[12])?)?
                     }
                     .to_vec(),
                 )
@@ -455,8 +488,8 @@ impl RustQwenDecoder {
         for l in 0..self.num_layers.min(k_tensors.len()) {
             let k_view = unsafe { dlpack::BorrowedTensor::from_capsule(&k_tensors[l])? };
             let v_view = unsafe { dlpack::BorrowedTensor::from_capsule(&v_tensors[l])? };
-            let k_slice = unsafe { typed_slice::<f32>(&k_view) };
-            let v_slice = unsafe { typed_slice::<f32>(&v_view) };
+            let k_slice = unsafe { typed_slice::<f32>(&k_view)? };
+            let v_slice = unsafe { typed_slice::<f32>(&v_view)? };
 
             let k_shape = &k_view.shape;
             let src_max_len = if k_shape.len() >= 2 {
@@ -701,9 +734,19 @@ impl RustQwenDecoder {
         token_id: usize,
         offset: usize,
     ) -> PyResult<PyObject> {
-        self.step_internal(token_id, offset);
+        // Release the GIL for the decode compute: this is milliseconds of
+        // pure-Rust work on decoder-owned state, and holding the GIL here
+        // would starve every other Python thread (serving use cases).
+        py.allow_threads(|| self.step_internal(token_id, offset));
         let mut out = OwnedTensor::new(DType::F32, vec![1, self.vocab_size as i64]);
-        let out_slice = unsafe { typed_mut_slice::<f32>(&mut out) };
+        let out_slice = unsafe { typed_mut_slice::<f32>(&mut out)? };
+        if out_slice.len() != self.logits.len() {
+            return Err(unsupported(&format!(
+                "decoder: logits length {} != output length {}",
+                self.logits.len(),
+                out_slice.len()
+            )));
+        }
         out_slice.copy_from_slice(&self.logits);
         dlpack::owned_to_capsule_owned(py, out).map(|c| c.into_any())
     }
@@ -711,6 +754,7 @@ impl RustQwenDecoder {
     #[pyo3(signature = (token_id, offset, temperature=0.7, top_k=40, repetition_penalty=1.0, recent_tokens=None, top_p=1.0))]
     pub fn decode_and_sample(
         &mut self,
+        py: Python<'_>,
         token_id: usize,
         offset: usize,
         temperature: f32,
@@ -720,25 +764,35 @@ impl RustQwenDecoder {
         top_p: f32,
     ) -> PyResult<usize> {
         let rec = recent_tokens.unwrap_or_default();
-        Ok(self.decode_and_sample_inner(
-            token_id,
-            offset,
-            temperature,
-            top_k,
-            repetition_penalty,
-            &rec,
-            top_p,
-        ))
+        // GIL released for the same reason as `decode_step`.
+        Ok(py.allow_threads(|| {
+            self.decode_and_sample_inner(
+                token_id,
+                offset,
+                temperature,
+                top_k,
+                repetition_penalty,
+                &rec,
+                top_p,
+            )
+        }))
     }
 
     /// Phase 2.3: run the entire decode loop in Rust. One FFI crossing per
     /// generation instead of one per token — the Python engine passes the
     /// first token and gets back every generated token id plus the final KV
     /// position, so multi-turn state stays synchronizable.
+    ///
+    /// `recent_seed` carries the prompt's tail token ids so the repetition
+    /// penalty window matches the Python decode loop exactly (last 64 tokens
+    /// of prompt + generated); without it the streaming and non-streaming
+    /// paths would sample differently for the same seed.
     #[pyo3(signature = (first_token, seq_len, max_new_tokens, temperature=0.7,
-                        top_k=40, repetition_penalty=1.0, top_p=1.0, eos_token_id=None))]
+                        top_k=40, repetition_penalty=1.0, top_p=1.0, eos_token_id=None,
+                        recent_seed=None))]
     pub fn generate_loop(
         &mut self,
+        py: Python<'_>,
         first_token: usize,
         seq_len: usize,
         max_new_tokens: usize,
@@ -747,28 +801,36 @@ impl RustQwenDecoder {
         repetition_penalty: f32,
         top_p: f32,
         eos_token_id: Option<usize>,
+        recent_seed: Option<Vec<usize>>,
     ) -> PyResult<(Vec<usize>, usize)> {
-        let mut tokens: Vec<usize> = Vec::with_capacity(max_new_tokens);
-        let mut next_token = first_token;
-        let mut generated = 0usize;
-        while generated < max_new_tokens {
-            if Some(next_token) == eos_token_id {
-                break;
+        // GIL released for the whole generation: this is the long-running
+        // compute path; holding the GIL would block all Python threads for
+        // the full duration of the response.
+        Ok(py.allow_threads(|| {
+            let mut tokens: Vec<usize> = Vec::with_capacity(max_new_tokens);
+            let mut recent: Vec<usize> = recent_seed.unwrap_or_default();
+            let mut next_token = first_token;
+            let mut generated = 0usize;
+            while generated < max_new_tokens {
+                if Some(next_token) == eos_token_id {
+                    break;
+                }
+                tokens.push(next_token);
+                generated += 1;
+                push_recent_window(&mut recent, next_token);
+                let offset = seq_len + generated - 1;
+                next_token = self.decode_and_sample_inner(
+                    next_token,
+                    offset,
+                    temperature,
+                    top_k,
+                    repetition_penalty,
+                    &recent,
+                    top_p,
+                );
             }
-            tokens.push(next_token);
-            generated += 1;
-            let offset = seq_len + generated - 1;
-            next_token = self.decode_and_sample_inner(
-                next_token,
-                offset,
-                temperature,
-                top_k,
-                repetition_penalty,
-                &tokens,
-                top_p,
-            );
-        }
-        Ok((tokens, seq_len + generated))
+            (tokens, seq_len + generated)
+        }))
     }
 }
 
@@ -789,6 +851,22 @@ impl RustQwenDecoder {
         self.step_internal(token_id, offset);
         apply_repetition_penalty(&mut self.logits, recent_tokens, repetition_penalty);
         sample_logits(&self.logits, temperature, top_k, top_p)
+    }
+}
+
+/// Sliding repetition-penalty window shared by the CPU, WGPU and CUDA
+/// decode loops so streaming and non-streaming paths sample identically.
+/// Mirrors `engine.py`'s `recent_window = 64` (last 64 tokens of
+/// prompt tail + everything generated so far).
+pub const RECENT_WINDOW: usize = 64;
+
+/// Append `token` to the repetition window, evicting oldest entries beyond
+/// [`RECENT_WINDOW`].
+pub fn push_recent_window(recent: &mut Vec<usize>, token: usize) {
+    recent.push(token);
+    if recent.len() > RECENT_WINDOW {
+        let excess = recent.len() - RECENT_WINDOW;
+        recent.drain(..excess);
     }
 }
 

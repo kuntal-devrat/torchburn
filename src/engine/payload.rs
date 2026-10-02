@@ -27,6 +27,15 @@ impl Payload {
         let total_inputs = self.inputs.len();
 
         for (i, node) in self.nodes.iter().enumerate() {
+            // Node ids are the high 16 bits of the tuple-output encoding
+            // ((node_id << 16) | elem); anything >= 65536 would alias an
+            // element request and corrupt output collection.
+            if node.id >= 65536 {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "node id {} exceeds the 65535 tuple-encoding limit",
+                    node.id
+                )));
+            }
             if !node_ids.insert(node.id) {
                 return Err(pyo3::exceptions::PyValueError::new_err(format!(
                     "duplicate node id {} in payload",

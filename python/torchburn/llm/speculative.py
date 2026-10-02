@@ -39,14 +39,14 @@ from typing import Any, List, Optional, Sequence
 # ---------------------------------------------------------------------------
 
 def _softmax(logits: list[float], temperature: float = 1.0) -> list[float]:
+    import torch as _torch
+    t = _torch.tensor(logits, dtype=_torch.float32)
     if temperature <= 0.0:
         # Greedy
-        best = max(range(len(logits)), key=lambda i: logits[i])
+        best = int(_torch.argmax(t).item())
         return [1.0 if i == best else 0.0 for i in range(len(logits))]
-    max_l = max(logits)
-    exps = [math.exp((l - max_l) / temperature) for l in logits]
-    s = sum(exps)
-    return [e / s for e in exps]
+    probs = _torch.softmax(t / temperature, dim=-1)
+    return probs.tolist()
 
 
 def _sample(probs: list[float]) -> int:

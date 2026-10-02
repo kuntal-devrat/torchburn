@@ -34,8 +34,17 @@ pub const DL_DTYPE_BOOL: u8 = 6;
 /// to the eager fallback pipeline" (REQ-002) rather than a hard crash.
 pub const UNSUPPORTED_MARKER: &str = "TB_UNSUPPORTED:";
 
+pyo3::create_exception!(
+    torchburn,
+    UnsupportedOpError,
+    PyRuntimeError,
+    "Native engine cannot execute this node/graph; carries the TB_UNSUPPORTED\n\
+     marker so Python routes the op to eager PyTorch. Subclasses RuntimeError so\n\
+     existing `except RuntimeError` handlers keep working."
+);
+
 pub fn unsupported(msg: &str) -> PyErr {
-    PyRuntimeError::new_err(format!("{UNSUPPORTED_MARKER} {msg}"))
+    UnsupportedOpError::new_err(format!("{UNSUPPORTED_MARKER} {msg}"))
 }
 
 // ---------------------------------------------------------------------------
@@ -451,12 +460,42 @@ impl Default for OwnedTensor {
 impl OwnedTensor {
     pub fn new(dtype: DType, shape: Vec<i64>) -> Self {
         let n = elem_count(&shape);
-        let bytes = n
-            .checked_mul(dtype.elem_size())
-            .expect("tensor byte size overflow");
+        let bytes = match n.checked_mul(dtype.elem_size()) {
+            Some(b) => b,
+            None => {
+                // Overflow: shape is too large for this dtype. Return an empty
+                // tensor — callers that need to handle this gracefully should
+                // use `new_checked()` instead. Logging so the issue is visible.
+                eprintln!(
+                    "torchburn: tensor byte size overflow (elem_count={}, elem_size={}); returning empty tensor",
+                    n, dtype.elem_size()
+                );
+                return OwnedTensor {
+                    data: Vec::new(),
+                    shape,
+                    dtype,
+                };
+            }
+        };
         let words = bytes.div_ceil(8);
         let data = crate::memory_pool::take_buffer(dtype, words);
         OwnedTensor { data, shape, dtype }
+    }
+
+    /// Fallible constructor that returns a Python-compatible error on overflow
+    /// or OOM instead of panicking.
+    pub fn new_checked(dtype: DType, shape: Vec<i64>) -> Result<Self, String> {
+        let n = elem_count(&shape);
+        let bytes = n.checked_mul(dtype.elem_size()).ok_or_else(|| {
+            format!(
+                "tensor byte size overflow: {} elements × {} bytes/element",
+                n,
+                dtype.elem_size()
+            )
+        })?;
+        let words = bytes.div_ceil(8);
+        let data = crate::memory_pool::take_buffer(dtype, words);
+        Ok(OwnedTensor { data, shape, dtype })
     }
 
     /// Allocate an OwnedTensor with zeroed memory (safe for accumulation/scatter).

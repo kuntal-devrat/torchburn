@@ -1,6 +1,9 @@
 # Rust
 /target
 
+# Agent workspace copies
+.kilo/
+
 # Python
 __pycache__/
 *.py[cod]

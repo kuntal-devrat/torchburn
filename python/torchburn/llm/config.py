@@ -138,7 +138,9 @@ class GenerationConfig:
     top_p: float = 0.9
     top_k: int = 40
     repetition_penalty: float = 1.05
-    seed: Optional[int] = 42
+    # None = non-deterministic (per-request local RNG); an int seeds a
+    # request-local torch.Generator, never the global torch RNG.
+    seed: Optional[int] = None
     eos_token_id: Optional[int] = None
     stop_tokens: List[str] = field(default_factory=list)
 
