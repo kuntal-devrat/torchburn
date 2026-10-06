@@ -5,6 +5,17 @@ All notable changes to TorchBurn will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.1] - 2026-10-06
+
+### Fixed
+- **WGSL Shader Bounds & Embedding Lookup**:
+  - Fixed syntax/parsing error in `src/shaders/embed_lookup.wgsl` by declaring `let idx = gid.x;` before hidden-size and vocabulary bounds checks, resolving device loss/validation errors on Vulkan/Metal/WGPU GPUs.
+
+### Removed
+- **Legacy CUDA Backend & Deprecated Distribution**:
+  - Completely purged deprecated `torchburn-cuda` release jobs, `cudarc` dependency, and legacy CUDA backend.
+  - Standardized the entire ecosystem exclusively on universal WGPU (Vulkan, Metal, DirectX 12) and native SIMD CPU backends.
+
 ## [1.0.0] - 2026-10-06 — Production Release
 
 ### Fixed
