@@ -232,80 +232,6 @@ jobs:
           name: wheels-${{ matrix.os }}
           path: dist/*.whl
 
-  # ── CUDA feature gate build (compile-only, no runtime GPU needed) ──────────
-  cuda-build:
-    name: CUDA build (compile-check)
-    runs-on: ubuntu-latest
-    container:
-      image: nvidia/cuda:12.6.0-devel-ubuntu22.04
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install system deps
-        run: |
-          apt-get update -qq
-          apt-get install -y --no-install-recommends python3 python3-pip curl pkg-config libssl-dev
-
-      - name: Install Rust
-        run: |
-          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
-          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: "cuda-build"
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-
-      - name: cargo check --features cuda
-        run: cargo check --features cuda
-        env:
-          CUDA_PATH: /usr/local/cuda
-          PATH: /usr/local/cuda/bin:$PATH
-          LD_LIBRARY_PATH: /usr/local/cuda/lib64:$LD_LIBRARY_PATH
-
-      - name: Install maturin
-        run: pip3 install maturin
-
-      - name: Build torchburn-cuda wheel (no runtime tests — no GPU in CI runner)
-        run: |
-          # torchburn-cuda is a second PyPI distribution built from this same
-          # crate with the `cuda` feature. The [project] name is renamed so
-          # maturin emits `torchburn_cuda-*.whl` metadata; the module name
-          # (torchburn._torchburn) is unchanged, so `import torchburn` works.
-          sed -i 's/^name = "torchburn"$/name = "torchburn-cuda"/' pyproject.toml
-          maturin build --features cuda -r -o dist-cuda
-        env:
-          CUDA_PATH: /usr/local/cuda
-          PATH: /usr/local/cuda/bin:$PATH
-          LD_LIBRARY_PATH: /usr/local/cuda/lib64:$LD_LIBRARY_PATH
-
-      # Artifact is named outside the `wheels-*` glob so publish-pypi /
-      # publish-testpypi can never accidentally upload it to the torchburn
-      # project. The release-assets job picks it up explicitly.
-      - uses: actions/upload-artifact@v4
-        with:
-          name: torchburn-cuda
-          path: dist-cuda/*.whl
-
-  # ── Publish torchburn-cuda to PyPI (on tag) ───────────────────────
-  publish-cuda:
-    needs: [cuda-build]
-    runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/v')
-    permissions:
-      id-token: write
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          name: torchburn-cuda
-          path: dist-cuda
-      - name: Publish torchburn-cuda to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
-        with:
-          packages-dir: dist-cuda
-          password: ${{ secrets.PYPI_API_TOKEN }}
-          skip-existing: true
-
   # ── Native wheel variant (peak local performance) ──────────────────
   # Portable wheels above use `.cargo/config.toml` per-target baselines
   # (x86-64-v2 / neoverse-n1 / apple-m1) + runtime dispatch. This job builds
@@ -364,7 +290,7 @@ jobs:
       name: testpypi
       url: https://test.pypi.org/p/torchburn
     steps:
-      # Portable wheels only — never the torchburn-cuda or native variants.
+      # Portable wheels only.
       - uses: actions/download-artifact@v4
         with:
           pattern: wheels-ubuntu-latest
@@ -400,7 +326,7 @@ jobs:
       name: pypi
       url: https://pypi.org/p/torchburn
     steps:
-      # Portable wheels only — never the torchburn-cuda or native variants.
+      # Portable wheels only.
       - uses: actions/download-artifact@v4
         with:
           pattern: wheels-ubuntu-latest
@@ -427,12 +353,10 @@ jobs:
           skip-existing: true
 
   # ── GitHub Release assets (llama.cpp-style) ───────────────────────
-  # The portable wheels + sdist go to PyPI; the exotic variants — the
-  # torchburn-cuda per-backend wheel and the `wheels-native` peak-ISA wheel —
-  # are attached to the GitHub Release instead, so users can grab them
-  # without touching the package index.
+  # The portable wheels + sdist go to PyPI; the `wheels-native` peak-ISA wheel
+  # is attached to the GitHub Release when present.
   release-assets:
-    needs: [build-wheels, build-sdist, cuda-build]
+    needs: [build-wheels, build-sdist]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v')
     permissions:
@@ -446,10 +370,6 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: sdist
-          path: dist
-      - uses: actions/download-artifact@v4
-        with:
-          name: torchburn-cuda
           path: dist
       # Native bench wheel exists only when build-native ran (self-hosted
       # bench runner, manual dispatch). Attach it best-effort when present.

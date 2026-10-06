@@ -78,14 +78,9 @@ maturin develop --release
 ```
 
 ### Building with GPU Backends
-- **WGPU (Vulkan / Metal / DirectX 12)**:
+- **WGPU (Universal Vulkan / Metal / DirectX 12)**:
   ```bash
   maturin develop --release --features burn-wgpu
-  ```
-
-- **CUDA** (optional compile-time check):
-  ```bash
-  maturin build --features cuda
   ```
 
 ---

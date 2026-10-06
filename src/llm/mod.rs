@@ -8,7 +8,7 @@
 mod decoder;
 
 /// Checked capsule→slice reinterpretation (validates element size against
-/// the requested type). Shared with the WGPU/CUDA decoders, which ingest the
+/// the requested type). Shared with the WGPU decoder, which ingests the
 /// same user-supplied weight capsules.
 #[allow(unused_imports)]
 pub(crate) use decoder::typed_slice;

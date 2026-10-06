@@ -854,7 +854,7 @@ impl RustQwenDecoder {
     }
 }
 
-/// Sliding repetition-penalty window shared by the CPU, WGPU and CUDA
+/// Sliding repetition-penalty window shared by the CPU and WGPU
 /// decode loops so streaming and non-streaming paths sample identically.
 /// Mirrors `engine.py`'s `recent_window = 64` (last 64 tokens of
 /// prompt tail + everything generated so far).

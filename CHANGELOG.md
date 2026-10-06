@@ -17,6 +17,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `burn_engine` ref count lookups use graceful error propagation instead of `.unwrap()` panics.
   - Metal backend buffer and pipeline cache insertions use indexed access instead of `.unwrap()`.
   - GGUF parser enforces hard upper limits (`MAX_GGUF_METADATA_ENTRIES = 100,000`, `MAX_GGUF_TENSORS = 100,000`) before allocation to thwart hostile headers.
+- **WGSL Shader & GPU Execution**:
+  - Fixed `embed_lookup.wgsl` compute shader parsing error (`let idx = gid.x`) enabling seamless GPU token embedding lookup across all Vulkan, Metal, and DirectX 12 devices.
+- **Pure Zero-CUDA Simplification**:
+  - Completely removed deprecated `torchburn-cuda` release jobs, `cudarc` dependency, and legacy CUDA backend in favor of universal WGPU (Vulkan, Metal, DirectX 12) and native SIMD CPU backends.
+  - Simplified CI workflow to exclusively publish portable `torchburn` wheels.
 - **Python Runtime & Interpreter Hardening**:
   - `_exec_all_native` logs warnings with exception details before falling back to eager execution so degraded performance is observable.
   - `_warn_fallback` uses a lock-free dictionary check before acquiring `_WARN_LOCK`, eliminating lock contention in high-throughput multi-threaded serving.

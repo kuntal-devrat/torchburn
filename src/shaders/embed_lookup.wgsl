@@ -25,6 +25,7 @@ const WG_SIZE: u32 = 256u;
 fn main(
     @builtin(global_invocation_id) gid: vec3<u32>,
 ) {
+    let idx = gid.x;
     if (idx >= params.hidden_size || params.vocab_size == 0u) {
         return;
     }

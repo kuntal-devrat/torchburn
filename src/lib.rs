@@ -100,10 +100,6 @@ mod burn_engine;
 #[cfg(feature = "burn-wgpu")]
 pub mod wgpu;
 
-/// CUDA backend for NVIDIA GPUs (feature-gated behind `cuda`).
-#[cfg(feature = "cuda")]
-pub mod cuda;
-
 /// Metal native backend for Apple Silicon (feature-gated behind `metal-native`).
 /// Shared on macOS + iOS (unified-memory architecture).
 #[cfg(all(any(target_os = "macos", target_os = "ios"), feature = "metal-native"))]
@@ -130,8 +126,6 @@ fn _torchburn(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<crate::llm::RustQwenDecoder>()?;
     #[cfg(feature = "burn-wgpu")]
     m.add_class::<crate::wgpu::WgpuQwenDecoder>()?;
-    #[cfg(feature = "cuda")]
-    m.add_class::<crate::cuda::CudaQwenDecoder>()?;
 
     // Core engine FFI
     m.add_function(wrap_pyfunction!(ffi::engine_ffi::execute, m)?)?;

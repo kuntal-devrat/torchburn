@@ -36,9 +36,6 @@ matrixmultiply = { version = "0.3.11", optional = true }
 wgpu = { version = "25.0", optional = true }
 openblas-src = { version = "0.10", optional = true, features = ["cblas", "static"] }
 
-# CUDA backend (NVIDIA GPUs via cudarc + cuBLAS/cuBLASLt).
-cudarc = { version = "0.13", optional = true, features = ["std", "f16", "cuda-version-from-build-system"] }
-
 # Metal native backend (Apple Silicon unified memory, bypasses WGPU).
 # Enabled on macOS + iOS (shared unified-memory architecture).
 [target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
@@ -51,14 +48,11 @@ dispatch-test = []
 burn = ["dep:burn"]
 burn-wgpu = ["dep:burn", "burn/wgpu", "dep:wgpu"]
 openblas = ["dep:openblas-src"]
-# CUDA backend for NVIDIA GPUs. Requires CUDA toolkit installed.
-cuda = ["dep:cudarc"]
 # Metal native backend for Apple Silicon (bypasses WGPU for unified memory).
 metal-native = ["dep:metal"]
 # Meta-feature: enable every GPU path available on the host
-# (WGPU universal + CUDA where supported + Metal where supported).
-# CUDA/Metal deps are target-gated so this stays portable.
-all-gpu = ["burn-wgpu", "cuda", "metal-native"]
+# (WGPU universal + Metal where supported).
+all-gpu = ["burn-wgpu", "metal-native"]
 
 [profile.release]
 opt-level = 3
