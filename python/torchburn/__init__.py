@@ -56,14 +56,15 @@ if _log_level in ("debug", "info", "warning", "error", "critical"):
     os.environ.setdefault("RUST_LOG", _log_level)
 
 import torch
-from . import _torchburn as _native
+from . import _torchburn
+_native = _torchburn
 
 # Default RAYON_NUM_THREADS to physical core count if not set to prevent hyperthread contention
 if "RAYON_NUM_THREADS" not in os.environ:
     try:
         import psutil
         _phys_cores = psutil.cpu_count(logical=False) or max((os.cpu_count() or 8) // 2, 1)
-    except Exception:
+    except (ImportError, AttributeError, OSError):
         # psutil unavailable: estimate physical cores as half of logical (hyperthreading)
         _phys_cores = max((os.cpu_count() or 8) // 2, 1)
     os.environ["RAYON_NUM_THREADS"] = str(_phys_cores)
@@ -118,7 +119,7 @@ except AttributeError:
         from importlib.metadata import version as _pkg_version
         __version__ = _pkg_version("torchburn")
     except Exception:
-        __version__ = "0.1.0"
+        __version__ = "1.0.0"
 
 
 def gpu_info():
@@ -161,7 +162,11 @@ def wgpu_clear_buffer_pool() -> None:
         _native.wgpu_clear_buffer_pool()
 
 
+UnsupportedOpError = _native.UnsupportedOpError
+
+
 __all__ = [
+    "UnsupportedOpError",
     "BurnCompiledCallable",
     "TorchBurnModule",
     "cache_clear",
@@ -217,6 +222,7 @@ __all__ = [
     "visualize",
     "GraphVisualization",
     "export_telemetry",
+    "_torchburn",
 ]
 
 
@@ -252,11 +258,15 @@ def export(model, args=None, kwargs=None, dynamic_shapes=None, **compile_kwargs)
     """
     args = args or ()
     kwargs = kwargs or {}
-    # Try torch.export path first
     try:
-        from torch.export import export as torch_export
-        # torch.export.export expects args as tuple
-        ep = torch_export(model, args=args, kwargs=kwargs, dynamic_shapes=dynamic_shapes)
+        torch_export_mod = getattr(torch, "export", None)
+        if torch_export_mod is not None and hasattr(torch_export_mod, "export"):
+            torch_export_fn = torch_export_mod.export
+        else:
+            import importlib
+            torch_export_fn = getattr(importlib.import_module("torch.export"), "export")
+        # torch.export expects args as tuple
+        ep = torch_export_fn(model, args=args, kwargs=kwargs, dynamic_shapes=dynamic_shapes)
         # ExportedProgram has a `module` method that returns GraphModule
         if hasattr(ep, "module"):
             try:
@@ -281,8 +291,10 @@ def _shutdown_cleanup() -> None:
         cache_clear()
         wgpu_clear_weight_cache()
         wgpu_clear_buffer_pool()
-    except Exception:
-        pass
+    except Exception as exc:
+        if os.getenv("TORCHBURN_DEBUG") == "1":
+            import sys
+            sys.stderr.write(f"[torchburn] cleanup error: {exc}\n")
 
 
 atexit.register(_shutdown_cleanup)

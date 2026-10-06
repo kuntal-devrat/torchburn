@@ -5,13 +5,11 @@ Tests sin, cos, round, clamp_min, clamp_max, chunk, full, zeros, ones,
 arange, linspace, and in-place op aliases.
 """
 import torch
-import torch.nn.functional as F
 import pytest
 import sys
 import os
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
-import torchburn  # registers the backend
 
 
 def _compile(model, *example_inputs):

@@ -3,7 +3,6 @@ End-to-end training tests: verify that torchburn autograd can train a
 simple model and the loss actually decreases.
 """
 import torch
-import torch.nn.functional as F
 import pytest
 import sys
 import os

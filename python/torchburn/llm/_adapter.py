@@ -8,7 +8,7 @@ Handles:
 
 from __future__ import annotations
 
-from typing import Any, Optional, Tuple, Union
+from typing import Any, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -141,8 +141,8 @@ class _FlexibleOutputWrapper(nn.Module):
     def parameters(self, recurse: bool = True):
         return self._wrapped.parameters(recurse=recurse)
 
-    def named_parameters(self, prefix: str = "", recurse: bool = True):
-        return self._wrapped.named_parameters(prefix=prefix, recurse=recurse)
+    def named_parameters(self, prefix: str = "", recurse: bool = True, remove_duplicate: bool = True):
+        return self._wrapped.named_parameters(prefix=prefix, recurse=recurse, remove_duplicate=remove_duplicate)
 
     def state_dict(self, *args, **kwargs):
         return self._wrapped.state_dict(*args, **kwargs)

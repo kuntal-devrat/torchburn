@@ -12,7 +12,7 @@ const GROUP_SIZE: usize = 64;
 fn quantize_grouped(w: &[f32], k: usize) -> (Vec<u8>, Vec<f32>) {
     let n = w.len() / k;
     let num_groups = k / GROUP_SIZE;
-    let mut packed = vec![0u8; n * ((k + 1) / 2)];
+    let mut packed = vec![0u8; n * k.div_ceil(2)];
     let mut scales = vec![0.0f32; n * num_groups];
     for row in 0..n {
         for g in 0..num_groups {
@@ -24,9 +24,9 @@ fn quantize_grouped(w: &[f32], k: usize) -> (Vec<u8>, Vec<f32>) {
             let inv = 1.0 / scale;
             for (i, &v) in group.iter().enumerate() {
                 let q = ((v * inv).round().clamp(-8.0, 7.0) as i8) + 8;
-                let byte_idx = row * ((k + 1) / 2) + (start + i) / 2;
+                let byte_idx = row * k.div_ceil(2) + (start + i) / 2;
                 let nibble = (q as u8) & 0x0F;
-                packed[byte_idx] |= if (start + i) % 2 == 0 {
+                packed[byte_idx] |= if (start + i).is_multiple_of(2) {
                     nibble
                 } else {
                     nibble << 4
@@ -111,8 +111,8 @@ fn reference_gemv(x: &[f32], packed: &[u8], scales: &[f32], n: usize, k: usize) 
     let mut out = vec![0.0f32; n];
     for row in 0..n {
         for i in 0..k {
-            let byte = packed[row * ((k + 1) / 2) + i / 2];
-            let nibble = if i % 2 == 0 {
+            let byte = packed[row * k.div_ceil(2) + i / 2];
+            let nibble = if i.is_multiple_of(2) {
                 byte & 0x0F
             } else {
                 (byte >> 4) & 0x0F
@@ -154,8 +154,8 @@ fn emulate_w4a8(x: &[f32], packed: &[u8], scales: &[f32], n: usize, k: usize) ->
             let mut acc = 0i32;
             for i in 0..GROUP_SIZE {
                 let idx = g * GROUP_SIZE + i;
-                let byte = packed[row * ((k + 1) / 2) + idx / 2];
-                let nibble = if idx % 2 == 0 {
+                let byte = packed[row * k.div_ceil(2) + idx / 2];
+                let nibble = if idx.is_multiple_of(2) {
                     byte & 0x0F
                 } else {
                     (byte >> 4) & 0x0F

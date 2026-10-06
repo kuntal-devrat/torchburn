@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 import math
-from typing import Optional, Tuple, List, Union, Dict, Any
+from typing import Optional, Tuple, List, Union
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -92,6 +92,8 @@ class RMSNorm(nn.Module):
 
 class RotaryEmbedding(nn.Module):
     """Rotary Positional Embeddings (RoPE)."""
+
+    inv_freq: torch.Tensor
 
     def __init__(self, dim: int, max_seq_len: int = 32768, theta: float = 10000.0):
         super().__init__()
@@ -286,7 +288,7 @@ class UniversalMLP(nn.Module):
             self.down_proj = nn.Linear(config.intermediate_size, config.hidden_size, bias=False)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        activation = str(self.config.hidden_act).lower()
+        activation = self.config.hidden_act.lower()
         is_silu = activation in ("silu", "swish")
 
         # Fused SwiGLU check if quantized. The native kernel is only valid for
@@ -390,15 +392,17 @@ class UniversalTransformerBlock(nn.Module):
         residual = x
         normed = self.input_layernorm(x)
         attn_out, new_cache = self.self_attn(normed, cos=cos, sin=sin, kv_cache=kv_cache, offset=offset)
+        ff_block = self.moe if self.moe is not None else self.mlp
+        assert ff_block is not None
         if self.use_parallel_residual:
-            mlp_out = (self.moe if self.moe is not None else self.mlp)(normed)
+            mlp_out = ff_block(normed)
             x = residual + attn_out + mlp_out
             return x, new_cache
         x = residual + attn_out
 
         residual = x
         normed = self.post_attention_layernorm(x)
-        mlp_out = (self.moe if self.moe is not None else self.mlp)(normed)
+        mlp_out = ff_block(normed)
         x = residual + mlp_out
 
         return x, new_cache
@@ -485,7 +489,9 @@ class UniversalTransformer(nn.Module):
     def fuse_qkv(self):
         """Fuses Q, K, V projections across all transformer blocks."""
         for layer in self.layers:
-            layer.self_attn.fuse_qkv()
+            attn = getattr(layer, "self_attn", None)
+            if attn is not None and hasattr(attn, "fuse_qkv"):
+                attn.fuse_qkv()
         return self
 
     def forward(
@@ -498,7 +504,7 @@ class UniversalTransformer(nn.Module):
         x = self.embed_tokens(input_ids)
         if self.config.scale_embeddings:
             x = x * math.sqrt(self.config.hidden_size)
-        if self.position_encoding == "learned":
+        if self.position_encoding == "learned" and self.position_embedding is not None:
             x = x + self.position_embedding(T, offset, x.device)
             cos = sin = None
         else:

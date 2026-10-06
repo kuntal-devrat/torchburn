@@ -28,10 +28,9 @@ Usage::
 
 from __future__ import annotations
 
-import math
 import random
 from dataclasses import dataclass, field
-from typing import Any, List, Optional, Sequence
+from typing import Any, Optional, Sequence
 
 
 # ---------------------------------------------------------------------------
@@ -108,10 +107,10 @@ class SpeculativeDecoder:
         prompt_len = len(prompt_ids)
         if prompt_len > 1:
             _ = self.draft.prefill(prompt_ids)
-            target_logits = self.target.prefill(prompt_ids)
+            _ = self.target.prefill(prompt_ids)
         else:
             _ = self.draft.step(prompt_ids[0], 0)
-            target_logits = self.target.step(prompt_ids[0], 0)
+            _ = self.target.step(prompt_ids[0], 0)
 
         generated: list[int] = []
         offset = prompt_len  # next position to fill

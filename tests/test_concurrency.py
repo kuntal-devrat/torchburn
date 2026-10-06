@@ -5,7 +5,6 @@ Tests concurrent compilation, parallel backward passes, GIL release,
 and thread-safe cache operations.
 """
 import torch
-import torch.nn.functional as F
 import pytest
 import sys
 import os
@@ -23,7 +22,7 @@ import torchburn
 class TestCacheConcurrency:
     def test_concurrent_cache_puts(self):
         """Multiple threads writing to the cache simultaneously."""
-        from torchburn._torchburn import signature, cache_put, cache_clear
+        from torchburn._torchburn import cache_put, cache_clear
         cache_clear()
 
         def worker(i):

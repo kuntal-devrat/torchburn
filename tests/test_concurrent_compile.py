@@ -9,13 +9,11 @@ Validates:
 
 import os
 import sys
-import pytest
 import torch
 import torch.nn as nn
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-import torchburn
 
 
 class ModelA(nn.Module):

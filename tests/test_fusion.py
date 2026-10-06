@@ -5,12 +5,9 @@ These tests exercise the fusion planner, fused elementwise chain execution,
 GEMM epilogue fusion, and the skip-fallback safety mechanism — all through
 the torch.compile path (the registered backend).
 """
-import warnings
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import pytest
-import torchburn  # registers the backend
 
 
 # ---------------------------------------------------------------------------

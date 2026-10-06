@@ -348,7 +348,9 @@ where
         let idx = *node_slot
             .get(id)
             .ok_or_else(|| unsupported(&format!("output references unknown node {id}")))?;
-        let count = ref_counts.get_mut(&idx).unwrap();
+        let count = ref_counts
+            .get_mut(&idx)
+            .ok_or_else(|| unsupported("internal ref count error"))?;
         *count -= 1;
         let tensor = if *count == 0 {
             // Last reference: avoid cloning and avoid creating a 0-sized tensor on GPU device.

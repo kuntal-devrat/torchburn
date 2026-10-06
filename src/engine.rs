@@ -523,6 +523,7 @@ pub fn execute_plan(
     }
     let payload: Payload = serde_json::from_str(payload_json)
         .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("invalid payload: {e}")))?;
+    payload.validate()?;
 
     #[cfg(feature = "burn")]
     if engine_is_burn() {

@@ -38,16 +38,22 @@ struct GraphCache {
     free: Vec<usize>,
     head: usize, // LRU (oldest)
     tail: usize, // MRU (newest)
+    capacity: usize,
 }
 
 impl GraphCache {
     fn new() -> Self {
+        let capacity = std::env::var("TORCHBURN_PREPARED_CACHE_SIZE")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1024);
         Self {
             map: HashMap::new(),
             entries: Vec::new(),
             free: Vec::new(),
             head: NIL,
             tail: NIL,
+            capacity,
         }
     }
 
@@ -128,8 +134,8 @@ impl GraphCache {
         }
         self.map.insert(handle, idx);
 
-        // Evict LRU (head) if over 1024 prepared graphs
-        while self.map.len() > 1024 && self.head != NIL {
+        // Evict LRU (head) if over capacity
+        while self.map.len() > self.capacity && self.head != NIL {
             let evict_idx = self.head;
             let evict_handle = self.entries[evict_idx].handle;
             self.remove(evict_handle);

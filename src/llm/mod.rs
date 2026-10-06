@@ -10,6 +10,7 @@ mod decoder;
 /// Checked capsule→slice reinterpretation (validates element size against
 /// the requested type). Shared with the WGPU/CUDA decoders, which ingest the
 /// same user-supplied weight capsules.
+#[allow(unused_imports)]
 pub(crate) use decoder::typed_slice;
 pub(crate) use decoder::RustQwenDecoder;
 /// Sampling entry point, exposed publicly for benches/parity tests and WGPU backend.

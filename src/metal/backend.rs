@@ -43,7 +43,8 @@ impl MetalBufferCache {
             MTLResourceOptions::StorageModeShared,
         );
         self.buffers.push((key, buffer));
-        &self.buffers.last().unwrap().1
+        let idx = self.buffers.len() - 1;
+        &self.buffers[idx].1
     }
 }
 
@@ -99,7 +100,8 @@ impl MetalPipelineCache {
             .new_compute_pipeline_state_with_function(&func)
             .ok()?;
         self.pipelines.push((name.to_string(), pso));
-        Some(&self.pipelines.last().unwrap().1)
+        let idx = self.pipelines.len() - 1;
+        Some(&self.pipelines[idx].1)
     }
 }
 

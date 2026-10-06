@@ -57,13 +57,15 @@ def store(signature: str, plan: dict[str, Any]) -> None:
 
 
 def cache_stats() -> dict[str, int]:
-    """Current cache state: size, hits, misses."""
+    """Current cache state: size, hits, misses, evictions."""
     size, hits, misses = _native.cache_stats()
+    evictions = _native.cache_evictions() if hasattr(_native, "cache_evictions") else 0
     with _LOCK:
         return {
-            "size": int(size),
-            "hits": int(hits),
-            "misses": int(misses),
+            "size": size,
+            "hits": hits,
+            "misses": misses,
+            "evictions": evictions,
             "python_size": len(GRAPH_CACHE),
         }
 

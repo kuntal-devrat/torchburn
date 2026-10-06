@@ -1,6 +1,5 @@
 import torch
 import torch.nn.functional as F
-import pytest
 import torchburn
 
 def test_flash_attention_forward():

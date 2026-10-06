@@ -64,6 +64,8 @@ pub(crate) unsafe fn capsule_to_owned(view: &dlpack::BorrowedTensor) -> dlpack::
     let ndim = view.shape.len();
     let mut idx = vec![0i64; ndim];
     let dst_base = owned.data.as_mut_ptr() as *mut u8;
+    // Upper bound on valid physical offset (elements) for bounds checking.
+    let buf_len = view.buffer_len();
     for out_off in 0..n {
         let mut rem = out_off;
         for d in (0..ndim).rev() {
@@ -75,7 +77,13 @@ pub(crate) unsafe fn capsule_to_owned(view: &dlpack::BorrowedTensor) -> dlpack::
         for d in 0..ndim {
             phys += idx[d] * view.strides[d];
         }
-        let src = view.data.add((phys.max(0) as usize) * elem);
+        let phys_usize = phys.max(0) as usize;
+        // Bounds check: skip elements beyond the valid buffer range to
+        // prevent out-of-bounds reads from malformed DLPack capsules.
+        if phys_usize >= buf_len {
+            continue;
+        }
+        let src = view.data.add(phys_usize * elem);
         let dst = dst_base.add(out_off * elem);
         std::ptr::copy_nonoverlapping(src, dst, elem);
     }

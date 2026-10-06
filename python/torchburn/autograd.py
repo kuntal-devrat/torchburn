@@ -491,15 +491,18 @@ def _backward_single_loop(grad_output: torch.Tensor) -> dict[int, torch.Tensor]:
         per_input_grads = _backward_single(entry, g)
         if per_input_grads is not None:
             for i, tid in enumerate(entry.input_ids):
-                if i < len(per_input_grads) and per_input_grads[i] is not None:
+                if i < len(per_input_grads):
                     pg = per_input_grads[i]
-                    saved_shape = entry.saved_data[i].shape
-                    if pg.shape != saved_shape:
-                        pg = _reduce_to_shape(pg, saved_shape)
-                    if tid in grads:
-                        grads[tid] = grads[tid] + pg
-                    else:
-                        grads[tid] = pg
+                    if pg is not None:
+                        saved = entry.saved_data[i]
+                        if saved is not None and hasattr(saved, "shape"):
+                            saved_shape = saved.shape
+                            if pg.shape != saved_shape:
+                                pg = _reduce_to_shape(pg, saved_shape)
+                        if tid in grads:
+                            grads[tid] = grads[tid] + pg
+                        else:
+                            grads[tid] = pg
 
     return grads
 

@@ -8,11 +8,9 @@ Verifies:
 4. Clean transition between training (grad enabled) and inference (eval/no_grad).
 """
 
-import pytest
 import torch
 import torch.nn as nn
 import torch.optim as optim
-import torchburn
 
 
 class MLP(nn.Module):

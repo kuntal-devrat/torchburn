@@ -41,7 +41,7 @@ fn bench_wgpu_submit(c: &mut Criterion) {
 #[cfg(not(feature = "burn-wgpu"))]
 fn bench_wgpu_submit(c: &mut Criterion) {
     let mut group = c.benchmark_group("wgpu_submit");
-    group.bench_function("burn_wgpu_feature_off", |bb| bb.iter(|| 1u32));
+    group.bench_function("burn_wgpu_feature_off", |bb| bb.iter(|| black_box(1u32)));
     group.finish();
 }
 

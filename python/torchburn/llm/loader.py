@@ -5,10 +5,10 @@ import gc
 import json
 import os
 from pathlib import Path
-from typing import Optional, Dict, Any, List, Union, Tuple
+from typing import Optional, Dict, Any, List, Tuple
 import torch
 
-from ._registry import offline_candidates, repo_snapshot_dir, resolve_repo_id
+from ._registry import offline_candidates, resolve_repo_id
 from .config import ModelConfig
 from .model import UniversalTransformer
 
@@ -37,6 +37,23 @@ def resolve_hf_token(token: Optional[str] = None) -> Optional[str]:
 
 class ModelLoader:
     """Universal loader for local and Hugging Face transformer models."""
+
+    @classmethod
+    def download_hf_model(
+        cls,
+        repo_id: str,
+        token: Optional[str] = None,
+        cache_dir: Optional[str] = None,
+    ) -> str:
+        """Downloads model weights and config from Hugging Face Hub, returning local root path."""
+        auth_token = resolve_hf_token(token)
+        _, _, root_path = cls._resolve_files(
+            repo_id,
+            token=auth_token,
+            cache_dir=cache_dir,
+            local_files_only=False,
+        )
+        return root_path
 
     @classmethod
     def load(
@@ -187,7 +204,7 @@ class ModelLoader:
                     "transformer.norm.weight", "model.final_layernorm.weight",
                 ])
             elif "input_layernorm" in key:
-                prefix, idx = key.split(".input_layernorm")[0], key.split(".")[1]
+                idx = key.split(".")[1]
                 cands.extend([
                     f"model.layers.{idx}.input_layernorm.weight",
                     f"transformer.h.{idx}.ln_1.weight",
@@ -195,7 +212,7 @@ class ModelLoader:
                     f"layers.{idx}.operator_norm.weight",
                 ])
             elif "post_attention_layernorm" in key:
-                prefix, idx = key.split(".post_attention_layernorm")[0], key.split(".")[1]
+                idx = key.split(".")[1]
                 cands.extend([
                     f"model.layers.{idx}.post_attention_layernorm.weight",
                     f"transformer.h.{idx}.ln_2.weight",
@@ -297,7 +314,7 @@ class ModelLoader:
                 )
             return tensor
 
-        model = UniversalTransformer(config, init_weights=False, quant=quant, fused_qkv=True).to(device=device)
+        model: Any = UniversalTransformer(config, init_weights=False, quant=quant, fused_qkv=True).to(device=device)
 
         # 1. Embed tokens
         emb = require_tensor("embed_tokens")
@@ -316,7 +333,7 @@ class ModelLoader:
         # 3. Stream layer-by-layer
         for l in range(config.num_hidden_layers):
             print(f"[\033[94mTorchBurn\033[0m] Quantizing layer {l+1}/{config.num_hidden_layers} to {quant.upper()}...", end="\r", flush=True)
-            layer = model.layers[l]
+            layer: Any = model.layers[l]
 
             # Input norm
             in_norm = require_tensor(f"layers.{l}.input_layernorm.weight")
@@ -474,7 +491,8 @@ class ModelLoader:
         """
         from torchburn.quantization import quantize_weight_int4_grouped_v2
 
-        model, config, root = cls.load(model_dir, quant="int4", device="cpu")
+        model_obj, config, root = cls.load(model_dir, quant="int4", device="cpu")
+        model: Any = model_obj
         if config.tie_word_embeddings:
             # lm_head shares embed_tokens weights: rebuild it the same way the
             # streaming quantizer does so the state dict has its own qweight.
@@ -523,7 +541,6 @@ class ModelLoader:
         # HuggingFace hub snapshots) before hitting the network.
         repo_id = resolve_repo_id(model_id_or_path)
         local_cands = offline_candidates(model_id_or_path)
-        hf_cache_snapshot_dir = repo_snapshot_dir(repo_id)
 
         for cand in local_cands:
             if os.path.isdir(cand):
@@ -547,7 +564,7 @@ class ModelLoader:
 
         # Otherwise, download via huggingface_hub
         try:
-            from huggingface_hub import hf_hub_download, snapshot_download
+            from huggingface_hub import hf_hub_download
             repo_id = resolve_repo_id(model_id_or_path)
 
             print(f"[\033[94mTorchBurn\033[0m] Resolving model '{repo_id}' from Hugging Face...")

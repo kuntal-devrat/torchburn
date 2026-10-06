@@ -12,6 +12,7 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 import torchburn
+from torchburn import _torchburn
 
 
 # ---------------------------------------------------------------------------
@@ -273,7 +274,7 @@ class TestGPUTransformer:
 class TestEngineSelection:
     def test_active_engine_reflects_env(self):
         """active_engine() returns the expected engine name."""
-        engine = torchburn._torchburn.active_engine()
+        engine = _torchburn.active_engine()
         assert isinstance(engine, str)
         # Should be one of the known engines (or fallback if headless without GPU)
         assert any(engine.startswith(base) for base in ("native_cpu", "burn_ndarray", "burn_wgpu"))

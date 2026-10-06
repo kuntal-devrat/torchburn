@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 import os
-import sys
 from typing import Optional, Union, Generator, List, Dict, Any
 import torch
 
-from .config import ModelConfig, GenerationConfig, EngineConfig
+from .config import GenerationConfig, EngineConfig
 from .model import UniversalTransformer
 from .tokenizer import UniversalTokenizer
 from .loader import ModelLoader
@@ -35,7 +34,7 @@ class LLM:
 
     def __init__(
         self,
-        model: UniversalTransformer,
+        model: Union[UniversalTransformer, torch.nn.Module],
         tokenizer: UniversalTokenizer,
         config: Optional[EngineConfig] = None,
     ):
@@ -43,6 +42,14 @@ class LLM:
         self.tokenizer = tokenizer
         self.engine_config = config or EngineConfig()
         self.engine = UniversalEngine(self.model, self.tokenizer, self.engine_config)
+
+    def get_num_params(self) -> int:
+        """Returns the total number of parameters in the model."""
+        fn: Any = getattr(self.model, "get_num_params", None)
+        if callable(fn):
+            val: Any = fn()
+            return int(val)
+        return sum(p.numel() for p in self.model.parameters())
 
     @classmethod
     def from_pretrained(

@@ -58,7 +58,6 @@ def _dequant_int4_grouped(packed: torch.Tensor, scales: torch.Tensor, group_size
     even = lo.reshape(n, -1, 1)
     odd = hi.reshape(n, -1, 1)
     q = torch.cat([even, odd], dim=2).reshape(n, k).to(torch.int8) - 8
-    num_groups = k // group_size
     scales_rep = scales.repeat_interleave(group_size, dim=1)  # (n, k)
     return q.float() * scales_rep
 

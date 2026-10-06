@@ -11,7 +11,6 @@ Verifies that:
 import os
 import sys
 import gc
-import pytest
 import torch
 import torch.nn as nn
 

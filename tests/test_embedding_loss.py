@@ -14,7 +14,6 @@ import torch
 import torch.nn.functional as F
 import pytest
 
-import torchburn
 from torchburn import ops
 from torchburn import _torchburn as _native
 from torchburn._compiled import BurnCompiledCallable

@@ -3,12 +3,10 @@ Tests for Phase 7: extended operator coverage.
 """
 import torch
 import torch.nn.functional as F
-import pytest
 import sys
 import os
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
-import torchburn  # registers the backend
 
 
 def _compile(model, *example_inputs):

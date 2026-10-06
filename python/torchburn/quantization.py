@@ -64,10 +64,17 @@ def quantize_weight_int4_grouped(
         packed_weights: (N, (K + 1) // 2) uint8 tensor storing 2 nibbles per byte
         scales: (N, (K + group_size - 1) // group_size) float32 tensor
     """
+    if weight.ndim != 2:
+        raise ValueError(
+            f"Expected 2D weight matrix for quantize_weight_int4_grouped, got {weight.ndim}D tensor of shape {tuple(weight.shape)}"
+        )
     orig_device = weight.device
     N, K = weight.shape
     if K % group_size != 0:
-        raise ValueError(f"K={K} must be divisible by group_size={group_size}")
+        raise ValueError(
+            f"Weight dimension K={K} must be divisible by group_size={group_size}. "
+            f"Consider padding the weight tensor along dim 1 to a multiple of {group_size}."
+        )
     num_groups = K // group_size
     packed_cols = (K + 1) // 2
 
@@ -287,9 +294,9 @@ def wgpu_w4a32_grouped_linear(
 
 def fused_swiglu_mlp(
     x: torch.Tensor,
-    gate: QuantizedLinear,
-    up: QuantizedLinear,
-    down: QuantizedLinear,
+    gate: Any,
+    up: Any,
+    down: Any,
 ) -> torch.Tensor:
     """Fused SwiGLU MLP: out = down(silu(gate(x)) * up(x)) executed in a single native pass."""
     x_orig_shape = x.shape
@@ -334,9 +341,9 @@ def fused_swiglu_mlp(
 
 def fused_swiglu_mlp_batched(
     x: torch.Tensor,
-    gate: "QuantizedLinear",
-    up: "QuantizedLinear",
-    down: "QuantizedLinear",
+    gate: Any,
+    up: Any,
+    down: Any,
 ) -> torch.Tensor:
     """Batched prefill SwiGLU MLP for INT4: uses Rayon-parallel GEMM when T > 1.
 
@@ -378,8 +385,8 @@ def fused_swiglu_mlp_batched(
 
 def fused_attention_step(
     x: torch.Tensor,
-    qkv: QuantizedLinear,
-    o_proj: QuantizedLinear,
+    qkv: Any,
+    o_proj: Any,
     k_cache: torch.Tensor,
     v_cache: torch.Tensor,
     cos: torch.Tensor,
@@ -446,7 +453,7 @@ def fused_attention_step(
 
 def fused_transformer_layer_step(
     x: torch.Tensor,
-    layer: nn.Module,
+    layer: Any,
     k_cache: torch.Tensor,
     v_cache: torch.Tensor,
     cos: torch.Tensor,
@@ -519,7 +526,7 @@ def fused_transformer_layer_step(
     return x_2d.reshape(x.shape)
 
 
-def create_rust_qwen_decoder(model: nn.Module, max_seq_len: int = 4096) -> Any:
+def create_rust_qwen_decoder(model: Any, max_seq_len: int = 4096) -> Any:
     """Instantiate zero-Python end-to-end RustQwenDecoder from a quantized NoCudaModel."""
     from . import _torchburn as _native
 
@@ -581,7 +588,7 @@ def create_rust_qwen_decoder(model: nn.Module, max_seq_len: int = 4096) -> Any:
 
 
 def create_wgpu_qwen_decoder(
-    model: nn.Module,
+    model: Any,
     max_seq_len: int = 2048,
     layers_per_pass: int | None = None,
 ) -> Any:
@@ -673,6 +680,10 @@ def create_wgpu_qwen_decoder(
 class QuantizedLinear(nn.Module):
     """Drop-in replacement for `nn.Linear` using TorchBurn's native SIMD quantized kernels."""
 
+    qweight: torch.Tensor
+    scales: torch.Tensor
+    bias: Optional[torch.Tensor]
+
     def __init__(
         self,
         in_features: int,
@@ -690,12 +701,12 @@ class QuantizedLinear(nn.Module):
         self.backend = backend
 
         if bits == 8:
-            self.register_buffer("qweight", torch.zeros(out_features, in_features, dtype=torch.int8))
+            self.register_buffer("qweight", torch.zeros((out_features, in_features), dtype=torch.int8))
             self.register_buffer("scales", torch.ones(out_features, dtype=torch.float32))
         elif bits == 4:
-            self.register_buffer("qweight", torch.zeros(out_features, (in_features + 1) // 2, dtype=torch.uint8))
+            self.register_buffer("qweight", torch.zeros((out_features, (in_features + 1) // 2), dtype=torch.uint8))
             num_groups = (in_features + group_size - 1) // group_size
-            self.register_buffer("scales", torch.ones(out_features, num_groups, dtype=torch.float32))
+            self.register_buffer("scales", torch.ones((out_features, num_groups), dtype=torch.float32))
         else:
             raise ValueError(f"Supported quantization bits are 8 and 4, got {bits}")
 
@@ -716,12 +727,9 @@ class QuantizedLinear(nn.Module):
                 qw, sc = quantize_weight_int4_grouped(linear.weight, group_size=group_size)
             ql.qweight.copy_(qw)
             ql.scales.copy_(sc)
-            if has_bias:
+            if has_bias and linear.bias is not None:
+                assert ql.bias is not None
                 ql.bias.copy_(linear.bias.float())
-            # Free memory immediately!
-            linear.weight = None
-            if has_bias:
-                linear.bias = None
         return ql
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:

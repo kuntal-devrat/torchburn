@@ -1,6 +1,5 @@
 """Verification of all 450 native operations (full coverage)."""
 from __future__ import annotations
-import torch
 from torchburn import _torchburn as tb
 
 def test_exactly_450_supported_ops():

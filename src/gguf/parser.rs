@@ -12,6 +12,11 @@ use std::path::Path;
 
 use super::types::*;
 
+/// Maximum allowed metadata entries in a single GGUF model (DoS protection).
+pub const MAX_GGUF_METADATA_ENTRIES: u64 = 100_000;
+/// Maximum allowed tensor count in a single GGUF model (DoS protection).
+pub const MAX_GGUF_TENSORS: u64 = 100_000;
+
 /// GGUF parsing error.
 #[derive(Debug)]
 pub enum GgufError {
@@ -222,6 +227,9 @@ impl<'a> GgufParser<'a> {
         // remaining file can never be satisfied. Without this, a corrupt
         // header could request a multi-GB `Vec::with_capacity` up front and
         // abort the process on allocation failure.
+        if kv_count > MAX_GGUF_METADATA_ENTRIES || tensor_count > MAX_GGUF_TENSORS {
+            return Err(GgufError::TruncatedData);
+        }
         let remaining = (self.reader.len() - self.pos) as u64;
         if kv_count > remaining / 9 {
             return Err(GgufError::TruncatedData);

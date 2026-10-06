@@ -1,6 +1,5 @@
 import torch
 import torch.nn as nn
-import torchburn
 from torchburn._compiled import BurnCompiledCallable
 
 

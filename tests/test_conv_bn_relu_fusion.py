@@ -7,10 +7,8 @@ batch_norm, and relu as separate operations.
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import warnings
 import pytest
 
-import torchburn  # registers the backend
 
 
 class ConvBnReluModel(nn.Module):

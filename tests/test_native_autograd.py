@@ -3,13 +3,11 @@ Phase 9 tests: native backward through Rust kernels + comprehensive Phase 1-9 ed
 """
 import torch
 import torch.nn.functional as F
-import pytest
 import sys
 import os
 import math
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
-import torchburn  # registers the backend
 
 
 # ---------------------------------------------------------------------------

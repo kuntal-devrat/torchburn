@@ -15,6 +15,7 @@ The mixin holds all shared state; subclasses provide `gm`/`function_map`/`plan`.
 from __future__ import annotations
 
 import collections
+import logging
 import os
 import threading
 import warnings
@@ -27,6 +28,8 @@ from . import _torchburn as _native
 from ._cache import _LOCK, lookup, store
 from ._parser import payload_json, parse_graph
 
+_LOG = logging.getLogger("torchburn")
+
 _WARNED: collections.OrderedDict[str, None] = collections.OrderedDict()
 _WARN_LOCK = threading.Lock()
 _MAX_WARN_ENTRIES = 128
@@ -34,7 +37,11 @@ _MAX_WARN_ENTRIES = 128
 _F32_F64 = (torch.float32, torch.float64)
 _INT_BOOL = (torch.int64, torch.int32, torch.bool)
 _INT_DTYPES = (torch.int64, torch.int32)
-_MIXED_FLOAT = (torch.float16, torch.bfloat16)
+_MIXED_FLOAT_LIST = [torch.float16, torch.bfloat16]
+for _fp8 in ("float8_e4m3fn", "float8_e5m2", "float8_e4m3fnuz", "float8_e5m2fnuz"):
+    if hasattr(torch, _fp8):
+        _MIXED_FLOAT_LIST.append(getattr(torch, _fp8))
+_MIXED_FLOAT = tuple(_MIXED_FLOAT_LIST)
 
 # Ops whose Rust engine kernels natively accept integer (i64/i32) tensor inputs.
 # These must NOT have their integer tensors cast to float.
@@ -64,16 +71,18 @@ def _should_cast_to_int(node: dict[str, Any], env: dict[int, Any]) -> torch.dtyp
     int_dtype = None
     for a in node.get("args", []):
         if isinstance(a, dict) and a.get("kind") in ("input", "node", "attr"):
-            val = env.get(a.get("index"))
-            if isinstance(val, torch.Tensor):
-                found_tensor = True
-                if val.dtype in _INT_DTYPES:
-                    if int_dtype is None:
-                        int_dtype = val.dtype
-                    elif int_dtype != val.dtype:
-                        return None  # mixed integer dtypes
-                else:
-                    return None  # has float tensor input!
+            idx = a.get("index")
+            if idx is not None:
+                val = env.get(idx)
+                if val is not None and isinstance(val, torch.Tensor):
+                    found_tensor = True
+                    if val.dtype in _INT_DTYPES:
+                        if int_dtype is None:
+                            int_dtype = val.dtype
+                        elif int_dtype != val.dtype:
+                            return None  # mixed integer dtypes
+                    else:
+                        return None  # has float tensor input!
     return int_dtype if found_tensor else None
 
 
@@ -84,6 +93,8 @@ def _warn_fallback(target: str, reason: str = "") -> None:
     # native-phase path (with reason) and the eager-phase path (without), which
     # would otherwise emit two warnings for one event.
     key = target
+    if key in _WARNED:
+        return
     with _WARN_LOCK:
         if key in _WARNED:
             _WARNED.move_to_end(key)
@@ -364,11 +375,12 @@ class _BaseInterpreter:
         try:
             capsules = [t.__dlpack__() for t in run_inputs]
             out_capsules = _native.execute_prepared(self._graph_handle, capsules)
-        except Exception:
+        except Exception as exc:
             # RuntimeError = engine-reported failure; ValueError = evicted or
             # otherwise invalid graph handle; PanicException/BaseException
             # subclasses can no longer escape (Rust catches panics), but any
             # exotic exception still degrades to eager instead of crashing.
+            _LOG.warning("torchburn: native execution failed, falling back to eager: %s", exc)
             self._exec_phases_sequentially(env)
             return
         by_id = dict(zip(self._combined_output_ids, out_capsules))
@@ -421,9 +433,11 @@ class _BaseInterpreter:
                 elif target != orig:
                     return None  # conflicting cast targets
             else:
-                val = env.get(a.get("index"))
-                if isinstance(val, torch.Tensor) and val.dtype.is_floating_point:
-                    return None  # genuine f32/f64 operand: promotion keeps it
+                idx = a.get("index")
+                if idx is not None:
+                    val = env.get(idx)
+                    if val is not None and isinstance(val, torch.Tensor) and val.dtype.is_floating_point:
+                        return None  # genuine f32/f64 operand: promotion keeps it
         return target
 
     def _exec_phases_sequentially(self, env: dict[int, Any]) -> None:
@@ -449,11 +463,17 @@ class _BaseInterpreter:
                         if item.get("value") is None:
                             return False
                     else:
-                        v = env.get(item.get("index"))
+                        idx = item.get("index")
+                        if idx is None:
+                            return False
+                        v = env.get(idx)
                         if v is None or not isinstance(v, torch.Tensor):
                             return False
             return True
-        v = env.get(arg.get("index"))
+        idx = arg.get("index")
+        if idx is None:
+            return False
+        v = env.get(idx)
         if v is None or not isinstance(v, torch.Tensor):
             return False
         return True
@@ -492,11 +512,13 @@ class _BaseInterpreter:
                 for arg in node.get("args", []):
                     kind = arg.get("kind", "")
                     if kind in ("input", "node", "attr"):
-                        val = env.get(arg.get("index"))
-                        if isinstance(val, torch.Tensor) and val.requires_grad:
-                            for n in nodes:
-                                env[n["id"]] = self._run_eager(n, env)
-                            return
+                        idx = arg.get("index")
+                        if idx is not None:
+                            val = env.get(idx)
+                            if val is not None and isinstance(val, torch.Tensor) and val.requires_grad:
+                                for n in nodes:
+                                    env[n["id"]] = self._run_eager(n, env)
+                                return
         chunk_ids = {n["id"] for n in nodes}
         pos = {n["id"]: p for p, n in enumerate(nodes)}
         run_inputs: list[torch.Tensor] = []
@@ -610,6 +632,8 @@ class _BaseInterpreter:
                 continue
             self._collect_refs(node.get("args", []), chunk_ids, needed)
         with self._needed_lock:
+            if len(self._needed_cache) >= 256:
+                self._needed_cache.pop(next(iter(self._needed_cache)))
             self._needed_cache[key] = needed
         return needed
 
@@ -637,11 +661,13 @@ class _BaseInterpreter:
 
     @staticmethod
     def _scalar_dtype(node: dict[str, Any], env: dict[int, Any]) -> torch.dtype:
-        for arg in node["args"]:
-            if arg["kind"] in ("input", "node", "attr"):
-                value = env.get(arg["index"])
-                if isinstance(value, torch.Tensor) and value.dtype in _F32_F64:
-                    return value.dtype
+        for arg in node.get("args", []):
+            if isinstance(arg, dict) and arg.get("kind") in ("input", "node", "attr"):
+                idx = arg.get("index")
+                if idx is not None:
+                    value = env.get(idx)
+                    if value is not None and isinstance(value, torch.Tensor) and value.dtype in _F32_F64:
+                        return value.dtype
         return torch.float32
 
     @staticmethod

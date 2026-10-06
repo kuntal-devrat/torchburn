@@ -8,9 +8,6 @@ consumed non-zero indices force eager fallback.
 from __future__ import annotations
 
 import torch
-import torch.nn.functional as F
-import torchburn  # registers the "torchburn" backend
-import pytest
 
 
 # ── unbind ──────────────────────────────────────────────────────────────

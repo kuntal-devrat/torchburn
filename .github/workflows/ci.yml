@@ -64,6 +64,9 @@ jobs:
       - name: mypy (strict)
         run: mypy python/torchburn --ignore-missing-imports --no-implicit-optional || true
 
+      - name: Pyright type check
+        run: npx --yes pyright python/torchburn
+
       - name: Check py.typed and version sync
         run: |
           test -f python/torchburn/py.typed || (echo "py.typed missing" && exit 1)

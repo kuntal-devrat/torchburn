@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import torch
-import torchburn
 from torchburn import _torchburn as tb
 
 

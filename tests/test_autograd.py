@@ -10,11 +10,10 @@ import sys
 import os
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
-import torchburn.autograd as ta
 from torchburn.autograd import (
     Tensor, enable, disable, reset, tape_len,
     linear, relu, sigmoid, tanh_act, gelu, softmax,
-    layer_norm, dropout, mse_loss, nll_loss, cross_entropy, sum_op,
+    mse_loss, nll_loss, cross_entropy, sum_op,
 )
 
 

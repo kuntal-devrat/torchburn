@@ -1,0 +1,21 @@
+{
+  "include": [
+    "python",
+    "tests"
+  ],
+  "venvPath": ".",
+  "venv": ".venv",
+  "extraPaths": [
+    "python"
+  ],
+  "executionEnvironments": [
+    {
+      "root": "python",
+      "extraPaths": [
+        "python"
+      ]
+    }
+  ],
+  "reportMissingImports": "none",
+  "reportMissingModuleSource": "none"
+}

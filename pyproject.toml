@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "torchburn"
-version = "0.6.5"
+version = "1.0.0"
 description = "A hardware-agnostic, Rust-compiled PyTorch compilation backend. Zero-copy DLPack FFI, BLAKE3 structural graph caching, and safe eager fallback for unsupported operators."
 readme = "README.md"
 requires-python = ">=3.9"
@@ -12,7 +12,7 @@ license = { text = "Apache-2.0" }
 authors = [{ name = "TorchBurn contributors" }]
 keywords = ["pytorch", "compile", "dlpack", "rust", "burn", "gpu", "wgpu"]
 classifiers = [
-    "Development Status :: 4 - Beta",
+    "Development Status :: 5 - Production/Stable",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
@@ -42,7 +42,6 @@ llm = [
     "transformers>=4.40",
     "psutil>=5.8",
 ]
-gpu = []
 all = [
     "huggingface-hub>=0.20",
     "safetensors>=0.4",
@@ -59,3 +58,12 @@ strip = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.pyright]
+include = ["python", "tests"]
+extraPaths = ["python"]
+executionEnvironments = [
+    { root = "python", extraPaths = ["python"] }
+]
+reportMissingImports = "none"
+reportMissingModuleSource = "none"

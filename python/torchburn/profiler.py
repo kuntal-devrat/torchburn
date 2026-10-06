@@ -313,7 +313,6 @@ def op_coverage(model, example_inputs, **kwargs) -> dict[str, Any]:
         unsupported_ops: list of fallback op targets
         engine: active engine
     """
-    import torch
     from torch.fx.experimental.proxy_tensor import make_fx
     from ._parser import parse_graph
 

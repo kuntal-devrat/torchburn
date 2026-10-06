@@ -35,7 +35,7 @@ fn bench_qkv(c: &mut Criterion) {
     group.bench_function("qkv_896_to_2688", |bb| {
         let mut rng = Lcg(0x9E3779B97F4A7C15);
         let mut x = vec![0.0f32; k];
-        let mut w = vec![0u8; n * ((k + 1) / 2)];
+        let mut w = vec![0u8; n * k.div_ceil(2)];
         let num_groups = k / GROUP_SIZE;
         let mut scales = vec![0.0f32; n * num_groups];
         let mut out = vec![0.0f32; n];
@@ -73,7 +73,7 @@ fn bench_mlp(c: &mut Criterion) {
         let k = HIDDEN;
         let mut rng = Lcg(0x123456789ABCDEF);
         let mut x = vec![0.0f32; k];
-        let mut w = vec![0u8; n * ((k + 1) / 2)];
+        let mut w = vec![0u8; n * k.div_ceil(2)];
         let num_groups = k / GROUP_SIZE;
         let mut scales = vec![0.0f32; n * num_groups];
         let mut out = vec![0.0f32; n];
@@ -105,7 +105,7 @@ fn bench_mlp(c: &mut Criterion) {
         let k = INTERMEDIATE;
         let mut rng = Lcg(0xDEADBEEFCAFEF00D);
         let mut x = vec![0.0f32; k];
-        let mut w = vec![0u8; n * ((k + 1) / 2)];
+        let mut w = vec![0u8; n * k.div_ceil(2)];
         let num_groups = k / GROUP_SIZE;
         let mut scales = vec![0.0f32; n * num_groups];
         let mut out = vec![0.0f32; n];
@@ -143,7 +143,7 @@ fn bench_lm_head(c: &mut Criterion) {
     group.bench_function("lm_head_896_to_151936", |bb| {
         let mut rng = Lcg(0xFEEDFACECAFEBEEF);
         let mut x = vec![0.0f32; k];
-        let mut w = vec![0u8; n * ((k + 1) / 2)];
+        let mut w = vec![0u8; n * k.div_ceil(2)];
         let num_groups = k / GROUP_SIZE;
         let mut scales = vec![0.0f32; n * num_groups];
         let mut out = vec![0.0f32; n];

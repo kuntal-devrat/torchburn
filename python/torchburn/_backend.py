@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 import torch
 
@@ -26,7 +27,7 @@ class _BurnSubmoduleWrapper(torch.nn.Module):
         super().__init__()
         self._compiled = compiled
 
-    def forward(self, *args: any, **kwargs: any) -> any:
+    def forward(self, *args: Any, **kwargs: Any) -> Any:
         return self._compiled(*args, **kwargs)
 
 
@@ -132,11 +133,11 @@ def _partition_graph(gm: torch.fx.GraphModule, example_inputs: list[torch.Tensor
         return BurnCompiledCallable(gm, example_inputs)
 
     # Capture runtime example inputs for each submodule
-    submod_inputs: dict[str, tuple[any, ...]] = {}
+    submod_inputs: dict[str, tuple[Any, ...]] = {}
     handles = []
     for name, child in split_gm.named_children():
         def make_hook(submod_name: str):
-            def hook(mod: torch.nn.Module, inputs: tuple[any, ...]):
+            def hook(mod: torch.nn.Module, inputs: tuple[Any, ...]):
                 if submod_name not in submod_inputs:
                     submod_inputs[submod_name] = inputs
             return hook
@@ -175,24 +176,32 @@ def _partition_graph(gm: torch.fx.GraphModule, example_inputs: list[torch.Tensor
     return split_gm
 
 
-def _compile_boxed(gm: torch.fx.GraphModule, example_inputs: list[torch.Tensor]):
+def _compile_boxed(gm: torch.fx.GraphModule, example_inputs: Any):
+    make_boxed_func = None
     try:
-        from torch._functorch.aot_autograd import make_boxed_func
-    except ImportError:
-        return BurnCompiledCallable(gm, example_inputs)
+        from torch._functorch.aot_autograd import make_boxed_func  # type: ignore[import-untyped]
+    except (ImportError, AttributeError):
+        try:
+            from torch._functorch._aot_autograd.utils import make_boxed_func  # type: ignore[import-untyped]
+        except (ImportError, AttributeError):
+            pass
+
+    inputs_list = list(example_inputs) if isinstance(example_inputs, (list, tuple)) else []
+    if make_boxed_func is None:
+        return BurnCompiledCallable(gm, inputs_list)
 
     # Check if graph has unsupported ops and partition if needed
     if _has_unsupported_nodes(gm):
-        partitioned = _partition_graph(gm, example_inputs)
+        partitioned = _partition_graph(gm, inputs_list)
         try:
             return make_boxed_func(partitioned)
         except Exception:
             return partitioned
     else:
         try:
-            return make_boxed_func(BurnCompiledCallable(gm, example_inputs))
+            return make_boxed_func(BurnCompiledCallable(gm, inputs_list))
         except Exception:
-            return BurnCompiledCallable(gm, example_inputs)
+            return BurnCompiledCallable(gm, inputs_list)
 
 
 def torchburn_backend(
@@ -238,7 +247,9 @@ def register() -> None:
             return
         except Exception as exc:  # pragma: no cover - API drift fallback
             _LOG.debug("torch._dynamo.register_backend failed: %s", exc)
-    try:
-        torch.compiler.register_backend(name="torchburn")(torchburn_backend)
-    except Exception as exc:  # pragma: no cover
-        _LOG.warning("torchburn: could not register the 'torchburn' backend: %s", exc)
+    compiler_mod = getattr(torch, "compiler", None)
+    if compiler_mod is not None and hasattr(compiler_mod, "register_backend"):
+        try:
+            compiler_mod.register_backend(name="torchburn")(torchburn_backend)
+        except Exception as exc:  # pragma: no cover
+            _LOG.warning("torchburn: could not register the 'torchburn' backend: %s", exc)

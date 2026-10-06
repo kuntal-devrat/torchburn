@@ -1,11 +1,9 @@
 """Tests for native backward activation & embedding kernels, training batch norm, and end-to-end AOTAutograd training."""
 
 import json
-import pytest
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torchburn
 from torchburn import _torchburn as _native
 from torchburn._parser.op_registry import _ATEN_TO_OP
 

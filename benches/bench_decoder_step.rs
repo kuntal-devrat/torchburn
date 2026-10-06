@@ -47,7 +47,7 @@ fn bench_decode_step(c: &mut Criterion) {
         let mut norm_out = vec![0.0f32; HIDDEN];
 
         let make_w = |n: usize, k: usize, rng: &mut Lcg| -> (Vec<u8>, Vec<f32>) {
-            let mut w = vec![0u8; n * ((k + 1) / 2)];
+            let mut w = vec![0u8; n * k.div_ceil(2)];
             let num_groups = k / GROUP_SIZE;
             let mut scales = vec![0.0f32; n * num_groups];
             for v in w.iter_mut() {

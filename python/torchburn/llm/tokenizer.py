@@ -3,7 +3,7 @@
 from __future__ import annotations
 import json
 import os
-from typing import List, Dict, Any, Optional, Union
+from typing import List, Dict, Any, Optional
 
 from ._registry import fallback_eos_id, repo_snapshot_dir, resolve_repo_id
 

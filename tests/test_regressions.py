@@ -1,10 +1,7 @@
 """Tests for Phase fixes: expand(-1), multi-norm, mixed precision, profiling, chunk splitting."""
 
-import warnings
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-import pytest
 
 
 class TestExpandDimMinusOne:
@@ -162,7 +159,7 @@ class TestProfilingAPI:
     def test_reset_stats(self):
         import torchburn
         torchburn.reset_stats()
-        with torchburn.profile() as p:
+        with torchburn.profile():
             pass
 
         stats = torchburn.profiling_stats()

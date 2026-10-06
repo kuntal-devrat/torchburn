@@ -517,9 +517,23 @@ impl OwnedTensor {
     /// Create from a pooled buffer (avoids allocation).
     pub fn from_pool(dtype: DType, shape: Vec<i64>, mut data: Vec<u64>) -> Self {
         let n = elem_count(&shape);
-        let bytes = n
-            .checked_mul(dtype.elem_size())
-            .expect("tensor byte size overflow");
+        let bytes = match n.checked_mul(dtype.elem_size()) {
+            Some(b) => b,
+            None => {
+                // Overflow: shape is too large for this dtype. Return an empty
+                // tensor — callers that need to handle this gracefully should
+                // use `new_checked()` instead.
+                eprintln!(
+                    "torchburn: tensor byte size overflow in from_pool (elem_count={}, elem_size={}); returning empty tensor",
+                    n, dtype.elem_size()
+                );
+                return OwnedTensor {
+                    data: Vec::new(),
+                    shape,
+                    dtype,
+                };
+            }
+        };
         let words = bytes.div_ceil(8);
         if data.capacity() >= words {
             unsafe {
@@ -587,7 +601,6 @@ unsafe extern "C" fn dlpack_capsule_destructor(capsule: *mut pyo3::ffi::PyObject
     }
 }
 
-/// Wrap an owned tensor in a fresh `PyCapsule` named `"dltensor"` that
 /// Wrap an OwnedTensor reference into a DLPack capsule (clones the tensor).
 /// Prefer `owned_to_capsule_owned` whenever the source tensor can be moved/consumed.
 pub fn owned_to_capsule(py: Python<'_>, tensor: &OwnedTensor) -> PyResult<Py<PyCapsule>> {

@@ -14,14 +14,14 @@ for _i, _arg in enumerate(sys.argv[:-1]):
         break
 
 import torchburn as tb
-from torchburn.llm.config import EngineConfig, GenerationConfig
+from torchburn.llm.config import GenerationConfig
 
 
 def main(args: Optional[list[str]] = None) -> int:
     if hasattr(sys.stdout, "reconfigure"):
         try:
-            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-            sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+            getattr(sys.stdout, "reconfigure")(encoding="utf-8", errors="replace")
+            getattr(sys.stderr, "reconfigure")(encoding="utf-8", errors="replace")
         except Exception:
             pass
 
@@ -94,7 +94,7 @@ def main(args: Optional[list[str]] = None) -> int:
         num_threads=parsed.threads,
     )
     load_time = time.perf_counter() - t0
-    print(f"[TorchBurn] Loaded in {load_time:.2f}s ({llm.model.get_num_params() / 1e6:.1f}M parameters).\n")
+    print(f"[TorchBurn] Loaded in {load_time:.2f}s ({llm.get_num_params() / 1e6:.1f}M parameters).\n")
 
     if parsed.command == "chat":
         llm.chat(

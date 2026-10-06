@@ -1,8 +1,6 @@
 """Tests for audit fixes: dynamic switching, WGPU caching, prelu op, concurrency, and memory stability."""
 
 import os
-import gc
-import sys
 import threading
 import pytest
 import torch
@@ -53,7 +51,6 @@ def test_invalid_graph_handle_raises_valueerror_not_panic():
 def test_payload_rejects_node_ids_that_alias_tuple_encoding():
     """Node ids >= 65536 would collide with the (id << 16) | elem tuple
     output encoding; the payload validator must reject them loudly."""
-    import json
 
     from torchburn import _torchburn as native
 
@@ -354,8 +351,6 @@ def test_quantized_linear_device_routing():
         group_size=64,
         backend="cpu",
     )
-
-    x = torch.randn(64, dtype=torch.float32)
 
     # When TORCHBURN_DEVICE=cpu, it must stay on CPU even if backend is igpu
     layer.backend = "igpu"

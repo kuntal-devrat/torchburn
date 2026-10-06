@@ -77,7 +77,6 @@ def test_quantize_weight_int4_grouped_and_linear():
 
 def test_quantized_linear_module_from_float():
     torch.manual_seed(42)
-    linear = torch.nn.Linear(64, 32, bias=True)
     x = torch.randn(2, 64)
 
     # 8-bit QuantizedLinear

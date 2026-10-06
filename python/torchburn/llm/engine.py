@@ -11,8 +11,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 import torchburn
-from .config import EngineConfig, GenerationConfig, ModelConfig
-from .model import UniversalTransformer, StaticKVCache
+from .config import EngineConfig, GenerationConfig
+from .model import UniversalTransformer
 from .tokenizer import UniversalTokenizer
 
 _LOG = logging.getLogger("torchburn.llm")
@@ -23,7 +23,7 @@ class UniversalEngine:
 
     def __init__(
         self,
-        model: UniversalTransformer,
+        model: Union[UniversalTransformer, torch.nn.Module],
         tokenizer: UniversalTokenizer,
         config: Optional[EngineConfig] = None,
     ):
@@ -59,19 +59,13 @@ class UniversalEngine:
                     target_device = "metal"
                 else:
                     try:
-                        gpu_result = torchburn._torchburn.gpu_info()
-                        # gpu_info() returns a tuple: (available, adapter_name, backend, vram_bytes)
-                        available = gpu_result[0] if isinstance(gpu_result, (tuple, list)) else gpu_result.get("available", False)
+                        gpu_result = _native_check.gpu_info()
+                        available = gpu_result.get("available", False) if isinstance(gpu_result, dict) else gpu_result[0]
                         target_device = "gpu" if available else "cpu"
                     except Exception:
                         target_device = "cpu"
             except Exception:
-                try:
-                    gpu_result = torchburn._torchburn.gpu_info()
-                    available = gpu_result[0] if isinstance(gpu_result, (tuple, list)) else gpu_result.get("available", False)
-                    target_device = "gpu" if available else "cpu"
-                except Exception:
-                    target_device = "cpu"
+                target_device = "cpu"
         elif target_device == "metal":
             from .. import _torchburn as _native_check
             if sys.platform != "darwin" or not hasattr(_native_check, "MetalBackend"):
@@ -95,7 +89,8 @@ class UniversalEngine:
             backend = "igpu" if target_device in ("igpu", "gpu", "wgpu", "dgpu", "vulkan", "dx12", "metal") else "cpu"
 
             # Check if model is already quantized (e.g. from streaming loader or disk cache)
-            first_layer = self.raw_model.layers[0] if hasattr(self.raw_model, "layers") and len(self.raw_model.layers) > 0 else None
+            raw_layers: Any = getattr(self.raw_model, "layers", None)
+            first_layer = raw_layers[0] if raw_layers is not None and len(raw_layers) > 0 else None
             is_already_quantized = False
             if first_layer is not None:
                 attn = getattr(first_layer, "self_attn", None)
@@ -106,9 +101,10 @@ class UniversalEngine:
 
             if not is_already_quantized:
                 # Fuse QKV for single-pass GEMV
-                if hasattr(self.raw_model, "fuse_qkv"):
+                fuse_fn = getattr(self.raw_model, "fuse_qkv", None)
+                if callable(fuse_fn):
                     _LOG.info("Fusing QKV projections for single-pass GEMV...")
-                    self.raw_model.fuse_qkv()
+                    fuse_fn()
 
                 _LOG.info("Quantizing model weights to INT%d SIMD [backend=%s]...", bits, backend)
                 torchburn.quantize_model(self.raw_model, bits=bits, exclude_modules=[], backend=backend)
@@ -325,9 +321,10 @@ class UniversalEngine:
             native_prefilled = False
         if not native_prefilled:
             input_tensor = torch.tensor([input_ids_list], dtype=torch.long)
-            if self.config.use_static_kv_cache and hasattr(self.raw_model, "create_static_kv_caches"):
+            create_static_fn = getattr(self.raw_model, "create_static_kv_caches", None)
+            if self.config.use_static_kv_cache and callable(create_static_fn):
                 max_len = max(seq_len + cfg.max_new_tokens + 64, 4096)
-                init_kv = self.raw_model.create_static_kv_caches(max_batch_size=1, max_seq_len=max_len)
+                init_kv = create_static_fn(max_batch_size=1, max_seq_len=max_len)
                 logits, kv_caches, prefill_time = self.prefill(input_tensor, kv_caches=init_kv, offset=0)
             else:
                 logits, kv_caches, prefill_time = self.prefill(input_tensor)
@@ -335,7 +332,7 @@ class UniversalEngine:
         # Native path: obtain sampler logits directly from native decoder
         # without disturbing native KV or executing redundant Python passes.
         if native_prefilled:
-            if hasattr(decoder, "get_logits"):
+            if decoder is not None and hasattr(decoder, "get_logits"):
                 raw_logits = decoder.get_logits()
                 logits = torch.tensor([raw_logits], dtype=torch.float32)
             else:
@@ -373,6 +370,8 @@ class UniversalEngine:
         }
 
         # 4. Decode Phase
+        if logits is None:
+            raise RuntimeError("Failed to compute initial logits for decoding")
         recent_window = 64
         next_token = self._sample(
             logits,
@@ -550,4 +549,4 @@ def _set_quant_backend(model: nn.Module, backend: str) -> None:
     re-quantization or data movement is needed."""
     for module in model.modules():
         if hasattr(module, "backend") and hasattr(module, "qweight"):
-            module.backend = backend
+            setattr(module, "backend", backend)

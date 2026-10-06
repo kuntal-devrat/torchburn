@@ -116,6 +116,7 @@ impl LruCache {
 
         // Evict LRU (head) if at capacity
         if self.map.len() >= self.capacity && self.head != NIL {
+            EVICTIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let evict_idx = self.head;
             let evict_key = self.nodes[evict_idx].key.clone();
             self.map.remove(&evict_key);
@@ -177,6 +178,7 @@ static GRAPH_CACHE: LazyLock<RwLock<LruCache>> = LazyLock::new(|| RwLock::new(Lr
 
 static HITS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static MISSES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static EVICTIONS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// BLAKE3 structural signature over the canonical payload string.
 pub fn structural_signature(payload: &str) -> String {
@@ -266,4 +268,11 @@ pub fn cache_clear() {
         .clear();
     HITS.store(0, std::sync::atomic::Ordering::Relaxed);
     MISSES.store(0, std::sync::atomic::Ordering::Relaxed);
+    EVICTIONS.store(0, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Cumulative cache eviction count.
+#[pyfunction]
+pub fn cache_evictions() -> u64 {
+    EVICTIONS.load(std::sync::atomic::Ordering::Relaxed)
 }

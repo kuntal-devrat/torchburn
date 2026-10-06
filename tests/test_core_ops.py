@@ -8,7 +8,6 @@ reference values.  Each test is written to fail loudly on a regression.
 from __future__ import annotations
 
 import json
-import math
 
 import pytest
 import torch

@@ -148,6 +148,7 @@ fn test_avx512_gemv_w8a32() {
 
         // AVX-512 8-row implementation
         #[target_feature(enable = "avx512f,avx512bw")]
+        #[allow(clippy::too_many_arguments)]
         unsafe fn gemv_8rows_avx512(
             x: *const f32,
             w0: *const i8,

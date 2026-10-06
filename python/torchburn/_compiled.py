@@ -29,3 +29,11 @@ class BurnCompiledCallable(_BaseInterpreter):
             elif node["op"] == "get_attr":
                 env[node["id"]] = getattr(self.gm, node["target"])
         return self._interpret(env)
+
+    def __repr__(self) -> str:
+        nodes = len(self.plan.get("nodes", [])) if hasattr(self, "plan") and isinstance(self.plan, dict) else 0
+        phases = len(self._phases) if hasattr(self, "_phases") else 0
+        return f"<BurnCompiledCallable nodes={nodes} phases={phases} handle={self._graph_handle}>"
+
+    def __str__(self) -> str:
+        return self.__repr__()

@@ -11,7 +11,6 @@ import warnings
 
 import torch
 
-import torchburn
 
 
 def _assert_fallback_warns(call):

@@ -5,22 +5,38 @@ All notable changes to TorchBurn will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.0.0] - 2026-10-06 — Production Release
 
 ### Fixed
-- **GGUF parser lifetime refactor completed**: `GgufParser::parse_file`/`parse_bytes` moved into the `GgufParser<'static>` impl so the Cow-based zero-copy `from_slice` path typechecks; hostile-count and truncated-input tests pass.
-- **Tuple-output node-id overflow**: `Payload::validate` rejects node ids >= 65536, which would alias the `(node_id << 16) | elem` tuple-output encoding.
-- **Prepared-graph fast path for non-f32 inputs**: `_precompute_plan` now emits `"*"` wildcard dtype input specs (instead of hardcoded f32), and the Rust `init_input_slots` accepts the wildcard, so f16/bf16/i64 graphs hit the pre-planned path instead of falling back.
-- **Eager fallback on any native error**: `_exec_all_native` catches `Exception` (not just `RuntimeError`) around `execute_prepared`, so evicted-handle `ValueError`s and native `PanicException`s degrade to eager instead of escaping.
-- **Mixed-precision cast-back correctness**: f32 native outputs are cast back to f16/bf16 (or the int dtype for integer-autocast ops) only when *every* float operand of the node was upcast, matching eager type promotion; genuinely-f32/f64 outputs are left alone.
-- **Compile-time side effects removed from `_partition_graph`**: the submodule input probe now runs under `torch.no_grad()`, `torch.random.fork_rng`, and eval mode, restoring training mode afterwards — compilation no longer advances RNG or flips BN/dropout state.
-- **Python-first graph cache**: `_cache.lookup` no longer depends on Rust-side state; it self-heals native-cache eviction by re-persisting the plan via the new `cache_contains` probe.
-- **LLM global-state hygiene**: `GenerationConfig.seed` defaults to `None` and generates into a request-local `torch.Generator` (never `torch.manual_seed`); `UniversalEngine` only calls `torch.set_num_threads` when `num_threads` is explicitly configured; `api.LLM.stream` no longer hardcodes `seed=42`; engine/loader print chatter routed through `logging`.
-- **CI hardening**: the lint job's version-sync step now fails on pyproject/Cargo version drift (real check, not a print); `.kilo/` workspace dirs ignored.
+- **DLPack Memory Safety & Overflow Prevention**:
+  - `OwnedTensor::from_pool` no longer panics on byte-size overflow — returns an empty tensor with diagnostic logging matching `new()`.
+  - Recycled buffers in `memory_pool` are now unconditionally zeroed in release mode, eliminating stale data leaks across kernel dispatches and threads.
+  - Strided gather loop in DLPack FFI (`capsule_to_owned`) validates upper physical offset against allocated buffer length, preventing out-of-bounds reads from malformed capsules.
+- **Engine Correctness & Robustness**:
+  - `execute_plan` now validates graph payload invariants (including the 65,535 node ID tuple-encoding ceiling) preventing element aliasing.
+  - `burn_engine` ref count lookups use graceful error propagation instead of `.unwrap()` panics.
+  - Metal backend buffer and pipeline cache insertions use indexed access instead of `.unwrap()`.
+  - GGUF parser enforces hard upper limits (`MAX_GGUF_METADATA_ENTRIES = 100,000`, `MAX_GGUF_TENSORS = 100,000`) before allocation to thwart hostile headers.
+- **Python Runtime & Interpreter Hardening**:
+  - `_exec_all_native` logs warnings with exception details before falling back to eager execution so degraded performance is observable.
+  - `_warn_fallback` uses a lock-free dictionary check before acquiring `_WARN_LOCK`, eliminating lock contention in high-throughput multi-threaded serving.
+  - `_BaseInterpreter._needed_cache` is bounded to 256 entries with LRU eviction to prevent memory leaks in dynamic NLP serving.
+  - `_MIXED_FLOAT` automatically discovers PyTorch FP8 dtypes (`float8_e4m3fn`, `float8_e5m2`, etc.) when available.
+  - `psutil` core count probe catches specific exceptions (`ImportError`, `AttributeError`, `OSError`) instead of broad `Exception`.
+  - `quantize_weight_int4_grouped` validates 2D tensor inputs and offers concrete padding guidance when column dimension is not divisible by group size.
+  - Deduplicated `_spec()` tensor specification logic between `ops.py` and `_interpreter.py`.
 
 ### Added
-- `SECURITY.md` vulnerability reporting policy.
-- Boundary regression tests for `UnsupportedOpError` (RuntimeError subclass) and invalid-handle fallback.
+- **API & Observability**:
+  - `UnsupportedOpError` is officially re-exported from `torchburn` root and included in `__all__`.
+  - Added cumulative cache eviction metrics via `_native.cache_evictions()` and `torchburn.cache_stats()["evictions"]`.
+  - Prepared graph cache capacity is configurable via `TORCHBURN_PREPARED_CACHE_SIZE` environment variable (default: 1024).
+  - Informative `__repr__` and `__str__` implementations for `BurnCompiledCallable` and `TorchBurnModule`.
+  - Post-mortem error logging in `_shutdown_cleanup` when `TORCHBURN_DEBUG=1`.
+- **Packaging & Version Sync**:
+  - Synchronized version `1.0.0` across `Cargo.toml` and `pyproject.toml`.
+  - Promoted PyPI classifier to `Development Status :: 5 - Production/Stable`.
+  - Cleaned empty `gpu = []` extras in `pyproject.toml`.
 
 ## [0.6.5] - 2026-09-20
 

@@ -175,6 +175,7 @@ fn _torchburn(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(cache::cache_contains, m)?)?;
     m.add_function(wrap_pyfunction!(cache::cache_put, m)?)?;
     m.add_function(wrap_pyfunction!(cache::cache_stats, m)?)?;
+    m.add_function(wrap_pyfunction!(cache::cache_evictions, m)?)?;
     m.add_function(wrap_pyfunction!(cache::cache_clear, m)?)?;
 
     // Quantization FFI

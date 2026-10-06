@@ -141,124 +141,6 @@ pub fn pack_rows_w4a32_group64_v1_to_v2(w_packed: &[u8], scales: &[f32], k: usiz
     out
 }
 
-#[cfg(test)]
-mod v2_pack_tests {
-    use super::*;
-
-    fn lcg(seed: &mut u64) -> u64 {
-        *seed = seed
-            .wrapping_mul(6364136223846793005)
-            .wrapping_add(1442695040888963407);
-        *seed >> 33
-    }
-
-    #[test]
-    fn f16_roundtrip_accuracy() {
-        for &v in &[
-            0.0f32, -0.0, 1.0, -1.0, 0.5, 2.0, 65504.0, -3.75, 1234.5, 1e-4, 6.0e-5, 6.1e-8,
-        ] {
-            let back = f16_to_f32(f32_to_f16(v));
-            if v == 0.0 {
-                assert_eq!(back, v, "{v}");
-                assert!(back.is_sign_negative() == v.is_sign_negative(), "{v}");
-            } else if v.abs() < 6.1e-5 {
-                // f16 subnormal range: only absolute precision is guaranteed
-                // (step = 2^-24 = 5.96e-8).
-                assert!(
-                    (back - v).abs() < 6e-8,
-                    "f16 roundtrip subnormal {v} -> {back}"
-                );
-            } else {
-                let rel = ((back - v) / v).abs();
-                assert!(rel < 6e-4, "f16 roundtrip {v} -> {back} (rel {rel})");
-            }
-        }
-        // Overflow saturates to infinity, preserving sign.
-        assert_eq!(f16_to_f32(f32_to_f16(1e6)), f32::INFINITY);
-        assert_eq!(f16_to_f32(f32_to_f16(-1e6)), f32::NEG_INFINITY);
-    }
-
-    #[test]
-    fn pack_produces_block_layout() {
-        let n = 3;
-        let k = 128;
-        let mut seed = 42u64;
-        let src: Vec<u8> = (0..n * (k / 2)).map(|_| lcg(&mut seed) as u8).collect();
-        let scales: Vec<f32> = (0..n * (k / 64)).map(|i| 0.01 + i as f32 * 0.001).collect();
-
-        let packed = pack_rows_w4a32_group64_v1_to_v2(&src, &scales, k);
-        assert_eq!(packed.len(), n * (k / 64) * V2_BLOCK_BYTES);
-
-        for row in 0..n {
-            for g in 0..k / 64 {
-                let blk = &packed[row * (k / 64) * V2_BLOCK_BYTES + g * V2_BLOCK_BYTES..];
-                assert_eq!(
-                    &blk[..32],
-                    &src[row * (k / 2) + g * 32..row * (k / 2) + g * 32 + 32],
-                    "nibbles row {row} group {g}"
-                );
-                let got = f16_to_f32(u16::from_le_bytes([blk[32], blk[33]]));
-                let want = scales[row * (k / 64) + g];
-                assert!(
-                    (got - want).abs() / want < 6e-4,
-                    "scale row {row} group {g}"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn v2_gemv_matches_v1_within_f16_tolerance() {
-        let n = 8;
-        let k = 128;
-        let group_size = 64;
-        let num_groups = k / group_size;
-        let mut seed = 7u64;
-        let w: Vec<u8> = (0..n * (k / 2))
-            .map(|_| (lcg(&mut seed) & 0xFF) as u8)
-            .collect();
-        let s: Vec<f32> = (0..n * num_groups)
-            .map(|_| 0.002 + (lcg(&mut seed) % 1000) as f32 * 1e-5)
-            .collect();
-        let x: Vec<f32> = (0..k)
-            .map(|_| ((lcg(&mut seed) % 2000) as f32 - 1000.0) / 500.0)
-            .collect();
-
-        let mut out_v1 = vec![0.0f32; n];
-        unsafe {
-            gemv_w4a32_grouped(
-                x.as_ptr(),
-                w.as_ptr(),
-                s.as_ptr(),
-                None,
-                out_v1.as_mut_ptr(),
-                n,
-                k,
-                group_size,
-            );
-        }
-
-        let w2 = pack_rows_w4a32_group64_v1_to_v2(&w, &s, k);
-        let mut out_v2 = vec![0.0f32; n];
-        unsafe {
-            gemv_w4a32_grouped_v2(
-                x.as_ptr(),
-                w2.as_ptr(),
-                None,
-                out_v2.as_mut_ptr(),
-                n,
-                k,
-                group_size,
-            );
-        }
-
-        for (a, b) in out_v1.iter().zip(&out_v2) {
-            let tol = 5e-3 * a.abs().max(1.0);
-            assert!((a - b).abs() < tol, "v1 {a} vs v2 {b}");
-        }
-    }
-}
-
 unsafe fn gemv_row_w4a32_group64_v2_scalar(
     x: *const f32,
     w_blocked: *const u8,
@@ -817,4 +699,122 @@ pub fn wgpu_w4a32_grouped_linear(
     }
 
     Ok(out)
+}
+
+#[cfg(test)]
+mod v2_pack_tests {
+    use super::*;
+
+    fn lcg(seed: &mut u64) -> u64 {
+        *seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        *seed >> 33
+    }
+
+    #[test]
+    fn f16_roundtrip_accuracy() {
+        for &v in &[
+            0.0f32, -0.0, 1.0, -1.0, 0.5, 2.0, 65504.0, -3.75, 1234.5, 1e-4, 6.0e-5, 6.1e-8,
+        ] {
+            let back = f16_to_f32(f32_to_f16(v));
+            if v == 0.0 {
+                assert_eq!(back, v, "{v}");
+                assert!(back.is_sign_negative() == v.is_sign_negative(), "{v}");
+            } else if v.abs() < 6.1e-5 {
+                // f16 subnormal range: only absolute precision is guaranteed
+                // (step = 2^-24 = 5.96e-8).
+                assert!(
+                    (back - v).abs() < 6e-8,
+                    "f16 roundtrip subnormal {v} -> {back}"
+                );
+            } else {
+                let rel = ((back - v) / v).abs();
+                assert!(rel < 6e-4, "f16 roundtrip {v} -> {back} (rel {rel})");
+            }
+        }
+        // Overflow saturates to infinity, preserving sign.
+        assert_eq!(f16_to_f32(f32_to_f16(1e6)), f32::INFINITY);
+        assert_eq!(f16_to_f32(f32_to_f16(-1e6)), f32::NEG_INFINITY);
+    }
+
+    #[test]
+    fn pack_produces_block_layout() {
+        let n = 3;
+        let k = 128;
+        let mut seed = 42u64;
+        let src: Vec<u8> = (0..n * (k / 2)).map(|_| lcg(&mut seed) as u8).collect();
+        let scales: Vec<f32> = (0..n * (k / 64)).map(|i| 0.01 + i as f32 * 0.001).collect();
+
+        let packed = pack_rows_w4a32_group64_v1_to_v2(&src, &scales, k);
+        assert_eq!(packed.len(), n * (k / 64) * V2_BLOCK_BYTES);
+
+        for row in 0..n {
+            for g in 0..k / 64 {
+                let blk = &packed[row * (k / 64) * V2_BLOCK_BYTES + g * V2_BLOCK_BYTES..];
+                assert_eq!(
+                    &blk[..32],
+                    &src[row * (k / 2) + g * 32..row * (k / 2) + g * 32 + 32],
+                    "nibbles row {row} group {g}"
+                );
+                let got = f16_to_f32(u16::from_le_bytes([blk[32], blk[33]]));
+                let want = scales[row * (k / 64) + g];
+                assert!(
+                    (got - want).abs() / want < 6e-4,
+                    "scale row {row} group {g}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn v2_gemv_matches_v1_within_f16_tolerance() {
+        let n = 8;
+        let k = 128;
+        let group_size = 64;
+        let num_groups = k / group_size;
+        let mut seed = 7u64;
+        let w: Vec<u8> = (0..n * (k / 2))
+            .map(|_| (lcg(&mut seed) & 0xFF) as u8)
+            .collect();
+        let s: Vec<f32> = (0..n * num_groups)
+            .map(|_| 0.002 + (lcg(&mut seed) % 1000) as f32 * 1e-5)
+            .collect();
+        let x: Vec<f32> = (0..k)
+            .map(|_| ((lcg(&mut seed) % 2000) as f32 - 1000.0) / 500.0)
+            .collect();
+
+        let mut out_v1 = vec![0.0f32; n];
+        unsafe {
+            gemv_w4a32_grouped(
+                x.as_ptr(),
+                w.as_ptr(),
+                s.as_ptr(),
+                None,
+                out_v1.as_mut_ptr(),
+                n,
+                k,
+                group_size,
+            );
+        }
+
+        let w2 = pack_rows_w4a32_group64_v1_to_v2(&w, &s, k);
+        let mut out_v2 = vec![0.0f32; n];
+        unsafe {
+            gemv_w4a32_grouped_v2(
+                x.as_ptr(),
+                w2.as_ptr(),
+                None,
+                out_v2.as_mut_ptr(),
+                n,
+                k,
+                group_size,
+            );
+        }
+
+        for (a, b) in out_v1.iter().zip(&out_v2) {
+            let tol = 5e-3 * a.abs().max(1.0);
+            assert!((a - b).abs() < tol, "v1 {a} vs v2 {b}");
+        }
+    }
 }

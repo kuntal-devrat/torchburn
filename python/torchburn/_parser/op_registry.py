@@ -1133,7 +1133,7 @@ def _getitem_as_select(node: torch.fx.Node) -> tuple[str, str] | None:
     if key in ("_operator.getitem", "operator.getitem", "<built-in function getitem>"):
         args = list(node.args)
         if len(args) == 2 and isinstance(args[1], int):
-            if _is_tuple_source(args[0]):
+            if isinstance(args[0], torch.fx.Node) and _is_tuple_source(args[0]):
                 return "getitem", key
             return "select", key
         return None

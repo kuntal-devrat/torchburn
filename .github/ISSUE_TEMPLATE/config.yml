@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: GitHub Discussions
+    url: https://github.com/torchburn/torchburn/discussions
+    about: Ask questions, share ideas, or discuss performance tips with the community.
+  - name: Security Advisories
+    url: https://github.com/torchburn/torchburn/security/advisories/new
+    about: Privately report security vulnerabilities.

@@ -65,7 +65,7 @@ fn main(
         }
     }
 
-    let seq_len = params.offset + 1u;
+    let seq_len = min(params.offset + 1u, params.max_seq_len);
     for (var t = 0u; t < seq_len; t = t + 1u) {
         // Each thread computes partial dot product over its q slice
         var p = 0.0;

@@ -1,5 +1,4 @@
 import torch
-import pytest
 import torchburn
 
 def test_complex_and_real_imag():

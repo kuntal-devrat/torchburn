@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 from dataclasses import dataclass, field
-from typing import Optional, List, Dict, Any, Union
+from typing import Optional, List, Dict, Any
 
 
 @dataclass
@@ -80,8 +80,10 @@ class ModelConfig:
         is_gpt_neox = "gpt_neox" in arch_lower or "gpt-neox" in model_type or "gpt_neox" in model_type
         is_moe = bool(data.get("num_experts", 0) or data.get("n_routed_experts", 0) or data.get("num_local_experts", 0))
         if is_moe:
-            num_experts = int(data.get("num_experts") or data.get("n_routed_experts") or data.get("num_local_experts"))
-            num_experts_per_tok = int(data.get("num_experts_per_tok") or data.get("num_experts_per_token") or 2)
+            exp_val = data.get("num_experts") or data.get("n_routed_experts") or data.get("num_local_experts") or 0
+            num_experts = int(exp_val)
+            tok_val = data.get("num_experts_per_tok") or data.get("num_experts_per_token") or 2
+            num_experts_per_tok = int(tok_val)
             supported_moe_types = {"mixtral", "deepseek_v2", "deepseek_v3", "qwen3_moe", "olmoe", "grok1"}
             if model_type not in supported_moe_types:
                 raise ValueError(

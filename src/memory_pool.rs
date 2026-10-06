@@ -112,7 +112,8 @@ pub fn take_buffer(dtype: DType, words: usize) -> Vec<u64> {
                     } else {
                         buf.resize(words, 0u64);
                     }
-                    #[cfg(debug_assertions)]
+                    // Zero recycled buffers to prevent stale data leaks.
+                    // Cost is ~1-2ns/word, negligible vs kernel execution.
                     buf.fill(0);
                     return buf;
                 }
@@ -157,7 +158,7 @@ fn take_buffer_global(dtype: DType, words: usize) -> Vec<u64> {
         } else {
             buf.resize(words, 0u64);
         }
-        #[cfg(debug_assertions)]
+        // Zero recycled buffers to prevent stale data leaks from cross-thread reuse.
         buf.fill(0);
         return buf;
     }
