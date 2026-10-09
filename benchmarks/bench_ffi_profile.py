@@ -13,7 +13,6 @@ import statistics
 import torch
 import torch.nn.functional as F
 
-import torchburn
 from torchburn._compiled import BurnCompiledCallable, _arg_key
 from torchburn._parser import payload_json
 from torchburn import _torchburn as _native
