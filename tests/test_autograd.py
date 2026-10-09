@@ -264,6 +264,16 @@ class TestTapeManagement:
         assert tape_len() == 0
         enable()  # re-enable for fixture teardown
 
+    def test_reset_fallback(self, monkeypatch):
+        a = Tensor(torch.randn(2, 2), requires_grad=True)
+        _ = a + a
+        assert tape_len() > 0
+        import torchburn._torchburn as _native
+        monkeypatch.setattr(_native, "autograd_reset", None) # trigger exception
+        reset()
+        assert tape_len() == 0
+        enable()  # re-enable for fixture teardown
+
     def test_no_grad_tensors(self):
         a = Tensor(torch.ones(4), requires_grad=False)
         b = Tensor(torch.ones(4), requires_grad=True)
