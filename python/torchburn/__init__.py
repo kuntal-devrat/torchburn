@@ -33,7 +33,9 @@ if sys.platform == "win32" and hasattr(os, "add_dll_directory"):
         os.add_dll_directory(_pkg_dir)
     except Exception:
         pass
-    _vendor_bin = os.path.abspath(os.path.join(_pkg_dir, "..", "..", "vendor", "OpenBLAS_prebuilt", "bin"))
+    _vendor_bin = os.path.abspath(
+        os.path.join(_pkg_dir, "..", "..", "vendor", "OpenBLAS_prebuilt", "bin")
+    )
     if os.path.isdir(_vendor_bin):
         try:
             os.add_dll_directory(_vendor_bin)
@@ -56,60 +58,70 @@ if _log_level in ("debug", "info", "warning", "error", "critical"):
     os.environ.setdefault("RUST_LOG", _log_level)
 
 import torch
+
 from . import _torchburn
+
 _native = _torchburn
 
 # Default RAYON_NUM_THREADS to physical core count if not set to prevent hyperthread contention
 if "RAYON_NUM_THREADS" not in os.environ:
     try:
         import psutil
+
         _phys_cores = psutil.cpu_count(logical=False) or max((os.cpu_count() or 8) // 2, 1)
     except (ImportError, AttributeError, OSError):
         # psutil unavailable: estimate physical cores as half of logical (hyperthreading)
         _phys_cores = max((os.cpu_count() or 8) // 2, 1)
     os.environ["RAYON_NUM_THREADS"] = str(_phys_cores)
 
+from . import ops, quantization
 from ._backend import register, torchburn_backend
 from ._cache import cache_clear, cache_stats
 from ._compiled import BurnCompiledCallable
+from .autograd import AutogradGuard, active_recording_threads, record_guard
 from .capture import TorchBurnModule, capture
+from .llm import (
+    LLM,
+    BatchedDecoder,
+    EngineConfig,
+    GenerationConfig,
+    ModelConfig,
+    SpeculativeDecoder,
+)
 from .profiler import (
-    profile,
+    GraphVisualization,
+    active_engine,
+    clear_memory_pool,
     coverage_report,
-    profiling_stats,
+    export_telemetry,
+    memory_pool_stats,
     memory_stats,
+    op_coverage,
+    profile,
+    profiling_stats,
     reset_stats,
     supported_ops,
-    active_engine,
-    memory_pool_stats,
-    clear_memory_pool,
     trace,
-    op_coverage,
     visualize,
-    GraphVisualization,
-    export_telemetry,
 )
-from . import ops
-from . import quantization
-from .llm import LLM, GenerationConfig, EngineConfig, ModelConfig, SpeculativeDecoder, BatchedDecoder
 from .quantization import (
     QuantizedLinear,
-    quantize_model,
-    w8a32_linear,
-    w4a32_linear,
-    w4a32_grouped_linear,
-    wgpu_w4a32_grouped_linear,
-    fused_swiglu_mlp,
-    fused_swiglu_mlp_batched,
-    fused_attention_step,
-    fused_transformer_layer_step,
     create_rust_qwen_decoder,
     create_wgpu_qwen_decoder,
-    quantize_weight_int8,
+    fused_attention_step,
+    fused_swiglu_mlp,
+    fused_swiglu_mlp_batched,
+    fused_transformer_layer_step,
+    quantize_model,
     quantize_weight_int4,
     quantize_weight_int4_grouped,
     quantize_weight_int4_grouped_v2,
+    quantize_weight_int8,
+    w4a32_grouped_linear,
     w4a32_grouped_linear_v2,
+    w4a32_linear,
+    w8a32_linear,
+    wgpu_w4a32_grouped_linear,
 )
 
 try:
@@ -117,6 +129,7 @@ try:
 except AttributeError:
     try:
         from importlib.metadata import version as _pkg_version
+
         __version__ = _pkg_version("torchburn")
     except Exception:
         __version__ = "1.0.0"
@@ -162,6 +175,13 @@ def wgpu_clear_buffer_pool() -> None:
         _native.wgpu_clear_buffer_pool()
 
 
+def is_metal_available() -> bool:
+    """Check if Metal native acceleration is available (macOS/iOS with metal-native feature)."""
+    if hasattr(_native, "is_metal_available"):
+        return _native.is_metal_available()
+    return False
+
+
 UnsupportedOpError = _native.UnsupportedOpError
 
 
@@ -178,6 +198,7 @@ __all__ = [
     "compile",
     "gpu_available",
     "gpu_backend",
+    "is_metal_available",
     "gpu_info",
     "register",
     "torchburn_backend",
@@ -222,6 +243,9 @@ __all__ = [
     "visualize",
     "GraphVisualization",
     "export_telemetry",
+    "AutogradGuard",
+    "record_guard",
+    "active_recording_threads",
     "_torchburn",
 ]
 
@@ -264,7 +288,8 @@ def export(model, args=None, kwargs=None, dynamic_shapes=None, **compile_kwargs)
             torch_export_fn = torch_export_mod.export
         else:
             import importlib
-            torch_export_fn = getattr(importlib.import_module("torch.export"), "export")
+
+            torch_export_fn = importlib.import_module("torch.export").export
         # torch.export expects args as tuple
         ep = torch_export_fn(model, args=args, kwargs=kwargs, dynamic_shapes=dynamic_shapes)
         # ExportedProgram has a `module` method that returns GraphModule
@@ -278,7 +303,11 @@ def export(model, args=None, kwargs=None, dynamic_shapes=None, **compile_kwargs)
         return torch.compile(model, backend="torchburn", **compile_kwargs)
     except (ImportError, AttributeError, Exception) as e:
         import warnings
-        warnings.warn(f"torchburn.export: torch.export not available or failed ({e}); falling back to torch.compile")
+
+        warnings.warn(
+            f"torchburn.export: torch.export not available or failed ({e}); falling back to torch.compile",
+            stacklevel=2,
+        )
         return torch.compile(model, backend="torchburn", **compile_kwargs)
 
 
@@ -294,6 +323,7 @@ def _shutdown_cleanup() -> None:
     except Exception as exc:
         if os.getenv("TORCHBURN_DEBUG") == "1":
             import sys
+
             sys.stderr.write(f"[torchburn] cleanup error: {exc}\n")
 
 

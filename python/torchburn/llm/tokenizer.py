@@ -1,9 +1,10 @@
 """Universal Tokenizer for TorchBurn LLM."""
 
 from __future__ import annotations
+
 import json
 import os
-from typing import List, Dict, Any, Optional
+from typing import Any, Dict, List, Optional
 
 from ._registry import fallback_eos_id, repo_snapshot_dir, resolve_repo_id
 
@@ -11,7 +12,9 @@ from ._registry import fallback_eos_id, repo_snapshot_dir, resolve_repo_id
 class UniversalTokenizer:
     """Universal Tokenizer wrapping HuggingFace AutoTokenizer or tokenizers.Tokenizer."""
 
-    def __init__(self, tokenizer_obj: Any, eos_token_id: int = 151643, pad_token_id: Optional[int] = None):
+    def __init__(
+        self, tokenizer_obj: Any, eos_token_id: int = 151643, pad_token_id: Optional[int] = None
+    ):
         self._tok = tokenizer_obj
         self.eos_token_id = eos_token_id
         self.pad_token_id = pad_token_id if pad_token_id is not None else eos_token_id
@@ -20,6 +23,7 @@ class UniversalTokenizer:
         self._encode_supports_special_tokens: Optional[bool] = None
         try:
             import inspect
+
             params = inspect.signature(tokenizer_obj.encode).parameters
             self._encode_supports_special_tokens = "add_special_tokens" in params
         except Exception:
@@ -50,7 +54,10 @@ class UniversalTokenizer:
                 # Try transformers AutoTokenizer locally first for full chat template support
                 try:
                     from transformers import AutoTokenizer
-                    hf_tok = AutoTokenizer.from_pretrained(cand_dir, local_files_only=True, trust_remote_code=True)
+
+                    hf_tok = AutoTokenizer.from_pretrained(
+                        cand_dir, local_files_only=True, trust_remote_code=True
+                    )
                     eos_id = hf_tok.eos_token_id or 151643
                     pad_id = hf_tok.pad_token_id or eos_id
                     return cls(hf_tok, eos_token_id=eos_id, pad_token_id=pad_id)
@@ -60,13 +67,16 @@ class UniversalTokenizer:
                 # Fallback to fast tokenizers.Tokenizer
                 try:
                     from tokenizers import Tokenizer
+
                     tok_fast = Tokenizer.from_file(tok_json)
                     cfg_cand = os.path.join(cand_dir, "tokenizer_config.json")
                     eos_id = fallback_eos_id(cand_dir)
                     if os.path.isfile(cfg_cand):
                         with open(cfg_cand, "r", encoding="utf-8") as f:
                             cfg = json.load(f)
-                            eos_token = cfg.get("eos_token", cfg.get("eos_token_id", fallback_eos_id(cand_dir)))
+                            eos_token = cfg.get(
+                                "eos_token", cfg.get("eos_token_id", fallback_eos_id(cand_dir))
+                            )
                             if isinstance(eos_token, dict):
                                 eos_token = eos_token.get("id", eos_token)
                             try:
@@ -80,7 +90,10 @@ class UniversalTokenizer:
         # 2. Online HuggingFace Hub resolution if not found locally
         try:
             from transformers import AutoTokenizer
-            auth_token = token or os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
+
+            auth_token = (
+                token or os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
+            )
             hf_tok = AutoTokenizer.from_pretrained(
                 model_id_or_path,
                 token=auth_token,
@@ -103,12 +116,17 @@ class UniversalTokenizer:
         try:
             from huggingface_hub import hf_hub_download
             from tokenizers import Tokenizer
-            auth_token = token or os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
-            tok_json = hf_hub_download(model_id_or_path, "tokenizer.json", token=auth_token, cache_dir=cache_dir)
+
+            auth_token = (
+                token or os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
+            )
+            tok_json = hf_hub_download(
+                model_id_or_path, "tokenizer.json", token=auth_token, cache_dir=cache_dir
+            )
             tok_fast = Tokenizer.from_file(tok_json)
             return cls(tok_fast, eos_token_id=151643)
         except Exception as e:
-            raise RuntimeError(f"Unable to load tokenizer for '{model_id_or_path}': {e}")
+            raise RuntimeError(f"Unable to load tokenizer for '{model_id_or_path}': {e}") from e
 
     def encode(self, text: str, add_special_tokens: bool = False) -> List[int]:
         """Encodes string text into token IDs.
@@ -128,9 +146,7 @@ class UniversalTokenizer:
                 return res
         except Exception as exc:
             raise RuntimeError("Tokenizer failed to encode input text") from exc
-        raise TypeError(
-            f"Tokenizer returned unsupported encode result type: {type(res).__name__}"
-        )
+        raise TypeError(f"Tokenizer returned unsupported encode result type: {type(res).__name__}")
 
     def decode(self, token_ids: List[int], skip_special_tokens: bool = False) -> str:
         """Decodes token IDs into string text."""

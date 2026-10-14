@@ -45,6 +45,7 @@ def _execute(target: str, tensors: list[torch.Tensor], kwargs: dict | None = Non
 # Attention (REQ Phase 4.1)
 # --------------------------------------------------------------------------- #
 
+
 def scaled_dot_product_attention(
     query: torch.Tensor,
     key: torch.Tensor,
@@ -72,6 +73,7 @@ def rotary_embedding(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> t
 # Embedding (REQ Phase 4.3)
 # --------------------------------------------------------------------------- #
 
+
 def embedding(indices: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
     """Row-gather from an embedding table: ``weight[indices]``."""
     return _execute("embedding", [weight, indices])
@@ -81,34 +83,50 @@ def embedding(indices: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
 # Losses (REQ Phase 4.3)
 # --------------------------------------------------------------------------- #
 
+
 def _normalize_reduction(reduction: str | int) -> int:
     if isinstance(reduction, str):
         return {"none": 0, "mean": 1, "sum": 2}.get(reduction, 1)
     return reduction
 
 
-def nll_loss(input: torch.Tensor, target: torch.Tensor, reduction: str | int = "mean", ignore_index: int = -100) -> torch.Tensor:
+def nll_loss(
+    input: torch.Tensor,
+    target: torch.Tensor,
+    reduction: str | int = "mean",
+    ignore_index: int = -100,
+) -> torch.Tensor:
     """Negative log-likelihood loss over log-probabilities."""
     red = _normalize_reduction(reduction)
-    return _execute("nll_loss_forward", [input, target], {"reduction": red, "ignore_index": ignore_index})
+    return _execute(
+        "nll_loss_forward", [input, target], {"reduction": red, "ignore_index": ignore_index}
+    )
 
 
-def cross_entropy(logits: torch.Tensor, target: torch.Tensor, reduction: str | int = "mean") -> torch.Tensor:
+def cross_entropy(
+    logits: torch.Tensor, target: torch.Tensor, reduction: str | int = "mean"
+) -> torch.Tensor:
     """Cross-entropy loss = nll_loss(log_softmax(logits), target)."""
     return nll_loss(torch.log_softmax(logits, dim=-1), target, reduction=reduction)
 
 
-def mse_loss(input: torch.Tensor, target: torch.Tensor, reduction: str | int = "mean") -> torch.Tensor:
+def mse_loss(
+    input: torch.Tensor, target: torch.Tensor, reduction: str | int = "mean"
+) -> torch.Tensor:
     red = _normalize_reduction(reduction)
     return _execute("mse_loss", [input, target], {"reduction": red})
 
 
-def smooth_l1_loss(input: torch.Tensor, target: torch.Tensor, reduction: str | int = "mean", beta: float = 1.0) -> torch.Tensor:
+def smooth_l1_loss(
+    input: torch.Tensor, target: torch.Tensor, reduction: str | int = "mean", beta: float = 1.0
+) -> torch.Tensor:
     red = _normalize_reduction(reduction)
     return _execute("smooth_l1_loss", [input, target], {"reduction": red, "beta": beta})
 
 
-def binary_cross_entropy(input: torch.Tensor, target: torch.Tensor, reduction: str | int = "mean") -> torch.Tensor:
+def binary_cross_entropy(
+    input: torch.Tensor, target: torch.Tensor, reduction: str | int = "mean"
+) -> torch.Tensor:
     red = _normalize_reduction(reduction)
     return _execute("binary_cross_entropy", [input, target], {"reduction": red})
 
@@ -152,4 +170,3 @@ def softmax(x: torch.Tensor, dim: int = -1) -> torch.Tensor:
 
 def log_softmax(x: torch.Tensor, dim: int = -1) -> torch.Tensor:
     return _execute("log_softmax", [x], {"dim": dim})
-

@@ -2,12 +2,14 @@
 End-to-end training tests: verify that torchburn autograd can train a
 simple model and the loss actually decreases.
 """
-import torch
-import pytest
-import sys
-import os
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+import os
+import sys
+
+import pytest
+import torch
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import torchburn.autograd as ta
 
 
@@ -34,7 +36,7 @@ class TestTrainingLoop:
         losses = []
         lr = 0.01
 
-        for epoch in range(50):
+        for _epoch in range(50):
             ta.reset()
             ta.enable()
             # Re-register params after reset clears the registry
@@ -53,7 +55,9 @@ class TestTrainingLoop:
             w.grad = None
             b.grad = None
 
-        assert losses[-1] < losses[0] * 0.1, f"Loss didn't decrease enough: {losses[0]:.4f} -> {losses[-1]:.4f}"
+        assert losses[-1] < losses[0] * 0.1, (
+            f"Loss didn't decrease enough: {losses[0]:.4f} -> {losses[-1]:.4f}"
+        )
 
     def test_two_layer_mlp(self):
         """Train a 2-layer MLP on a toy classification task."""
@@ -73,7 +77,7 @@ class TestTrainingLoop:
         losses = []
         lr = 0.05
 
-        for epoch in range(100):
+        for _epoch in range(100):
             ta.reset()
             ta.enable()
             for param in [w1, b1, w2, b2]:
@@ -91,7 +95,9 @@ class TestTrainingLoop:
                 param.data -= lr * param.grad
                 param.grad = None
 
-        assert losses[-1] < losses[0] * 0.5, f"Loss didn't decrease: {losses[0]:.4f} -> {losses[-1]:.4f}"
+        assert losses[-1] < losses[0] * 0.5, (
+            f"Loss didn't decrease: {losses[0]:.4f} -> {losses[-1]:.4f}"
+        )
 
     def test_attention_block_backward(self):
         """Test gradients flow through matmul + softmax + matmul."""
@@ -102,8 +108,8 @@ class TestTrainingLoop:
         w1 = ta.Tensor(torch.randn(8, 8) * 0.1, requires_grad=True)
         w2 = ta.Tensor(torch.randn(8, 8) * 0.1, requires_grad=True)
 
-        h = ta.relu(x @ w1)      # matmul + relu
-        scores = h @ w2           # matmul
+        h = ta.relu(x @ w1)  # matmul + relu
+        scores = h @ w2  # matmul
         attn = ta.softmax(scores, dim=-1)
         out = attn @ ta.Tensor(torch.randn(2, 8, 8))  # matmul with constant
 

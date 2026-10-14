@@ -1186,52 +1186,6 @@ pub fn w4a32_linear(
 // ---------------------------------------------------------------------------
 
 #[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx512f,avx512bw")]
-unsafe fn dot_f32_u4_group64_avx512(x: *const f32, w_packed: *const u8) -> f32 {
-    use std::arch::x86_64::*;
-    let mask_low = _mm_set1_epi8(0x0F);
-    let sub8 = _mm_set1_epi8(8);
-
-    // 64 weights = 32 packed bytes
-    // Chunk 0: elements 0..31 (16 bytes)
-    let raw0 = _mm_loadu_si128(w_packed as *const __m128i);
-    let lo0 = _mm_and_si128(raw0, mask_low);
-    let hi0 = _mm_and_si128(_mm_srli_epi16::<4>(raw0), mask_low);
-    let inter_lo0 = _mm_unpacklo_epi8(lo0, hi0);
-    let inter_hi0 = _mm_unpackhi_epi8(lo0, hi0);
-    let s_lo0 = _mm_sub_epi8(inter_lo0, sub8);
-    let s_hi0 = _mm_sub_epi8(inter_hi0, sub8);
-
-    let wf0 = _mm512_cvtepi32_ps(_mm512_cvtepi8_epi32(s_lo0));
-    let xf0 = _mm512_loadu_ps(x);
-    let mut sum0 = _mm512_mul_ps(wf0, xf0);
-
-    let wf1 = _mm512_cvtepi32_ps(_mm512_cvtepi8_epi32(s_hi0));
-    let xf1 = _mm512_loadu_ps(x.add(16));
-    sum0 = _mm512_fmadd_ps(wf1, xf1, sum0);
-
-    // Chunk 1: elements 32..63 (16 bytes)
-    let raw1 = _mm_loadu_si128(w_packed.add(16) as *const __m128i);
-    let lo1 = _mm_and_si128(raw1, mask_low);
-    let hi1 = _mm_and_si128(_mm_srli_epi16::<4>(raw1), mask_low);
-    let inter_lo1 = _mm_unpacklo_epi8(lo1, hi1);
-    let inter_hi1 = _mm_unpackhi_epi8(lo1, hi1);
-    let s_lo1 = _mm_sub_epi8(inter_lo1, sub8);
-    let s_hi1 = _mm_sub_epi8(inter_hi1, sub8);
-
-    let wf2 = _mm512_cvtepi32_ps(_mm512_cvtepi8_epi32(s_lo1));
-    let xf2 = _mm512_loadu_ps(x.add(32));
-    let mut sum1 = _mm512_mul_ps(wf2, xf2);
-
-    let wf3 = _mm512_cvtepi32_ps(_mm512_cvtepi8_epi32(s_hi1));
-    let xf3 = _mm512_loadu_ps(x.add(48));
-    sum1 = _mm512_fmadd_ps(wf3, xf3, sum1);
-
-    let sum = _mm512_add_ps(sum0, sum1);
-    _mm512_reduce_add_ps(sum)
-}
-
-#[cfg(target_arch = "x86_64")]
 #[inline(always)]
 pub(crate) unsafe fn unpack_and_fma_32_avx512(
     x_ptr: *const f32,
@@ -1292,34 +1246,6 @@ pub(crate) unsafe fn unpack_and_fma_32_avx2(
     sum1 = _mm256_fmadd_ps(wf3, xf3, sum1);
 
     _mm256_add_ps(sum0, sum1)
-}
-
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx512f,avx512bw")]
-unsafe fn dot_f32_u4_group32_avx512(x: *const f32, w_packed: *const u8) -> f32 {
-    use std::arch::x86_64::*;
-    let mask_low = _mm_set1_epi8(0x0F);
-    let sub8 = _mm_set1_epi8(8);
-    let sum0 = unpack_and_fma_32_avx512(x, w_packed, mask_low, sub8);
-    _mm512_reduce_add_ps(sum0)
-}
-
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx2,fma")]
-unsafe fn dot_f32_u4_group32_avx2(x: *const f32, w_packed: *const u8) -> f32 {
-    use std::arch::x86_64::*;
-    let mask_low = _mm_set1_epi8(0x0F);
-    let sub8 = _mm_set1_epi8(8);
-    let sum = unpack_and_fma_32_avx2(x, w_packed, mask_low, sub8);
-    hsum256_ps_avx(sum)
-}
-
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx2,fma")]
-unsafe fn dot_f32_u4_group64_avx2(x: *const f32, w_packed: *const u8) -> f32 {
-    let d0 = dot_f32_u4_group32_avx2(x, w_packed);
-    let d1 = dot_f32_u4_group32_avx2(x.add(32), w_packed.add(16));
-    d0 + d1
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -1573,104 +1499,6 @@ pub(crate) unsafe fn dot_f32_u4_group_scalar(
         total += *x.add(i) * (q as f32);
     }
     total
-}
-
-#[inline(always)]
-unsafe fn dot_f32_u4_group64_fast(
-    x: *const f32,
-    w_packed: *const u8,
-    has_avx512: bool,
-    has_avx2: bool,
-    has_neon: bool,
-) -> f32 {
-    #[cfg(target_arch = "x86_64")]
-    {
-        let _ = has_neon;
-        if has_avx512 {
-            return dot_f32_u4_group64_avx512(x, w_packed);
-        }
-        if has_avx2 {
-            return dot_f32_u4_group64_avx2(x, w_packed);
-        }
-    }
-    #[cfg(target_arch = "aarch64")]
-    {
-        if has_neon {
-            return dot_f32_u4_group64_neon(x, w_packed);
-        }
-    }
-    #[cfg(target_arch = "aarch64")]
-    let _ = (has_avx512, has_avx2);
-    dot_f32_u4_group_scalar(x, w_packed, 64)
-}
-
-#[inline(always)]
-unsafe fn dot_f32_u4_group32_fast(
-    x: *const f32,
-    w_packed: *const u8,
-    has_avx512: bool,
-    has_avx2: bool,
-    has_neon: bool,
-) -> f32 {
-    #[cfg(target_arch = "x86_64")]
-    {
-        let _ = has_neon;
-        if has_avx512 {
-            return dot_f32_u4_group32_avx512(x, w_packed);
-        }
-        if has_avx2 {
-            return dot_f32_u4_group32_avx2(x, w_packed);
-        }
-    }
-    #[cfg(target_arch = "aarch64")]
-    {
-        if has_neon {
-            return dot_f32_u4_group32_neon(x, w_packed);
-        }
-    }
-    #[cfg(target_arch = "aarch64")]
-    let _ = (has_avx512, has_avx2);
-    dot_f32_u4_group_scalar(x, w_packed, 32)
-}
-
-#[inline(always)]
-unsafe fn dot_f32_u4_group64(x: *const f32, w_packed: *const u8) -> f32 {
-    #[cfg(target_arch = "x86_64")]
-    {
-        if crate::dispatch::cpu_features().avx512f && crate::dispatch::cpu_features().avx512bw {
-            return dot_f32_u4_group64_avx512(x, w_packed);
-        }
-        if crate::dispatch::cpu_features().avx2 && crate::dispatch::cpu_features().fma {
-            return dot_f32_u4_group64_avx2(x, w_packed);
-        }
-    }
-    #[cfg(target_arch = "aarch64")]
-    {
-        if crate::dispatch::cpu_features().neon {
-            return dot_f32_u4_group64_neon(x, w_packed);
-        }
-    }
-    dot_f32_u4_group_scalar(x, w_packed, 64)
-}
-
-#[inline(always)]
-unsafe fn dot_f32_u4_group32(x: *const f32, w_packed: *const u8) -> f32 {
-    #[cfg(target_arch = "x86_64")]
-    {
-        if crate::dispatch::cpu_features().avx512f && crate::dispatch::cpu_features().avx512bw {
-            return dot_f32_u4_group32_avx512(x, w_packed);
-        }
-        if crate::dispatch::cpu_features().avx2 && crate::dispatch::cpu_features().fma {
-            return dot_f32_u4_group32_avx2(x, w_packed);
-        }
-    }
-    #[cfg(target_arch = "aarch64")]
-    {
-        if crate::dispatch::cpu_features().neon {
-            return dot_f32_u4_group32_neon(x, w_packed);
-        }
-    }
-    dot_f32_u4_group_scalar(x, w_packed, 32)
 }
 
 /// Fast single-token GEMV for W4A32 with group-wise scales.

@@ -1,28 +1,31 @@
 """
-Tests for Phase 12: Thread Safety & Concurrency.
+Tests for Thread Safety & Concurrency.
 
 Tests concurrent compilation, parallel backward passes, GIL release,
 and thread-safe cache operations.
 """
-import torch
-import pytest
-import sys
+
 import os
+import sys
 import threading
 import time
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
-import torchburn
+import pytest
+import torch
 
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+import torchburn
 
 # ---------------------------------------------------------------------------
 # Cache Thread Safety
 # ---------------------------------------------------------------------------
 
+
 class TestCacheConcurrency:
     def test_concurrent_cache_puts(self):
         """Multiple threads writing to the cache simultaneously."""
-        from torchburn._torchburn import cache_put, cache_clear
+        from torchburn._torchburn import cache_clear, cache_put
+
         cache_clear()
 
         def worker(i):
@@ -37,12 +40,14 @@ class TestCacheConcurrency:
             t.join()
 
         from torchburn._torchburn import cache_stats
+
         size, _, _ = cache_stats()
         assert size == 50
 
     def test_concurrent_cache_reads(self):
         """Multiple threads reading from the cache simultaneously."""
-        from torchburn._torchburn import cache_put, cache_get, cache_clear
+        from torchburn._torchburn import cache_clear, cache_get, cache_put
+
         cache_clear()
 
         # Populate cache
@@ -65,7 +70,8 @@ class TestCacheConcurrency:
 
     def test_concurrent_cache_mixed(self):
         """Mixed reads and writes from multiple threads."""
-        from torchburn._torchburn import cache_put, cache_get, cache_clear
+        from torchburn._torchburn import cache_clear, cache_get, cache_put
+
         cache_clear()
 
         # Pre-populate
@@ -105,9 +111,11 @@ class TestCacheConcurrency:
 # Concurrent Compilation
 # ---------------------------------------------------------------------------
 
+
 class TestConcurrentCompilation:
     def test_parallel_compile_same_model(self):
         """Multiple threads compiling the same model."""
+
         class M(torch.nn.Module):
             def forward(self, x):
                 return torch.relu(x + 1.0)
@@ -174,6 +182,7 @@ class TestConcurrentCompilation:
 # GIL Release
 # ---------------------------------------------------------------------------
 
+
 class TestGILRelease:
     def test_other_threads_progress_during_compile(self):
         """Other Python threads can progress while torchburn compiles."""
@@ -213,6 +222,7 @@ class TestGILRelease:
 # ---------------------------------------------------------------------------
 # Autograd Thread Safety
 # ---------------------------------------------------------------------------
+
 
 class TestAutogradThreadSafety:
     def test_concurrent_backward_passes(self):
@@ -254,20 +264,109 @@ class TestAutogradThreadSafety:
             finally:
                 torchburn._torchburn.autograd_disable()
 
+    def test_thread_exit_cleans_up_active_recording_threads(self):
+        """Thread terminating without autograd_disable() must not leak active count."""
+        initial = torchburn._torchburn.autograd_active_recording_threads()
+
+        def worker():
+            torchburn._torchburn.autograd_enable()
+            assert torchburn._torchburn.autograd_is_enabled()
+            assert torchburn._torchburn.autograd_active_recording_threads() >= initial + 1
+            # Thread intentionally terminates without calling autograd_disable()
+
+        t = threading.Thread(target=worker)
+        t.start()
+        t.join()
+
+        # Thread drop handler must clean up counter.
+        # Allow small window for OS pthread TLS destructors to finish running.
+        for _ in range(50):
+            if torchburn._torchburn.autograd_active_recording_threads() == initial:
+                break
+            time.sleep(0.01)
+
+        assert torchburn._torchburn.autograd_active_recording_threads() == initial
+
+    def test_autograd_guard_context_manager(self):
+        """AutogradGuard RAII scoping and cleanup."""
+        initial = torchburn._torchburn.autograd_active_recording_threads()
+
+        with torchburn._torchburn.AutogradGuard():
+            assert torchburn._torchburn.autograd_is_enabled()
+            assert torchburn._torchburn.autograd_active_recording_threads() == initial + 1
+
+        assert not torchburn._torchburn.autograd_is_enabled()
+        assert torchburn._torchburn.autograd_active_recording_threads() == initial
+
+        # Also test Python-level AutogradGuard
+        with torchburn.AutogradGuard():
+            assert torchburn._torchburn.autograd_is_enabled()
+
+        assert not torchburn._torchburn.autograd_is_enabled()
+
+    def test_autograd_guard_exception_safety(self):
+        """AutogradGuard restores disabled state even when exception raised."""
+        initial = torchburn._torchburn.autograd_active_recording_threads()
+
+        with pytest.raises(ValueError, match="test error"):
+            with torchburn.AutogradGuard():
+                assert torchburn._torchburn.autograd_is_enabled()
+                raise ValueError("test error")
+
+        assert not torchburn._torchburn.autograd_is_enabled()
+        assert torchburn._torchburn.autograd_active_recording_threads() == initial
+
+
+# ---------------------------------------------------------------------------
+# Memory Pool Concurrency
+# ---------------------------------------------------------------------------
+
+
+class TestMemoryPoolConcurrency:
+    def test_concurrent_pool_alloc_and_recycle(self):
+        """Concurrent memory pool access maintains correct high-water mark and zeroing."""
+        torchburn.clear_memory_pool()
+        torchburn.reset_stats()
+
+        errors = []
+
+        def worker(thread_id):
+            try:
+                for _i in range(25):
+                    x = torch.randn(4, 8)
+                    w = torch.randn(8, 4)
+                    y = x @ w
+                    assert y.shape == (4, 4)
+            except Exception as e:
+                errors.append(e)
+
+        threads = [threading.Thread(target=worker, args=(i,)) for i in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert len(errors) == 0
+        stats = torchburn.memory_pool_stats()
+        assert stats["peak_cached_words"] >= stats["cached_words"]
+        torchburn.clear_memory_pool()
+
 
 # ---------------------------------------------------------------------------
 # Stress Tests
 # ---------------------------------------------------------------------------
 
+
 class TestStress:
     def test_rapid_compile_execute_cycles(self):
         """Rapid compile/execute cycles don't crash."""
+
         class M(torch.nn.Module):
             def forward(self, x, y):
                 return torch.relu(x + y)
 
         m = M()
-        for i in range(50):
+        for _i in range(50):
             compiled = torch.compile(m, backend="torchburn")
             x = torch.randn(2, 4)
             y = torch.randn(2, 4)
@@ -276,6 +375,7 @@ class TestStress:
 
     def test_varying_shapes(self):
         """Compiling with different tensor shapes doesn't corrupt state."""
+
         class M(torch.nn.Module):
             def forward(self, x):
                 return torch.relu(x + 1.0)

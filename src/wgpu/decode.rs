@@ -52,14 +52,14 @@ pub struct WgpuQwenDecoder {
     // limits ("Not enough memory left") and wastes iGPU shared RAM, so tables
     // >64MB default to CPU lookup + 3.5KB `x_buf` write per token.
     // `TORCHBURN_WGPU_EMBED=cpu|gpu|auto` overrides (auto = size heuristic).
-    pub(crate) embed_table_buf: wgpu::Buffer,
+    pub(crate) _embed_table_buf: wgpu::Buffer,
     /// Host copy used when `use_gpu_embed == false`.
     pub(crate) embed_cpu: Option<Vec<f32>>,
     pub(crate) use_gpu_embed: bool,
     /// 4-byte uniform: the token id written per step (replaces the old 3.5 KB copy).
     pub(crate) token_id_buf: wgpu::Buffer,
     /// Uniform params for embed_lookup shader: [vocab_size, hidden_size, 0, 0].
-    pub(crate) embed_lookup_params_buf: wgpu::Buffer,
+    pub(crate) _embed_lookup_params_buf: wgpu::Buffer,
     /// Pre-baked bind group for the embed lookup dispatch (never recreated).
     pub(crate) bg_embed_lookup: wgpu::BindGroup,
     pub logits_cpu: Vec<f32>,
@@ -100,7 +100,7 @@ pub struct WgpuQwenDecoder {
     pub(crate) layer_bgs: Vec<WgpuLayerBindGroups>,
     pub(crate) layer_k_caches: Vec<wgpu::Buffer>,
     pub(crate) layer_v_caches: Vec<wgpu::Buffer>,
-    pub(crate) bg_rmsnorm_final: wgpu::BindGroup,
+    pub(crate) _bg_rmsnorm_final: wgpu::BindGroup,
     pub(crate) bg_gemv_lm_head: wgpu::BindGroup,
 }
 
@@ -653,11 +653,11 @@ impl WgpuQwenDecoder {
             rows_per_wg,
             layers_per_pass,
             is_discrete,
-            embed_table_buf,
+            _embed_table_buf: embed_table_buf,
             embed_cpu,
             use_gpu_embed,
             token_id_buf,
-            embed_lookup_params_buf,
+            _embed_lookup_params_buf: embed_lookup_params_buf,
             bg_embed_lookup,
             logits_cpu: vec![0.0f32; vocab_size],
             kv_used: 0,
@@ -683,7 +683,7 @@ impl WgpuQwenDecoder {
             layer_bgs: baked.layer_bgs,
             layer_k_caches: baked.layer_k_caches,
             layer_v_caches: baked.layer_v_caches,
-            bg_rmsnorm_final: baked.bg_rmsnorm_final,
+            _bg_rmsnorm_final: baked.bg_rmsnorm_final,
             bg_gemv_lm_head: baked.bg_gemv_lm_head,
             device_lost: ctx.device_lost.clone(),
         })

@@ -38,31 +38,26 @@ pub fn rnn_relu_cell(
 }
 
 pub fn gru_cell(
-    input: &BorrowedTensor,
-    hx: &BorrowedTensor,
-    w_ih: &BorrowedTensor,
-    w_hh: &BorrowedTensor,
-    b_ih: Option<&BorrowedTensor>,
-    b_hh: Option<&BorrowedTensor>,
+    _input: &BorrowedTensor,
+    _hx: &BorrowedTensor,
+    _w_ih: &BorrowedTensor,
+    _w_hh: &BorrowedTensor,
+    _b_ih: Option<&BorrowedTensor>,
+    _b_hh: Option<&BorrowedTensor>,
 ) -> PyResult<OwnedTensor> {
-    rnn_tanh_cell(input, hx, w_ih, w_hh, b_ih, b_hh)
+    Err(unsupported("gru_cell requires eager fallback"))
 }
 
 pub fn lstm_cell(
-    input: &BorrowedTensor,
-    hx: &BorrowedTensor,
-    cx: &BorrowedTensor,
-    w_ih: &BorrowedTensor,
-    w_hh: &BorrowedTensor,
-    b_ih: Option<&BorrowedTensor>,
-    b_hh: Option<&BorrowedTensor>,
+    _input: &BorrowedTensor,
+    _hx: &BorrowedTensor,
+    _cx: &BorrowedTensor,
+    _w_ih: &BorrowedTensor,
+    _w_hh: &BorrowedTensor,
+    _b_ih: Option<&BorrowedTensor>,
+    _b_hh: Option<&BorrowedTensor>,
 ) -> PyResult<(OwnedTensor, OwnedTensor)> {
-    let h = rnn_tanh_cell(input, hx, w_ih, w_hh, b_ih, b_hh)?;
-    let mut c = OwnedTensor::new(cx.dtype, cx.shape.clone());
-    let cd = unsafe { typed_slice::<f32>(cx) };
-    let od = unsafe { typed_mut_slice::<f32>(&mut c) };
-    od.copy_from_slice(cd);
-    Ok((h, c))
+    Err(unsupported("lstm_cell requires eager fallback"))
 }
 
 pub fn multi_head_attention_forward(

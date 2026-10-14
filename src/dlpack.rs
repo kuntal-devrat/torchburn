@@ -594,17 +594,14 @@ unsafe extern "C" fn dlpack_capsule_destructor(capsule: *mut pyo3::ffi::PyObject
             return; // already consumed (renamed) or invalid
         }
         let ptr = pyo3::ffi::PyCapsule_GetPointer(capsule, c"dltensor".as_ptr());
+        if ptr.is_null() {
+            return;
+        }
         let managed = ptr as *mut DLManagedTensor;
         if let Some(deleter) = (*managed).deleter {
             deleter(managed);
         }
     }
-}
-
-/// Wrap an OwnedTensor reference into a DLPack capsule (clones the tensor).
-/// Prefer `owned_to_capsule_owned` whenever the source tensor can be moved/consumed.
-pub fn owned_to_capsule(py: Python<'_>, tensor: &OwnedTensor) -> PyResult<Py<PyCapsule>> {
-    owned_to_capsule_owned(py, tensor.clone())
 }
 
 /// Zero-copy variant that takes ownership of the tensor (avoids clone).
@@ -654,7 +651,16 @@ pub fn owned_to_capsule_owned(py: Python<'_>, tensor: OwnedTensor) -> PyResult<P
         )
     };
     let capsule: Bound<'_, PyCapsule> =
-        unsafe { Bound::from_owned_ptr_or_err(py, capsule_ptr)?.downcast_into_unchecked() };
+        match unsafe { Bound::from_owned_ptr_or_err(py, capsule_ptr) } {
+            Ok(c) => unsafe { c.downcast_into_unchecked() },
+            Err(e) => {
+                // Reclaim raw pointer to prevent permanent memory leak
+                unsafe {
+                    managed_buffer_deleter(raw);
+                }
+                return Err(e);
+            }
+        };
     Ok(capsule.unbind())
 }
 
@@ -710,7 +716,16 @@ pub fn owned_to_capsule_typed(
         )
     };
     let capsule: Bound<'_, PyCapsule> =
-        unsafe { Bound::from_owned_ptr_or_err(py, capsule_ptr)?.downcast_into_unchecked() };
+        match unsafe { Bound::from_owned_ptr_or_err(py, capsule_ptr) } {
+            Ok(c) => unsafe { c.downcast_into_unchecked() },
+            Err(e) => {
+                // Reclaim raw pointer to prevent permanent memory leak
+                unsafe {
+                    managed_buffer_deleter(raw);
+                }
+                return Err(e);
+            }
+        };
     Ok(capsule.unbind())
 }
 

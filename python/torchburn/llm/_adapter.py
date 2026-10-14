@@ -13,16 +13,38 @@ from typing import Any, Optional, Tuple
 import torch
 import torch.nn as nn
 
-
 # Attribute alias groups: (canonical_name, [possible_names])
-_EMBED_ALIASES = ("embed_tokens", "wte", "token_embeddings", "word_embeddings",
-                  "embeddings", "embed", "token_embed", "wte_embed")
-_LAYERS_ALIASES = ("layers", "blocks", "h", "transformer_blocks", "decoder_layers",
-                   "encoder_layers", "layer", "block")
-_NORM_ALIASES = ("norm", "ln_f", "final_layernorm", "final_norm", "model_norm",
-                 "layer_norm", "final_layer_norm", "norm_f")
-_LM_HEAD_ALIASES = ("lm_head", "head", "output", "output_proj", "fc_out",
-                    "linear", "classifier")
+_EMBED_ALIASES = (
+    "embed_tokens",
+    "wte",
+    "token_embeddings",
+    "word_embeddings",
+    "embeddings",
+    "embed",
+    "token_embed",
+    "wte_embed",
+)
+_LAYERS_ALIASES = (
+    "layers",
+    "blocks",
+    "h",
+    "transformer_blocks",
+    "decoder_layers",
+    "encoder_layers",
+    "layer",
+    "block",
+)
+_NORM_ALIASES = (
+    "norm",
+    "ln_f",
+    "final_layernorm",
+    "final_norm",
+    "model_norm",
+    "layer_norm",
+    "final_layer_norm",
+    "norm_f",
+)
+_LM_HEAD_ALIASES = ("lm_head", "head", "output", "output_proj", "fc_out", "linear", "classifier")
 
 _ALIAS_GROUPS = [
     ("embed_tokens", _EMBED_ALIASES),
@@ -96,8 +118,8 @@ class _FlexibleOutputWrapper(nn.Module):
             return self.__dict__["_wrapped"]
         try:
             return getattr(self._wrapped, name)
-        except AttributeError:
-            raise AttributeError(f"'{type(self).__name__}' has no attribute '{name}'")
+        except AttributeError as e:
+            raise AttributeError(f"'{type(self).__name__}' has no attribute '{name}'") from e
 
     def forward(self, *args: Any, **kwargs: Any) -> Tuple[torch.Tensor, Any]:
         result = self._wrapped(*args, **kwargs)
@@ -141,8 +163,12 @@ class _FlexibleOutputWrapper(nn.Module):
     def parameters(self, recurse: bool = True):
         return self._wrapped.parameters(recurse=recurse)
 
-    def named_parameters(self, prefix: str = "", recurse: bool = True, remove_duplicate: bool = True):
-        return self._wrapped.named_parameters(prefix=prefix, recurse=recurse, remove_duplicate=remove_duplicate)
+    def named_parameters(
+        self, prefix: str = "", recurse: bool = True, remove_duplicate: bool = True
+    ):
+        return self._wrapped.named_parameters(
+            prefix=prefix, recurse=recurse, remove_duplicate=remove_duplicate
+        )
 
     def state_dict(self, *args, **kwargs):
         return self._wrapped.state_dict(*args, **kwargs)

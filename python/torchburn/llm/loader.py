@@ -1,11 +1,13 @@
 """Universal Model Loader for TorchBurn LLM."""
 
 from __future__ import annotations
+
 import gc
 import json
 import os
 from pathlib import Path
-from typing import Optional, Dict, Any, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
+
 import torch
 
 from ._registry import offline_candidates, resolve_repo_id
@@ -88,11 +90,19 @@ class ModelLoader:
             # Phase 1.1: prefer the v2 interleaved layout cache if it exists
             # (smaller on disk, embedded f16 scales); fall back to v1.
             v2_name = f"torchburn_{quant_lower}_g64_v2.safetensors"
-            cache_names = [v2_name, f"torchburn_{quant_lower}_g64.safetensors", f"torchburn_{quant_lower}_g64.pt"]
+            cache_names = [
+                v2_name,
+                f"torchburn_{quant_lower}_g64.safetensors",
+                f"torchburn_{quant_lower}_g64.pt",
+            ]
             cand_caches = []
             for cn in cache_names:
                 cand_caches.append(os.path.join(root_path, cn))
-                cand_caches.append(os.path.join(os.path.expanduser("~/.cache/torchburn"), f"{Path(root_path).name}_{cn}"))
+                cand_caches.append(
+                    os.path.join(
+                        os.path.expanduser("~/.cache/torchburn"), f"{Path(root_path).name}_{cn}"
+                    )
+                )
 
             chosen_cache = None
             for cand in cand_caches:
@@ -103,12 +113,19 @@ class ModelLoader:
             if chosen_cache:
                 is_v2 = os.path.basename(chosen_cache) == v2_name
                 if is_v2:
-                    print(f"[\033[92mTorchBurn\033[0m] Loading pre-quantized {quant_lower.upper()} weights from v2 disk cache (interleaved layout)...")
+                    print(
+                        f"[\033[92mTorchBurn\033[0m] Loading pre-quantized {quant_lower.upper()} weights from v2 disk cache (interleaved layout)..."
+                    )
                 else:
-                    print(f"[\033[92mTorchBurn\033[0m] Loading pre-quantized {quant_lower.upper()} weights from disk cache (sub-second fast startup)...")
-                model = UniversalTransformer(config, init_weights=False, quant=quant_lower, fused_qkv=True).to(device=device)
+                    print(
+                        f"[\033[92mTorchBurn\033[0m] Loading pre-quantized {quant_lower.upper()} weights from disk cache (sub-second fast startup)..."
+                    )
+                model = UniversalTransformer(
+                    config, init_weights=False, quant=quant_lower, fused_qkv=True
+                ).to(device=device)
                 if chosen_cache.endswith(".safetensors"):
                     import safetensors.torch
+
                     state_dict = safetensors.torch.load_file(chosen_cache, device=device)
                     state_dict = {k: v.clone() for k, v in state_dict.items()}
                 else:
@@ -119,15 +136,22 @@ class ModelLoader:
                     # Migrate v2 -> v1 in memory so the existing Rust decoder
                     # keeps working unchanged (kernel-level v2 lands in 1.2).
                     state_dict = cls._migrate_v2_state_dict(state_dict)
-                    print(f"[\033[93mTorchBurn\033[0m] Migrated v2 layout to v1 tensors in memory (deprecation: v1 is the default format until Phase 1.2).")
+                    print(
+                        "[\033[93mTorchBurn\033[0m] Migrated v2 layout to v1 tensors in memory (deprecation: v1 is the default format until Phase 1.2)."
+                    )
                 model.load_state_dict(state_dict)
                 total_params = sum(p.numel() for p in model.parameters())
-                print(f"[\033[92mTorchBurn\033[0m] Successfully loaded model from cache: {os.path.basename(chosen_cache)} ({total_params / 1e6:.2f}M params).")
+                print(
+                    f"[\033[92mTorchBurn\033[0m] Successfully loaded model from cache: {os.path.basename(chosen_cache)} ({total_params / 1e6:.2f}M params)."
+                )
                 return model, config, root_path
 
             # If cache does not exist, run streaming quantization directly from safetensors
             primary_save = os.path.join(root_path, f"torchburn_{quant_lower}_g64.safetensors")
-            fallback_save = os.path.join(os.path.expanduser("~/.cache/torchburn"), f"{Path(root_path).name}_torchburn_{quant_lower}_g64.safetensors")
+            fallback_save = os.path.join(
+                os.path.expanduser("~/.cache/torchburn"),
+                f"{Path(root_path).name}_torchburn_{quant_lower}_g64.safetensors",
+            )
             save_path = primary_save
             try:
                 os.makedirs(os.path.dirname(save_path), exist_ok=True)
@@ -149,7 +173,6 @@ class ModelLoader:
             )
             return model, config, root_path
 
-
         # Standard unquantized float loading path
         model = UniversalTransformer(config, init_weights=False).to(device=device, dtype=dtype)
         cls._load_weights_into_model(model, weights_files)
@@ -169,9 +192,12 @@ class ModelLoader:
         """Streams weights directly from safetensors shards, fusing and quantizing layer-by-layer
         to strictly bound peak RAM below 1.8 GB and completely eliminate laptop freezing."""
         import safetensors
+
         from torchburn.quantization import quantize_weight_int4_grouped, quantize_weight_int8
 
-        print(f"[\033[94mTorchBurn\033[0m] Streaming {quant.upper()} layer-by-layer quantization (low-memory mode, peak RAM < 1.8 GB)...")
+        print(
+            f"[\033[94mTorchBurn\033[0m] Streaming {quant.upper()} layer-by-layer quantization (low-memory mode, peak RAM < 1.8 GB)..."
+        )
 
         # Build tensor key to file index
         tensor_index = {}
@@ -193,111 +219,143 @@ class ModelLoader:
             ]
             # Key-specific architecture aliases
             if key == "embed_tokens":
-                cands.extend([
-                    "model.embed_tokens.weight", "transformer.wte.weight",
-                    "transformer.embedding.word_embeddings.weight",
-                    "word_embeddings.weight", "embeddings.word_embeddings.weight",
-                ])
+                cands.extend(
+                    [
+                        "model.embed_tokens.weight",
+                        "transformer.wte.weight",
+                        "transformer.embedding.word_embeddings.weight",
+                        "word_embeddings.weight",
+                        "embeddings.word_embeddings.weight",
+                    ]
+                )
             elif key == "norm":
-                cands.extend([
-                    "model.norm.weight", "transformer.ln_f.weight",
-                    "transformer.norm.weight", "model.final_layernorm.weight",
-                ])
+                cands.extend(
+                    [
+                        "model.norm.weight",
+                        "transformer.ln_f.weight",
+                        "transformer.norm.weight",
+                        "model.final_layernorm.weight",
+                    ]
+                )
             elif "input_layernorm" in key:
                 idx = key.split(".")[1]
-                cands.extend([
-                    f"model.layers.{idx}.input_layernorm.weight",
-                    f"transformer.h.{idx}.ln_1.weight",
-                    f"transformer.layers.{idx}.input_layernorm.weight",
-                    f"layers.{idx}.operator_norm.weight",
-                ])
+                cands.extend(
+                    [
+                        f"model.layers.{idx}.input_layernorm.weight",
+                        f"transformer.h.{idx}.ln_1.weight",
+                        f"transformer.layers.{idx}.input_layernorm.weight",
+                        f"layers.{idx}.operator_norm.weight",
+                    ]
+                )
             elif "post_attention_layernorm" in key:
                 idx = key.split(".")[1]
-                cands.extend([
-                    f"model.layers.{idx}.post_attention_layernorm.weight",
-                    f"transformer.h.{idx}.ln_2.weight",
-                    f"transformer.layers.{idx}.post_attention_layernorm.weight",
-                ])
+                cands.extend(
+                    [
+                        f"model.layers.{idx}.post_attention_layernorm.weight",
+                        f"transformer.h.{idx}.ln_2.weight",
+                        f"transformer.layers.{idx}.post_attention_layernorm.weight",
+                    ]
+                )
             elif "q_proj" in key:
                 idx = key.split(".")[1]
-                cands.extend([
-                    f"model.layers.{idx}.self_attn.q_proj.weight",
-                    f"transformer.h.{idx}.attn.q_proj.weight",
-                    f"transformer.layers.{idx}.self_attn.q_proj.weight",
-                ])
+                cands.extend(
+                    [
+                        f"model.layers.{idx}.self_attn.q_proj.weight",
+                        f"transformer.h.{idx}.attn.q_proj.weight",
+                        f"transformer.layers.{idx}.self_attn.q_proj.weight",
+                    ]
+                )
             elif "k_proj" in key:
                 idx = key.split(".")[1]
-                cands.extend([
-                    f"model.layers.{idx}.self_attn.k_proj.weight",
-                    f"transformer.h.{idx}.attn.k_proj.weight",
-                    f"transformer.layers.{idx}.self_attn.k_proj.weight",
-                ])
+                cands.extend(
+                    [
+                        f"model.layers.{idx}.self_attn.k_proj.weight",
+                        f"transformer.h.{idx}.attn.k_proj.weight",
+                        f"transformer.layers.{idx}.self_attn.k_proj.weight",
+                    ]
+                )
             elif "v_proj" in key:
                 idx = key.split(".")[1]
-                cands.extend([
-                    f"model.layers.{idx}.self_attn.v_proj.weight",
-                    f"transformer.h.{idx}.attn.v_proj.weight",
-                    f"transformer.layers.{idx}.self_attn.v_proj.weight",
-                ])
+                cands.extend(
+                    [
+                        f"model.layers.{idx}.self_attn.v_proj.weight",
+                        f"transformer.h.{idx}.attn.v_proj.weight",
+                        f"transformer.layers.{idx}.self_attn.v_proj.weight",
+                    ]
+                )
             elif "o_proj" in key:
                 idx = key.split(".")[1]
-                cands.extend([
-                    f"model.layers.{idx}.self_attn.o_proj.weight",
-                    f"transformer.h.{idx}.attn.out_proj.weight",
-                    f"transformer.layers.{idx}.self_attn.o_proj.weight",
-                    f"model.layers.{idx}.self_attn.dense.weight",
-                ])
+                cands.extend(
+                    [
+                        f"model.layers.{idx}.self_attn.o_proj.weight",
+                        f"transformer.h.{idx}.attn.out_proj.weight",
+                        f"transformer.layers.{idx}.self_attn.o_proj.weight",
+                        f"model.layers.{idx}.self_attn.dense.weight",
+                    ]
+                )
             elif "gate_proj" in key:
                 idx = key.split(".")[1]
-                cands.extend([
-                    f"model.layers.{idx}.mlp.gate_proj.weight",
-                    f"transformer.h.{idx}.mlp.gate_proj.weight",
-                    f"transformer.layers.{idx}.mlp.gate_proj.weight",
-                    f"model.layers.{idx}.mlp.w1.weight",
-                ])
+                cands.extend(
+                    [
+                        f"model.layers.{idx}.mlp.gate_proj.weight",
+                        f"transformer.h.{idx}.mlp.gate_proj.weight",
+                        f"transformer.layers.{idx}.mlp.gate_proj.weight",
+                        f"model.layers.{idx}.mlp.w1.weight",
+                    ]
+                )
             elif "up_proj" in key:
                 idx = key.split(".")[1]
-                cands.extend([
-                    f"model.layers.{idx}.mlp.up_proj.weight",
-                    f"transformer.h.{idx}.mlp.up_proj.weight",
-                    f"transformer.layers.{idx}.mlp.up_proj.weight",
-                    f"model.layers.{idx}.mlp.w3.weight",
-                ])
+                cands.extend(
+                    [
+                        f"model.layers.{idx}.mlp.up_proj.weight",
+                        f"transformer.h.{idx}.mlp.up_proj.weight",
+                        f"transformer.layers.{idx}.mlp.up_proj.weight",
+                        f"model.layers.{idx}.mlp.w3.weight",
+                    ]
+                )
             elif "down_proj" in key:
                 idx = key.split(".")[1]
-                cands.extend([
-                    f"model.layers.{idx}.mlp.down_proj.weight",
-                    f"transformer.h.{idx}.mlp.down_proj.weight",
-                    f"transformer.layers.{idx}.mlp.down_proj.weight",
-                    f"model.layers.{idx}.mlp.w2.weight",
-                ])
+                cands.extend(
+                    [
+                        f"model.layers.{idx}.mlp.down_proj.weight",
+                        f"transformer.h.{idx}.mlp.down_proj.weight",
+                        f"transformer.layers.{idx}.mlp.down_proj.weight",
+                        f"model.layers.{idx}.mlp.w2.weight",
+                    ]
+                )
             elif key.startswith("layers.") and ".experts." in key:
                 # MoE checkpoints: layers.{l}.experts.{e}.{gate,up,down}_proj.weight
                 parts = key.split(".")
                 idx, expert_id, proj = parts[1], parts[3], parts[4]
-                cands.extend([
-                    f"model.layers.{idx}.mlp.experts.{expert_id}.{proj}.weight",
-                    f"model.layers.{idx}.block_sparse_moe.experts.{expert_id}.{proj}.weight",
-                    f"model.layers.{idx}.mlp.experts.{expert_id}.w1.weight"
-                    if proj == "gate_proj"
-                    else f"model.layers.{idx}.mlp.experts.{expert_id}.w3.weight"
-                    if proj == "up_proj"
-                    else f"model.layers.{idx}.mlp.experts.{expert_id}.w2.weight",
-                ])
+                cands.extend(
+                    [
+                        f"model.layers.{idx}.mlp.experts.{expert_id}.{proj}.weight",
+                        f"model.layers.{idx}.block_sparse_moe.experts.{expert_id}.{proj}.weight",
+                        f"model.layers.{idx}.mlp.experts.{expert_id}.w1.weight"
+                        if proj == "gate_proj"
+                        else f"model.layers.{idx}.mlp.experts.{expert_id}.w3.weight"
+                        if proj == "up_proj"
+                        else f"model.layers.{idx}.mlp.experts.{expert_id}.w2.weight",
+                    ]
+                )
             elif key.startswith("layers.") and key.endswith(".moe.gate.weight"):
                 idx = key.split(".")[1]
-                cands.extend([
-                    f"model.layers.{idx}.block_sparse_moe.gate.weight",
-                    f"model.layers.{idx}.mlp.gate.weight",
-                    f"model.layers.{idx}.moe.gate.weight",
-                    f"model.layers.{idx}.mlp.router.weight",
-                ])
+                cands.extend(
+                    [
+                        f"model.layers.{idx}.block_sparse_moe.gate.weight",
+                        f"model.layers.{idx}.mlp.gate.weight",
+                        f"model.layers.{idx}.moe.gate.weight",
+                        f"model.layers.{idx}.mlp.router.weight",
+                    ]
+                )
             elif key.startswith("layers.") and ".attn." in key and ".bias" in key:
                 # GPT-2 fused Conv1D-style attention bias
                 idx = key.split(".")[1]
-                cands.extend([
-                    f"transformer.h.{idx}.attn.{key.split('.')[3]}.weight",
-                ])
+                cands.extend(
+                    [
+                        f"transformer.h.{idx}.attn.{key.split('.')[3]}.weight",
+                    ]
+                )
 
             for c in cands:
                 if c in tensor_index:
@@ -314,7 +372,9 @@ class ModelLoader:
                 )
             return tensor
 
-        model: Any = UniversalTransformer(config, init_weights=False, quant=quant, fused_qkv=True).to(device=device)
+        model: Any = UniversalTransformer(
+            config, init_weights=False, quant=quant, fused_qkv=True
+        ).to(device=device)
 
         # 1. Embed tokens
         emb = require_tensor("embed_tokens")
@@ -331,20 +391,24 @@ class ModelLoader:
             gc.collect()
 
         # 3. Stream layer-by-layer
-        for l in range(config.num_hidden_layers):
-            print(f"[\033[94mTorchBurn\033[0m] Quantizing layer {l+1}/{config.num_hidden_layers} to {quant.upper()}...", end="\r", flush=True)
-            layer: Any = model.layers[l]
+        for layer_idx in range(config.num_hidden_layers):
+            print(
+                f"[\033[94mTorchBurn\033[0m] Quantizing layer {layer_idx + 1}/{config.num_hidden_layers} to {quant.upper()}...",
+                end="\r",
+                flush=True,
+            )
+            layer: Any = model.layers[layer_idx]
 
             # Input norm
-            in_norm = require_tensor(f"layers.{l}.input_layernorm.weight")
+            in_norm = require_tensor(f"layers.{layer_idx}.input_layernorm.weight")
             if in_norm is not None:
                 layer.input_layernorm.weight.data.copy_(in_norm.float())
                 del in_norm
 
             # Q, K, V
-            q_w = require_tensor(f"layers.{l}.self_attn.q_proj.weight")
-            k_w = require_tensor(f"layers.{l}.self_attn.k_proj.weight")
-            v_w = require_tensor(f"layers.{l}.self_attn.v_proj.weight")
+            q_w = require_tensor(f"layers.{layer_idx}.self_attn.q_proj.weight")
+            k_w = require_tensor(f"layers.{layer_idx}.self_attn.k_proj.weight")
+            v_w = require_tensor(f"layers.{layer_idx}.self_attn.v_proj.weight")
             if q_w is not None and k_w is not None and v_w is not None:
                 qkv_w = torch.cat([q_w.float(), k_w.float(), v_w.float()], dim=0)
                 del q_w, k_w, v_w
@@ -359,9 +423,9 @@ class ModelLoader:
 
             # QKV bias if present
             if config.qkv_bias:
-                q_b = get_tensor(f"layers.{l}.self_attn.q_proj.bias")
-                k_b = get_tensor(f"layers.{l}.self_attn.k_proj.bias")
-                v_b = get_tensor(f"layers.{l}.self_attn.v_proj.bias")
+                q_b = get_tensor(f"layers.{layer_idx}.self_attn.q_proj.bias")
+                k_b = get_tensor(f"layers.{layer_idx}.self_attn.k_proj.bias")
+                v_b = get_tensor(f"layers.{layer_idx}.self_attn.v_proj.bias")
                 if q_b is not None and k_b is not None and v_b is not None:
                     qkv_b = torch.cat([q_b.float(), k_b.float(), v_b.float()], dim=0)
                     del q_b, k_b, v_b
@@ -370,7 +434,7 @@ class ModelLoader:
                     del qkv_b
 
             # O proj
-            o_w = require_tensor(f"layers.{l}.self_attn.o_proj.weight")
+            o_w = require_tensor(f"layers.{layer_idx}.self_attn.o_proj.weight")
             if o_w is not None:
                 if quant == "int4":
                     qw, qs = quantize_weight_int4_grouped(o_w.float(), group_size=group_size)
@@ -382,14 +446,14 @@ class ModelLoader:
                 del qw, qs
 
             # Post attention norm
-            post_norm = get_tensor(f"layers.{l}.post_attention_layernorm.weight")
+            post_norm = get_tensor(f"layers.{layer_idx}.post_attention_layernorm.weight")
             if post_norm is not None:
                 layer.post_attention_layernorm.weight.data.copy_(post_norm.float())
                 del post_norm
 
             # MLP / MoE
             if layer.moe is not None:
-                router_w = get_tensor(f"layers.{l}.moe.gate.weight")
+                router_w = get_tensor(f"layers.{layer_idx}.moe.gate.weight")
                 if router_w is not None:
                     layer.moe.gate.weight.data.copy_(router_w.float())
                     del router_w
@@ -399,10 +463,14 @@ class ModelLoader:
                         ("up_proj", expert.up_proj),
                         ("down_proj", expert.down_proj),
                     ]:
-                        pw = get_tensor(f"layers.{l}.experts.{expert_id}.{proj_name}.weight")
+                        pw = get_tensor(
+                            f"layers.{layer_idx}.experts.{expert_id}.{proj_name}.weight"
+                        )
                         if pw is not None:
                             if quant == "int4":
-                                qw, qs = quantize_weight_int4_grouped(pw.float(), group_size=group_size)
+                                qw, qs = quantize_weight_int4_grouped(
+                                    pw.float(), group_size=group_size
+                                )
                             else:
                                 qw, qs = quantize_weight_int8(pw.float())
                             del pw
@@ -410,8 +478,12 @@ class ModelLoader:
                             module.scales.data.copy_(qs)
                             del qw, qs
             else:
-                for proj_name, module in [("gate_proj", layer.mlp.gate_proj), ("up_proj", layer.mlp.up_proj), ("down_proj", layer.mlp.down_proj)]:
-                    pw = require_tensor(f"layers.{l}.mlp.{proj_name}.weight")
+                for proj_name, module in [
+                    ("gate_proj", layer.mlp.gate_proj),
+                    ("up_proj", layer.mlp.up_proj),
+                    ("down_proj", layer.mlp.down_proj),
+                ]:
+                    pw = require_tensor(f"layers.{layer_idx}.mlp.{proj_name}.weight")
                     if pw is not None:
                         if quant == "int4":
                             qw, qs = quantize_weight_int4_grouped(pw.float(), group_size=group_size)
@@ -428,7 +500,7 @@ class ModelLoader:
         print()  # Newline after progress
 
         # 4. LM Head
-        print(f"[\033[94mTorchBurn\033[0m] Quantizing LM head (bounded chunking)...")
+        print("[\033[94mTorchBurn\033[0m] Quantizing LM head (bounded chunking)...")
         if config.tie_word_embeddings:
             lm_w = model.embed_tokens.weight.data
             if quant == "int4":
@@ -451,14 +523,18 @@ class ModelLoader:
                 del qw, qs
         gc.collect()
 
-
         # 5. Persist to disk cache using fast zero-copy memory-mapped safetensors
         if save_cache_path:
             import safetensors.torch
-            print(f"[\033[92mTorchBurn\033[0m] Saving quantized weights to disk cache: {os.path.basename(save_cache_path)}...")
+
+            print(
+                f"[\033[92mTorchBurn\033[0m] Saving quantized weights to disk cache: {os.path.basename(save_cache_path)}..."
+            )
             clean_sd = {k: v.contiguous() for k, v in model.state_dict().items()}
             safetensors.torch.save_file(clean_sd, save_cache_path)
-            print(f"[\033[92mTorchBurn\033[0m] Cache created successfully. Future loads will take < 0.1s via zero-copy mmap.")
+            print(
+                "[\033[92mTorchBurn\033[0m] Cache created successfully. Future loads will take < 0.1s via zero-copy mmap."
+            )
 
         return model
 
@@ -497,6 +573,7 @@ class ModelLoader:
             # lm_head shares embed_tokens weights: rebuild it the same way the
             # streaming quantizer does so the state dict has its own qweight.
             from torchburn.quantization import quantize_weight_int4_grouped
+
             emb = model.embed_tokens.weight.data
             qw, qs = quantize_weight_int4_grouped(emb, group_size=64)
             model.lm_head.qweight.data.copy_(qw)
@@ -524,6 +601,7 @@ class ModelLoader:
             else:
                 sd[key] = tensor.contiguous()
         import safetensors.torch
+
         safetensors.torch.save_file(sd, v2_path)
         print(f"[\033[92mTorchBurn\033[0m] v2 cache written: {v2_path}")
         return v2_path
@@ -547,7 +625,13 @@ class ModelLoader:
                 cfg_path = os.path.join(cand, "config.json")
                 if os.path.isfile(cfg_path):
                     # Check for safetensors files
-                    st_files = sorted([os.path.join(cand, f) for f in os.listdir(cand) if f.endswith(".safetensors")])
+                    st_files = sorted(
+                        [
+                            os.path.join(cand, f)
+                            for f in os.listdir(cand)
+                            if f.endswith(".safetensors")
+                        ]
+                    )
                     if st_files:
                         return st_files, cfg_path, cand
 
@@ -565,6 +649,7 @@ class ModelLoader:
         # Otherwise, download via huggingface_hub
         try:
             from huggingface_hub import hf_hub_download
+
             repo_id = resolve_repo_id(model_id_or_path)
 
             print(f"[\033[94mTorchBurn\033[0m] Resolving model '{repo_id}' from Hugging Face...")
@@ -575,7 +660,9 @@ class ModelLoader:
             # Check if sharded or single
             index_path = None
             try:
-                index_path = hf_hub_download(repo_id, "model.safetensors.index.json", token=token, cache_dir=cache_dir)
+                index_path = hf_hub_download(
+                    repo_id, "model.safetensors.index.json", token=token, cache_dir=cache_dir
+                )
             except Exception:
                 pass
 
@@ -584,16 +671,21 @@ class ModelLoader:
                     index_data = json.load(f)
                 weight_map = index_data.get("weight_map", {})
                 shard_names = sorted(list(set(weight_map.values())))
-                st_files = [hf_hub_download(repo_id, s, token=token, cache_dir=cache_dir) for s in shard_names]
+                st_files = [
+                    hf_hub_download(repo_id, s, token=token, cache_dir=cache_dir)
+                    for s in shard_names
+                ]
             else:
-                single_st = hf_hub_download(repo_id, "model.safetensors", token=token, cache_dir=cache_dir)
+                single_st = hf_hub_download(
+                    repo_id, "model.safetensors", token=token, cache_dir=cache_dir
+                )
                 st_files = [single_st]
 
             return st_files, cfg_path, root_dir
         except Exception as e:
             raise FileNotFoundError(
                 f"Could not locate model '{model_id_or_path}' locally or on Hugging Face: {e}."
-            )
+            ) from e
 
     @classmethod
     def _load_weights_into_model(cls, model: UniversalTransformer, weights_files: List[str]):
@@ -604,7 +696,9 @@ class ModelLoader:
         loaded_keys = set()
 
         for w_file in weights_files:
-            print(f"[\033[94mTorchBurn\033[0m] Loading checkpoint shard: {os.path.basename(w_file)}")
+            print(
+                f"[\033[94mTorchBurn\033[0m] Loading checkpoint shard: {os.path.basename(w_file)}"
+            )
             with safetensors.safe_open(w_file, framework="pt", device="cpu") as f:
                 for k in f.keys():
                     tensor = f.get_tensor(k)
@@ -636,5 +730,7 @@ class ModelLoader:
 
         # Tie fused QKV if present
         total_params = sum(p.numel() for p in model.parameters())
-        print(f"[\033[92mTorchBurn\033[0m] Successfully loaded {total_params / 1e6:.2f}M parameter model.")
+        print(
+            f"[\033[92mTorchBurn\033[0m] Successfully loaded {total_params / 1e6:.2f}M parameter model."
+        )
         gc.collect()

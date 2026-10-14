@@ -6,7 +6,6 @@ import warnings
 
 import pytest
 import torch
-
 import torchburn
 from torchburn._compiled import BurnCompiledCallable
 

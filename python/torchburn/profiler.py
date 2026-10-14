@@ -9,8 +9,8 @@ Provides:
 from __future__ import annotations
 
 import contextlib
-import time
 import threading
+import time
 from dataclasses import dataclass, field
 from typing import Any, Generator
 
@@ -20,6 +20,7 @@ from . import _torchburn as _native
 @dataclass
 class ProfileResult:
     """Result from a profiling session."""
+
     wall_time_ms: float = 0.0
     num_nodes: int = 0
     num_supported: int = 0
@@ -36,12 +37,12 @@ class ProfileResult:
 
     def summary(self) -> str:
         lines = [
-            f"TorchBurn Profile",
+            "TorchBurn Profile",
             f"  Engine:      {self.engine}",
             f"  Wall time:   {self.wall_time_ms:.2f} ms",
             f"  Nodes:       {self.num_nodes} total ({self.num_supported} native, "
             f"{self.num_unsupported} eager fallback)",
-            f"  Native %:    {self.native_ratio*100:.1f}%",
+            f"  Native %:    {self.native_ratio * 100:.1f}%",
             f"  Fallbacks:   {self.num_fallbacks}",
         ]
         if self.graph_signature:
@@ -52,6 +53,7 @@ class ProfileResult:
 @dataclass
 class _Stats:
     """Global profiling statistics."""
+
     _lock: threading.Lock = field(default_factory=threading.Lock)
     _calls: int = 0
     _total_ms: float = 0.0
@@ -85,8 +87,7 @@ class _Stats:
                 "total_native": self._total_native,
                 "total_fallbacks": self._total_fallbacks,
                 "native_ratio": (
-                    self._total_native / self._total_nodes
-                    if self._total_nodes > 0 else 0.0
+                    self._total_native / self._total_nodes if self._total_nodes > 0 else 0.0
                 ),
             }
 
@@ -273,22 +274,24 @@ def trace(model, example_inputs, **kwargs) -> dict[str, Any]:
     # Add per-op slice events under torchburn::execute
     cur_ts = 0.0
     for op, calls, total_us, min_us, max_us in raw_report:
-        events.append({
-            "name": f"torchburn::{op}",
-            "cat": "op",
-            "ph": "X",
-            "ts": cur_ts,
-            "dur": float(total_us),
-            "pid": 1,
-            "tid": 1,
-            "args": {
-                "calls": calls,
-                "total_us": total_us,
-                "min_us": min_us,
-                "max_us": max_us,
-                "avg_us": total_us / max(calls, 1),
-            },
-        })
+        events.append(
+            {
+                "name": f"torchburn::{op}",
+                "cat": "op",
+                "ph": "X",
+                "ts": cur_ts,
+                "dur": float(total_us),
+                "pid": 1,
+                "tid": 1,
+                "args": {
+                    "calls": calls,
+                    "total_us": total_us,
+                    "min_us": min_us,
+                    "max_us": max_us,
+                    "avg_us": total_us / max(calls, 1),
+                },
+            }
+        )
         cur_ts += float(total_us)
 
     return {
@@ -314,6 +317,7 @@ def op_coverage(model, example_inputs, **kwargs) -> dict[str, Any]:
         engine: active engine
     """
     from torch.fx.experimental.proxy_tensor import make_fx
+
     from ._parser import parse_graph
 
     if not isinstance(example_inputs, (list, tuple)):
@@ -372,7 +376,9 @@ class GraphVisualization:
 
         self.native_nodes = [n for n in self.nodes if n.get("op") == "supported"]
         self.fallback_nodes = [n for n in self.nodes if n.get("op") == "unsupported"]
-        self.io_nodes = [n for n in self.nodes if n.get("op") in ("placeholder", "output", "get_attr")]
+        self.io_nodes = [
+            n for n in self.nodes if n.get("op") in ("placeholder", "output", "get_attr")
+        ]
 
         total = len(self.native_nodes) + len(self.fallback_nodes)
         self.total_compute_nodes = total
@@ -422,9 +428,13 @@ class GraphVisualization:
                 f"| {nid:<3} | {status:<13} | {target:<16} | {fx_target:<19} | {inputs_str:<13} |"
             )
 
-        lines.append("+" + "=" * 5 + "+" + "=" * 15 + "+" + "=" * 18 + "+" + "=" * 21 + "+" + "=" * 15 + "+")
+        lines.append(
+            "+" + "=" * 5 + "+" + "=" * 15 + "+" + "=" * 18 + "+" + "=" * 21 + "+" + "=" * 15 + "+"
+        )
         if self.fallback_nodes:
-            lines.append(f"  * {len(self.fallback_nodes)} node(s) executing via PyTorch eager fallback.")
+            lines.append(
+                f"  * {len(self.fallback_nodes)} node(s) executing via PyTorch eager fallback."
+            )
         else:
             lines.append("  * 100% of compute nodes accelerated natively via TorchBurn.")
         return "\n".join(lines)
@@ -625,7 +635,7 @@ class GraphVisualization:
             <div class="subtitle">{self.model_name} • Hardware Engine: {self.engine}</div>
         </div>
         <div>
-            <span class="badge {'badge-native' if pct >= 90 else 'badge-fallback'}" style="font-size: 14px; padding: 6px 12px;">
+            <span class="badge {"badge-native" if pct >= 90 else "badge-fallback"}" style="font-size: 14px; padding: 6px 12px;">
                 {pct:.1f}% Native Acceleration
             </span>
         </div>
@@ -649,7 +659,7 @@ class GraphVisualization:
         </div>
         <div class="card">
             <div class="card-label">Eager Fallbacks</div>
-            <div class="card-val {'amber' if self.fallback_nodes else 'emerald'}">{len(self.fallback_nodes)}</div>
+            <div class="card-val {"amber" if self.fallback_nodes else "emerald"}">{len(self.fallback_nodes)}</div>
             <div style="font-size: 12px; color: var(--text-dim); margin-top: 6px;">PyTorch CPU fallback nodes</div>
         </div>
     </div>
@@ -710,6 +720,7 @@ def visualize(
         GraphVisualization instance with ``.summary()``, ``.to_mermaid()``, and ``.to_html()``.
     """
     from torch.fx.experimental.proxy_tensor import make_fx
+
     from ._parser import parse_graph
 
     if not isinstance(example_inputs, (list, tuple)):
@@ -744,6 +755,7 @@ def export_telemetry() -> dict[str, Any]:
         - hardware: active engine, GPU info, Rayon threads
     """
     from ._cache import cache_stats
+
     p_stats = profiling_stats()
     m_stats = memory_pool_stats()
     c_stats = cache_stats()
@@ -775,4 +787,3 @@ def export_telemetry() -> dict[str, Any]:
             "rayon_threads": _native.rayon_threads(),
         },
     }
-

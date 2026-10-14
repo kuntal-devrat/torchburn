@@ -215,8 +215,14 @@ def _promote_positional_args_to_kwargs(
     new_kwargs = dict(existing_kwargs)
     name_iter = iter(names)
     optional_tensor_ops = {
-        "conv1d", "conv2d", "conv_transpose1d", "conv_transpose2d",
-        "nll_loss_forward", "cross_entropy_loss", "linear", "addmm"
+        "conv1d",
+        "conv2d",
+        "conv_transpose1d",
+        "conv_transpose2d",
+        "nll_loss_forward",
+        "cross_entropy_loss",
+        "linear",
+        "addmm",
     }
     for arg in args:
         if arg.get("kind") in ("input", "node", "attr"):
@@ -361,7 +367,10 @@ def parse_graph(
         for user in n.users:
             if user.op != "call_function":
                 continue
-            if _target_key(user.target) != "_operator.getitem" and str(user.target) not in ("<built-in function getitem>", "operator.getitem"):
+            if _target_key(user.target) != "_operator.getitem" and str(user.target) not in (
+                "<built-in function getitem>",
+                "operator.getitem",
+            ):
                 continue
             if len(user.args) != 2 or not isinstance(user.args[1], int):
                 continue
@@ -382,18 +391,18 @@ def parse_graph(
             gi0 = getitem_by_idx.get(0)
             if gi0 is not None:
                 getitem_alias[gi0] = n
-            for idx, gi_node in getitem_by_idx.items():
+            for _idx, gi_node in getitem_by_idx.items():
                 if gi_node is not gi0 or gi0 is None:
                     drop_nodes.add(gi_node)
-
-
 
     for n in gm.graph.nodes:
         if n.op == "placeholder":
             pos = placeholders.index(n)
             node_id[n] = next_id
             if pos < len(example_inputs) and isinstance(example_inputs[pos], torch.Tensor):
-                nodes.append({"id": next_id, "op": "placeholder", "pos": pos, "index": tensor_index})
+                nodes.append(
+                    {"id": next_id, "op": "placeholder", "pos": pos, "index": tensor_index}
+                )
                 tensor_placeholder_ids.add(next_id)
                 tensor_index += 1
             else:
@@ -406,7 +415,9 @@ def parse_graph(
             next_id += 1
         elif n.op == "output":
             node_id[n] = next_id
-            nodes.append({"id": next_id, "op": "output", "args": [_ref(a, node_id) for a in n.args]})
+            nodes.append(
+                {"id": next_id, "op": "output", "args": [_ref(a, node_id) for a in n.args]}
+            )
             next_id += 1
         elif n.op in ("call_function", "call_method", "call_module"):
             # getitem(0) on a max/min_reduce: alias to the reduce node's slot
@@ -440,13 +451,24 @@ def parse_graph(
             # don't carry a serializable dtype kwarg.  Infer from the method name.
             _DTYPE_FROM_METHOD: dict[str, str] | None = None
             if mapped is not None and mapped[0] == "to_dtype" and "dtype" not in (n.kwargs or {}):
-                _DTYPE_FROM_METHOD = {"float": "f32", "double": "f64", "half": "f16",
-                                      "bfloat16": "bf16", "int": "i32", "long": "i64"}
+                _DTYPE_FROM_METHOD = {
+                    "float": "f32",
+                    "double": "f64",
+                    "half": "f16",
+                    "bfloat16": "bf16",
+                    "int": "i32",
+                    "long": "i64",
+                }
             # Allow call_function and call_method nodes with kwargs — the engine
             # reads kwargs for dim/keepdim/eps/etc.  call_module nodes keep the
             # old strict check since their kwargs wiring is not yet mapped.
             kwargs_ok = (not n.kwargs) if n.op == "call_module" else True
-            if mapped is not None and n not in force_eager and kwargs_ok and _arg_count_ok(mapped[0], args):
+            if (
+                mapped is not None
+                and n not in force_eager
+                and kwargs_ok
+                and _arg_count_ok(mapped[0], args)
+            ):
                 op, key = mapped
                 # For shape ops called as methods, promote trailing const args
                 # (e.g. permute(1, 0), reshape(-1)) into kwargs so the engine
@@ -459,7 +481,9 @@ def parse_graph(
                     if dtype is not None:
                         extracted_kwargs["dtype"] = dtype
                 args, extracted_kwargs = _promote_const_args_to_kwargs(op, args, extracted_kwargs)
-                args, extracted_kwargs = _promote_positional_args_to_kwargs(op, args, extracted_kwargs)
+                args, extracted_kwargs = _promote_positional_args_to_kwargs(
+                    op, args, extracted_kwargs
+                )
                 # Ops whose engine kernel consumes a fixed prefix of tensor args:
                 # drop trailing const defaults dynamo injects (e.g. F.embedding's
                 # padding_idx/max_norm/norm_type/scale_grad_by_freq/sparse). They
@@ -480,7 +504,11 @@ def parse_graph(
                 # kernel expects F.batch_norm order (input, running_mean,
                 # running_var, weight, bias).  Consts were already promoted to
                 # kwargs, so only the 5 tensor refs remain.
-                if op == "batch_norm" and target_key.startswith("aten.") and "native_batch_norm" in target_key:
+                if (
+                    op == "batch_norm"
+                    and target_key.startswith("aten.")
+                    and "native_batch_norm" in target_key
+                ):
                     if len(args) >= 5:
                         args = [args[0], args[3], args[4], args[1], args[2]]
                 # aten.std.correction / aten.var.correction pass ``correction``
@@ -522,12 +550,19 @@ def parse_graph(
                     # torch.arange defaults to int64; the engine defaults to f32.
                     # Emit i64 when every bound is integral so index tensors fed
                     # to embedding stay integer (the kernel rejects float ids).
-                    if "dtype" not in extracted_kwargs and vals and all(
-                        isinstance(v, int) and not isinstance(v, bool) for v in vals
+                    if (
+                        "dtype" not in extracted_kwargs
+                        and vals
+                        and all(isinstance(v, int) and not isinstance(v, bool) for v in vals)
                     ):
                         extracted_kwargs["dtype"] = "i64"
                 # einsum: equation string is args[0] (const), tensors start at args[1]
-                if op == "einsum" and args and isinstance(args[0], dict) and args[0].get("kind") == "const":
+                if (
+                    op == "einsum"
+                    and args
+                    and isinstance(args[0], dict)
+                    and args[0].get("kind") == "const"
+                ):
                     extracted_kwargs["equation"] = args[0]["value"]
                     args = args[1:]
                 if mapped is not None and n.op == "call_function":
@@ -587,8 +622,7 @@ def parse_graph(
             raise ValueError(f"torchburn: unexpected FX node op {n.op!r}")
 
     input_spec = [
-        {"shape": [int(s) for s in t.shape], "dtype": _dtype_str(t.dtype)}
-        for t in tensor_inputs
+        {"shape": [int(s) for s in t.shape], "dtype": _dtype_str(t.dtype)} for t in tensor_inputs
     ]
     return {
         "nodes": nodes,
@@ -610,8 +644,11 @@ def _ref_kwargs(fx_kwargs: Any, node_id: dict) -> dict[str, Any]:
         if isinstance(v, torch.fx.Node):
             out[k] = _ref(v, node_id)
         elif isinstance(v, (list, tuple)) and any(isinstance(i, torch.fx.Node) for i in v):
-            out[k] = {"kind": "seq", "value": [_ref(i, node_id) if isinstance(i, torch.fx.Node) else i for i in v],
-                       "type": "tuple" if isinstance(v, tuple) else "list"}
+            out[k] = {
+                "kind": "seq",
+                "value": [_ref(i, node_id) if isinstance(i, torch.fx.Node) else i for i in v],
+                "type": "tuple" if isinstance(v, tuple) else "list",
+            }
         else:
             out[k] = v
     return out
@@ -654,16 +691,49 @@ def _extract_kwargs(fx_kwargs: Any, node_id: dict) -> dict[str, Any]:
 def _arg_count_ok(op: str, args: list[dict[str, Any]]) -> bool:
     """Check if the arg count is reasonable for this op."""
     # Unary ops: 1 arg
-    unary_ops = {"relu", "abs", "neg", "sign", "sqrt", "rsqrt", "exp", "log",
-                 "reciprocal", "ceil", "floor", "round", "sin", "cos",
-                 "sigmoid", "tanh", "gelu", "silu",
-                 "elu", "selu", "softplus", "hardswish", "mish", "softmax",
-                 "log_softmax", "norm"}
+    unary_ops = {
+        "relu",
+        "abs",
+        "neg",
+        "sign",
+        "sqrt",
+        "rsqrt",
+        "exp",
+        "log",
+        "reciprocal",
+        "ceil",
+        "floor",
+        "round",
+        "sin",
+        "cos",
+        "sigmoid",
+        "tanh",
+        "gelu",
+        "silu",
+        "elu",
+        "selu",
+        "softplus",
+        "hardswish",
+        "mish",
+        "softmax",
+        "log_softmax",
+        "norm",
+    }
     # Binary ops: 2 args
     binary_ops = {"add", "sub", "mul", "div", "eq", "ne", "lt", "le", "gt", "ge"}
     # Reduction ops: 1-2 args (tensor + optional dim)
-    reduce_ops = {"sum", "mean", "max_reduce", "min_reduce", "argmax", "argmin", "std", "var",
-                  "cumsum", "prod"}
+    reduce_ops = {
+        "sum",
+        "mean",
+        "max_reduce",
+        "min_reduce",
+        "argmax",
+        "argmin",
+        "std",
+        "var",
+        "cumsum",
+        "prod",
+    }
     # Linalg ops: 2-3 args
     linalg_ops = {"matmul", "bmm", "dot"}
     # 3-arg ops

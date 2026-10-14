@@ -11,8 +11,8 @@ the entry is re-persisted (self-healing) so native `cache_get` hits resume.
 
 from __future__ import annotations
 
-from collections import OrderedDict
 import threading
+from collections import OrderedDict
 from typing import Any
 
 from . import _torchburn as _native

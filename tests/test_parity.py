@@ -48,7 +48,9 @@ def _uses_w4a8_fast_path() -> bool:
     return bool(report.get("avx512vnni"))
 
 
-def _dequant_int4_grouped(packed: torch.Tensor, scales: torch.Tensor, group_size: int) -> torch.Tensor:
+def _dequant_int4_grouped(
+    packed: torch.Tensor, scales: torch.Tensor, group_size: int
+) -> torch.Tensor:
     """Reference dequantization: nibble unpack -> signed (-8..7) -> *scale."""
     n, packed_cols = packed.shape
     k = packed_cols * 2
@@ -100,7 +102,9 @@ def test_int4_grouped_gemv_matches_torch_reference():
         expected = x @ w_deq.T
         budget = 1e-3
     rel_err = (out - expected).abs().max() / expected.abs().clamp_min(1e-6).max()
-    assert rel_err < budget, f"int4 ({tier}) vs torch reference rel err {rel_err:.2e} (budget {budget})"
+    assert rel_err < budget, (
+        f"int4 ({tier}) vs torch reference rel err {rel_err:.2e} (budget {budget})"
+    )
 
 
 def test_int4_grouped_quantization_quality_budget_recorded():
@@ -164,7 +168,9 @@ def test_int4_v2_roundtrip_matches_v1():
     num_groups = k // group_size
     blocks = blocked.view(n, num_groups, 34)
     # 1. packed nibbles byte-identical
-    assert torch.equal(blocks[:, :, :32], packed.view(n, num_groups, 32)), "v2 nibbles differ from v1"
+    assert torch.equal(blocks[:, :, :32], packed.view(n, num_groups, 32)), (
+        "v2 nibbles differ from v1"
+    )
     # 2. f16 scale bytes == v1 scales rounded to f16 (LE)
     # (contiguous() first: a dtype-view on the strided 34-byte slice is unsafe)
     scale_bytes = (

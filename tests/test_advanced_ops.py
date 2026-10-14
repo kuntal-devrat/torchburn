@@ -1,15 +1,17 @@
 """
-Tests for Phase 10: Op Coverage Expansion.
+Tests for Op Coverage Expansion.
 
 Tests sin, cos, round, clamp_min, clamp_max, chunk, full, zeros, ones,
 arange, linspace, and in-place op aliases.
 """
-import torch
-import pytest
-import sys
-import os
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+import os
+import sys
+
+import pytest
+import torch
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 
 def _compile(model, *example_inputs):
@@ -19,6 +21,7 @@ def _compile(model, *example_inputs):
 # ---------------------------------------------------------------------------
 # Unary trig / round ops
 # ---------------------------------------------------------------------------
+
 
 class TestSin:
     def test_sin_basic(self):
@@ -100,6 +103,7 @@ class TestRound:
 # Clamp variants
 # ---------------------------------------------------------------------------
 
+
 class TestClampMin:
     def test_clamp_min_basic(self):
         class M(torch.nn.Module):
@@ -160,6 +164,7 @@ class TestClampBoth:
 # Chunk
 # ---------------------------------------------------------------------------
 
+
 class TestChunk:
     def test_chunk_2(self):
         class M(torch.nn.Module):
@@ -199,6 +204,7 @@ class TestChunk:
 # ---------------------------------------------------------------------------
 # In-place op aliases
 # ---------------------------------------------------------------------------
+
 
 class TestInPlaceOps:
     def test_relu_inplace(self):
@@ -268,9 +274,11 @@ class TestInPlaceOps:
 # Combined ops in a model
 # ---------------------------------------------------------------------------
 
+
 class TestCombined:
     def test_sin_cos_combined(self):
         """sin and cos in the same model."""
+
         class M(torch.nn.Module):
             def forward(self, x):
                 s = torch.sin(x)
@@ -284,6 +292,7 @@ class TestCombined:
 
     def test_round_clamp_combined(self):
         """round and clamp in the same model."""
+
         class M(torch.nn.Module):
             def forward(self, x):
                 r = torch.round(x)
@@ -296,6 +305,7 @@ class TestCombined:
 
     def test_abs_neg_combined(self):
         """abs and neg in the same model."""
+
         class M(torch.nn.Module):
             def forward(self, x):
                 return torch.neg(torch.abs(x))
@@ -307,6 +317,7 @@ class TestCombined:
 
     def test_chunk_add(self):
         """chunk then add the pieces."""
+
         class M(torch.nn.Module):
             def forward(self, x):
                 a, b = torch.chunk(x, 2, dim=1)
@@ -323,9 +334,11 @@ class TestCombined:
 # Edge cases
 # ---------------------------------------------------------------------------
 
+
 class TestEdgeCases:
     def test_sin_large_values(self):
         """sin of large values should still be in [-1, 1]."""
+
         class M(torch.nn.Module):
             def forward(self, x):
                 return torch.sin(x)
@@ -337,6 +350,7 @@ class TestEdgeCases:
 
     def test_cos_large_values(self):
         """cos of large values should still be in [-1, 1]."""
+
         class M(torch.nn.Module):
             def forward(self, x):
                 return torch.cos(x)
@@ -348,6 +362,7 @@ class TestEdgeCases:
 
     def test_round_3d(self):
         """round on a 3D tensor."""
+
         class M(torch.nn.Module):
             def forward(self, x):
                 return torch.round(x)
@@ -359,6 +374,7 @@ class TestEdgeCases:
 
     def test_clamp_extreme_values(self):
         """clamp with extreme min/max."""
+
         class M(torch.nn.Module):
             def forward(self, x):
                 return torch.clamp(x, min=-100.0, max=100.0)
@@ -370,6 +386,7 @@ class TestEdgeCases:
 
     def test_chunk_single(self):
         """chunk with chunks=1 returns the whole tensor."""
+
         class M(torch.nn.Module):
             def forward(self, x):
                 return torch.chunk(x, 1, dim=0)

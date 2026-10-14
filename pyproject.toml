@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "torchburn"
-version = "1.0.1"
+version = "1.0.2"
 description = "A hardware-agnostic, Rust-compiled PyTorch compilation backend. Zero-copy DLPack FFI, BLAKE3 structural graph caching, and safe eager fallback for unsupported operators."
 readme = "README.md"
 requires-python = ">=3.9"
@@ -67,3 +67,16 @@ executionEnvironments = [
 ]
 reportMissingImports = "none"
 reportMissingModuleSource = "none"
+
+[tool.ruff]
+line-length = 100
+target-version = "py39"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B"]
+ignore = ["E501", "B008"]
+
+[tool.ruff.lint.per-file-ignores]
+"python/torchburn/__init__.py" = ["E402"]
+"python/torchburn/llm/cli.py" = ["E402"]
+"tests/*" = ["B018", "B011"]

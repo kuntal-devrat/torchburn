@@ -26,7 +26,7 @@ import torch
 
 from . import _torchburn as _native
 from ._cache import _LOCK, lookup, store
-from ._parser import payload_json, parse_graph
+from ._parser import parse_graph, payload_json
 
 _LOG = logging.getLogger("torchburn")
 
@@ -45,20 +45,65 @@ _MIXED_FLOAT = tuple(_MIXED_FLOAT_LIST)
 
 # Ops whose Rust engine kernels natively accept integer (i64/i32) tensor inputs.
 # These must NOT have their integer tensors cast to float.
-_INT_NATIVE_OPS = frozenset({
-    "embedding", "embedding_backward", "index_select", "gather",
-    "scatter", "scatter_add", "where", "arange", "getitem", "select",
-    "to_dtype", "contiguous", "reshape", "expand", "permute", "transpose",
-    "squeeze", "unsqueeze", "cat", "stack", "narrow", "unbind", "chunk",
-    "repeat", "repeat_interleave", "eq", "ne", "lt", "le", "gt", "ge",
-    "nonzero", "masked_fill", "masked_select", "nll_loss_forward", "cross_entropy",
-})
+_INT_NATIVE_OPS = frozenset(
+    {
+        "embedding",
+        "embedding_backward",
+        "index_select",
+        "gather",
+        "scatter",
+        "scatter_add",
+        "where",
+        "arange",
+        "getitem",
+        "select",
+        "to_dtype",
+        "contiguous",
+        "reshape",
+        "expand",
+        "permute",
+        "transpose",
+        "squeeze",
+        "unsqueeze",
+        "cat",
+        "stack",
+        "narrow",
+        "unbind",
+        "chunk",
+        "repeat",
+        "repeat_interleave",
+        "eq",
+        "ne",
+        "lt",
+        "le",
+        "gt",
+        "ge",
+        "nonzero",
+        "masked_fill",
+        "masked_select",
+        "nll_loss_forward",
+        "cross_entropy",
+    }
+)
 
 # Ops where integer inputs should be auto-cast to float32, computed, then cast back.
-_INT_AUTOCAST_OPS = frozenset({
-    "add", "sub", "mul", "div", "clamp", "clamp_min", "clamp_max",
-    "abs", "neg", "min_reduce", "max_reduce", "sum", "mean",
-})
+_INT_AUTOCAST_OPS = frozenset(
+    {
+        "add",
+        "sub",
+        "mul",
+        "div",
+        "clamp",
+        "clamp_min",
+        "clamp_max",
+        "abs",
+        "neg",
+        "min_reduce",
+        "max_reduce",
+        "sum",
+        "mean",
+    }
+)
 
 
 def _should_cast_to_int(node: dict[str, Any], env: dict[int, Any]) -> torch.dtype | None:
@@ -87,7 +132,10 @@ def _should_cast_to_int(node: dict[str, Any], env: dict[int, Any]) -> torch.dtyp
 
 
 def _warn_fallback(target: str, reason: str = "") -> None:
-    if os.getenv("TORCHBURN_SUPPRESS_FALLBACK_WARNINGS") == "1" or os.getenv("TORCHBURN_QUIET") == "1":
+    if (
+        os.getenv("TORCHBURN_SUPPRESS_FALLBACK_WARNINGS") == "1"
+        or os.getenv("TORCHBURN_QUIET") == "1"
+    ):
         return
     # Dedup on the operator alone: the same op can fall back through both the
     # native-phase path (with reason) and the eager-phase path (without), which
@@ -141,7 +189,9 @@ class _BaseInterpreter:
     _combined_output_ids: list[int]
     _graph_handle: int | None
 
-    def _init_interpreter(self, gm: torch.fx.GraphModule, example_inputs: list[torch.Tensor]) -> None:
+    def _init_interpreter(
+        self, gm: torch.fx.GraphModule, example_inputs: list[torch.Tensor]
+    ) -> None:
         self.gm = gm
         self._input_count = len(example_inputs)
         plan, function_map = parse_graph(gm, example_inputs)
@@ -235,7 +285,10 @@ class _BaseInterpreter:
                     if node.get("target") in ("cat", "stack"):
                         indices = []
                         for item in arg.get("value", []):
-                            if item.get("kind") in ("input", "node", "attr") and item.get("index") in all_native_ids:
+                            if (
+                                item.get("kind") in ("input", "node", "attr")
+                                and item.get("index") in all_native_ids
+                            ):
                                 indices.append(node_base + global_pos[item["index"]])
                             else:
                                 idx = seen.get(_arg_key(item))
@@ -249,12 +302,14 @@ class _BaseInterpreter:
                     idx = seen.get(_arg_key(arg), -1)
                     if idx >= 0:
                         pargs.append({"kind": "slot", "index": idx})
-            payload_nodes.append({
-                "id": node["id"],
-                "target": node["target"],
-                "args": pargs,
-                "kwargs": node.get("kwargs", {}),
-            })
+            payload_nodes.append(
+                {
+                    "id": node["id"],
+                    "target": node["target"],
+                    "args": pargs,
+                    "kwargs": node.get("kwargs", {}),
+                }
+            )
 
         needed = self._needed_outputs(all_native_ids)
         # Wildcard dtype + zero shape: the engine plans fusion from graph
@@ -267,6 +322,7 @@ class _BaseInterpreter:
         self._combined_input_keys = all_input_keys
         self._combined_output_ids = sorted(needed)
         self._combined_payload_template = payload
+
         def _infer_const_tensor(val: Any) -> torch.Tensor:
             if isinstance(val, bool):
                 return torch.tensor(val, dtype=torch.bool)
@@ -283,7 +339,9 @@ class _BaseInterpreter:
             for i, k in enumerate(all_input_keys)
             if k[0] == "const" and k[2] is not None
         }
-        self._all_native_ids = {n["id"] for p in self._phases if p["kind"] == "native" for n in p["nodes"]}
+        self._all_native_ids = {
+            n["id"] for p in self._phases if p["kind"] == "native" for n in p["nodes"]
+        }
         self._combined_key_pos = {k: i for i, k in enumerate(all_input_keys)}
         try:
             self._graph_handle = _native.prepare_graph(payload)
@@ -297,9 +355,12 @@ class _BaseInterpreter:
         # Populate profiler if active
         try:
             from .profiler import _get_current_profile
+
             prof = _get_current_profile()
             if prof is not None:
-                total = len([n for n in self.plan["nodes"] if n["op"] in ("supported", "unsupported")])
+                total = len(
+                    [n for n in self.plan["nodes"] if n["op"] in ("supported", "unsupported")]
+                )
                 supported = len([n for n in self.plan["nodes"] if n["op"] == "supported"])
                 unsupported = len([n for n in self.plan["nodes"] if n["op"] == "unsupported"])
                 prof.num_nodes = total
@@ -332,7 +393,9 @@ class _BaseInterpreter:
         bad_keys: set[int] = set()
         cached_consts = self._cached_const_tensors
         # Collect the set of ops in this batch to decide integer handling
-        all_ops = {n.get("target", "") for p in self._phases if p["kind"] == "native" for n in p["nodes"]}
+        all_ops = {
+            n.get("target", "") for p in self._phases if p["kind"] == "native" for n in p["nodes"]
+        }
         any_int_native = bool(all_ops & _INT_NATIVE_OPS)
         for i, key in enumerate(self._combined_input_keys):
             kind = key[0]
@@ -368,7 +431,8 @@ class _BaseInterpreter:
             return
         if torch.is_grad_enabled() and any(
             (t := env.get(k[1])) is not None and isinstance(t, torch.Tensor) and t.requires_grad
-            for k in self._combined_input_keys if k[0] != "const"
+            for k in self._combined_input_keys
+            if k[0] != "const"
         ):
             self._exec_phases_sequentially(env)
             return
@@ -397,7 +461,9 @@ class _BaseInterpreter:
                 if t.dtype == torch.float32:
                     target = _should_cast_to_int(node, env)
                     if target is None:
-                        target = self._mixed_cast_target(node, cast_map, self._combined_key_pos, env)
+                        target = self._mixed_cast_target(
+                            node, cast_map, self._combined_key_pos, env
+                        )
                     if target is not None:
                         t = t.to(target)
                 env[node_id] = t
@@ -436,7 +502,11 @@ class _BaseInterpreter:
                 idx = a.get("index")
                 if idx is not None:
                     val = env.get(idx)
-                    if val is not None and isinstance(val, torch.Tensor) and val.dtype.is_floating_point:
+                    if (
+                        val is not None
+                        and isinstance(val, torch.Tensor)
+                        and val.dtype.is_floating_point
+                    ):
                         return None  # genuine f32/f64 operand: promotion keeps it
         return target
 
@@ -448,7 +518,9 @@ class _BaseInterpreter:
                 node = p["node"]
                 env[node["id"]] = self._run_eager(node, env)
 
-    def _arg_resolvable(self, arg: dict[str, Any], chunk_ids: set[int], env: dict[int, Any]) -> bool:
+    def _arg_resolvable(
+        self, arg: dict[str, Any], chunk_ids: set[int], env: dict[int, Any]
+    ) -> bool:
         kind = arg.get("kind", "")
         if kind == "node" and arg.get("index") in chunk_ids:
             return True
@@ -457,7 +529,10 @@ class _BaseInterpreter:
         if kind == "seq":
             for item in arg.get("value", []):
                 if isinstance(item, dict):
-                    if item.get("kind") in ("input", "node", "attr") and item.get("index") in chunk_ids:
+                    if (
+                        item.get("kind") in ("input", "node", "attr")
+                        and item.get("index") in chunk_ids
+                    ):
                         continue
                     if item.get("kind") == "const":
                         if item.get("value") is None:
@@ -515,7 +590,11 @@ class _BaseInterpreter:
                         idx = arg.get("index")
                         if idx is not None:
                             val = env.get(idx)
-                            if val is not None and isinstance(val, torch.Tensor) and val.requires_grad:
+                            if (
+                                val is not None
+                                and isinstance(val, torch.Tensor)
+                                and val.requires_grad
+                            ):
                                 for n in nodes:
                                     env[n["id"]] = self._run_eager(n, env)
                                 return
@@ -562,7 +641,10 @@ class _BaseInterpreter:
                 if kind == "seq":
                     if node.get("target") in ("cat", "stack"):
                         for item in arg.get("value", []):
-                            if item.get("kind") in ("input", "node", "attr") and item.get("index") in chunk_ids:
+                            if (
+                                item.get("kind") in ("input", "node", "attr")
+                                and item.get("index") in chunk_ids
+                            ):
                                 continue
                             _add(item, node)
                     continue
@@ -578,7 +660,10 @@ class _BaseInterpreter:
                     if node.get("target") in ("cat", "stack"):
                         indices = []
                         for item in arg.get("value", []):
-                            if item.get("kind") in ("input", "node", "attr") and item.get("index") in chunk_ids:
+                            if (
+                                item.get("kind") in ("input", "node", "attr")
+                                and item.get("index") in chunk_ids
+                            ):
                                 indices.append(base + pos[item["index"]])
                             else:
                                 idx = seen.get(_arg_key(item), -1)
@@ -592,10 +677,21 @@ class _BaseInterpreter:
                     idx = _add(arg, node) if _arg_key(arg) not in seen else seen[_arg_key(arg)]
                     if idx >= 0:
                         pargs.append({"kind": "slot", "index": idx})
-            payload_nodes.append({"id": node["id"], "target": node["target"], "args": pargs, "kwargs": node.get("kwargs", {}),})
+            payload_nodes.append(
+                {
+                    "id": node["id"],
+                    "target": node["target"],
+                    "args": pargs,
+                    "kwargs": node.get("kwargs", {}),
+                }
+            )
 
         needed = self._needed_outputs(chunk_ids)
-        payload = {"inputs": [self._spec(t) for t in run_inputs], "nodes": payload_nodes, "outputs": sorted(needed),}
+        payload = {
+            "inputs": [self._spec(t) for t in run_inputs],
+            "nodes": payload_nodes,
+            "outputs": sorted(needed),
+        }
         capsules = [t.__dlpack__() for t in run_inputs]
         try:
             out_capsules = _native.execute_from_dict(payload, capsules)
@@ -648,10 +744,16 @@ class _BaseInterpreter:
             for item in args:
                 self._collect_refs(item, chunk_ids, needed)
 
-    def _tensor_for(self, arg: dict[str, Any], node: dict[str, Any], env: dict[int, Any]) -> torch.Tensor:
+    def _tensor_for(
+        self, arg: dict[str, Any], node: dict[str, Any], env: dict[int, Any]
+    ) -> torch.Tensor:
         if arg["kind"] == "const":
             val = arg["value"]
-            if node.get("target") in ("repeat_interleave", "repeat") and isinstance(val, int) and not isinstance(val, bool):
+            if (
+                node.get("target") in ("repeat_interleave", "repeat")
+                and isinstance(val, int)
+                and not isinstance(val, bool)
+            ):
                 return torch.tensor(val, dtype=torch.int64)
             return torch.tensor(val, dtype=self._scalar_dtype(node, env))
         value = env[arg["index"]]
@@ -666,13 +768,23 @@ class _BaseInterpreter:
                 idx = arg.get("index")
                 if idx is not None:
                     value = env.get(idx)
-                    if value is not None and isinstance(value, torch.Tensor) and value.dtype in _F32_F64:
+                    if (
+                        value is not None
+                        and isinstance(value, torch.Tensor)
+                        and value.dtype in _F32_F64
+                    ):
                         return value.dtype
         return torch.float32
 
     @staticmethod
     def _spec(t: torch.Tensor) -> dict[str, Any]:
-        dtype_map = {torch.float32: "f32", torch.float64: "f64", torch.int64: "i64", torch.int32: "i32", torch.bool: "bool",}
+        dtype_map = {
+            torch.float32: "f32",
+            torch.float64: "f64",
+            torch.int64: "i64",
+            torch.int32: "i32",
+            torch.bool: "bool",
+        }
         return {"shape": [int(s) for s in t.shape], "dtype": dtype_map.get(t.dtype, "f32")}
 
     def _resolve(self, refs: Any, env: dict[int, Any]) -> Any:
@@ -682,14 +794,24 @@ class _BaseInterpreter:
                 resolved = [self._resolve(x, env) for x in refs["value"]]
                 return tuple(resolved) if refs.get("type") == "tuple" else resolved
             if kind == "slice":
-                return slice(self._resolve(refs["start"], env) if isinstance(refs["start"], dict) else refs["start"], self._resolve(refs["stop"], env) if isinstance(refs["stop"], dict) else refs["stop"], refs.get("step"),)
+                return slice(
+                    self._resolve(refs["start"], env)
+                    if isinstance(refs["start"], dict)
+                    else refs["start"],
+                    self._resolve(refs["stop"], env)
+                    if isinstance(refs["stop"], dict)
+                    else refs["stop"],
+                    refs.get("step"),
+                )
             if kind == "const" and refs.get("value") == "__ellipsis__":
                 return Ellipsis
             if kind in ("input", "node", "attr"):
                 try:
                     return env[refs["index"]]
                 except KeyError:
-                    raise RuntimeError("torchburn: graph references an unsupported placeholder (dynamic-shape symbolic input). Not supported yet.") from None
+                    raise RuntimeError(
+                        "torchburn: graph references an unsupported placeholder (dynamic-shape symbolic input). Not supported yet."
+                    ) from None
             if kind == "const":
                 return refs["value"]
             raise KeyError(f"torchburn: unknown reference kind {kind!r}")
@@ -716,7 +838,11 @@ class _BaseInterpreter:
                 return args[0].reshape(args[1])
             return fn(*args, **kwargs)
         if op == "call_method":
-            if node["fx_target"] == "view" and isinstance(args[0], torch.Tensor) and not args[0].is_contiguous():
+            if (
+                node["fx_target"] == "view"
+                and isinstance(args[0], torch.Tensor)
+                and not args[0].is_contiguous()
+            ):
                 return args[0].reshape(*args[1:], **kwargs)
             return getattr(args[0], node["fx_target"])(*args[1:], **kwargs)
         if op == "call_module":

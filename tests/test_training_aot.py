@@ -52,13 +52,13 @@ class TestAOTAutogradTraining:
 
         # Eager forward + backward
         out_eager = m_eager(x_eager)
-        loss_eager = (out_eager ** 2).sum()
+        loss_eager = (out_eager**2).sum()
         loss_eager.backward()
 
         # Compiled forward + backward
         compiled_fn = torch.compile(m_compiled, backend="torchburn")
         out_compiled = compiled_fn(x_compiled)
-        loss_compiled = (out_compiled ** 2).sum()
+        loss_compiled = (out_compiled**2).sum()
         loss_compiled.backward()
 
         # Check forward output
@@ -73,8 +73,11 @@ class TestAOTAutogradTraining:
         ):
             assert p_comp.grad is not None, f"Gradient missing for {n_comp}"
             torch.testing.assert_close(
-                p_comp.grad, p_ref.grad, atol=1e-5, rtol=1e-5,
-                msg=f"Gradient mismatch for parameter {n_ref}"
+                p_comp.grad,
+                p_ref.grad,
+                atol=1e-5,
+                rtol=1e-5,
+                msg=f"Gradient mismatch for parameter {n_ref}",
             )
 
     def test_mlp_training_convergence(self):

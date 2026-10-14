@@ -58,38 +58,6 @@ impl Complex64 {
             im: -self.im,
         }
     }
-
-    #[inline(always)]
-    pub fn abs(self) -> f64 {
-        (self.re * self.re + self.im * self.im).sqrt()
-    }
-
-    #[inline(always)]
-    pub fn arg(self) -> f64 {
-        self.im.atan2(self.re)
-    }
-}
-
-/// In-place Radix-4 butterfly step
-#[inline(always)]
-fn radix4_butterfly(
-    a0: &mut Complex64,
-    a1: &mut Complex64,
-    a2: &mut Complex64,
-    a3: &mut Complex64,
-    dir: f64,
-) {
-    let t0 = a0.add(*a2);
-    let t1 = a0.sub(*a2);
-    let t2 = a1.add(*a3);
-    let t3 = a1.sub(*a3);
-
-    let j_t3 = Complex64::new(-dir * t3.im, dir * t3.re);
-
-    *a0 = t0.add(t2);
-    *a1 = t1.sub(j_t3);
-    *a2 = t0.sub(t2);
-    *a3 = t1.add(j_t3);
 }
 
 /// In-place Radix-4 and Radix-2 Cooley-Tukey FFT for power-of-2 buffers.

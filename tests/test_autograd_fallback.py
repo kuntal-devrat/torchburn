@@ -6,6 +6,7 @@ from torchburn._compiled import BurnCompiledCallable
 def test_compiled_callable_direct_autograd():
     """Verify that calling BurnCompiledCallable directly with requires_grad=True
     does not detach the graph or cause silent grad_fn=None errors."""
+
     class SimpleModule(nn.Module):
         def forward(self, x):
             return torch.relu(x * 2.0)

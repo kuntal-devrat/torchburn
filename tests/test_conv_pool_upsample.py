@@ -1,8 +1,7 @@
-"""Phase 3 operator coverage tests: convolution, pooling, upsampling.
+"""Operator coverage tests: convolution, pooling, upsampling.
 
 Each test validates a native-engine kernel against PyTorch reference output,
-exercising strides, padding, dilation, groups, dtypes, and edge cases. All
-tests run against the same payload protocol as Phase 1/2 tests.
+exercising strides, padding, dilation, groups, dtypes, and edge cases.
 """
 
 from __future__ import annotations
@@ -12,7 +11,6 @@ import json
 import pytest
 import torch
 import torch.nn.functional as F
-
 from torchburn import _torchburn as tb
 
 
@@ -20,28 +18,42 @@ def _spec(t: torch.Tensor) -> dict:
     return {"shape": list(t.shape), "dtype": "f32" if t.dtype == torch.float32 else "f64"}
 
 
-def run_conv(target: str, x: torch.Tensor, w: torch.Tensor, bias: torch.Tensor | None, **kwargs) -> torch.Tensor:
+def run_conv(
+    target: str, x: torch.Tensor, w: torch.Tensor, bias: torch.Tensor | None, **kwargs
+) -> torch.Tensor:
     args = [{"kind": "slot", "index": 0}, {"kind": "slot", "index": 1}]
     inputs = [x, w]
     if bias is not None:
         args.append({"kind": "slot", "index": 2})
         inputs.append(bias)
-    payload = json.dumps({
-        "inputs": [_spec(t) for t in inputs],
-        "nodes": [{"id": 0, "target": target, "args": args, "kwargs": kwargs}],
-        "outputs": [0],
-    }, sort_keys=True)
+    payload = json.dumps(
+        {
+            "inputs": [_spec(t) for t in inputs],
+            "nodes": [{"id": 0, "target": target, "args": args, "kwargs": kwargs}],
+            "outputs": [0],
+        },
+        sort_keys=True,
+    )
     (cap,) = tb.execute(payload, [t.__dlpack__() for t in inputs])
     return torch.from_dlpack(cap)
 
 
 def run_pool(target: str, x: torch.Tensor, **kwargs) -> torch.Tensor:
-    payload = json.dumps({
-        "inputs": [_spec(x)],
-        "nodes": [{"id": 0, "target": target,
-                   "args": [{"kind": "slot", "index": 0}], "kwargs": kwargs}],
-        "outputs": [0],
-    }, sort_keys=True)
+    payload = json.dumps(
+        {
+            "inputs": [_spec(x)],
+            "nodes": [
+                {
+                    "id": 0,
+                    "target": target,
+                    "args": [{"kind": "slot", "index": 0}],
+                    "kwargs": kwargs,
+                }
+            ],
+            "outputs": [0],
+        },
+        sort_keys=True,
+    )
     (cap,) = tb.execute(payload, [x.__dlpack__()])
     return torch.from_dlpack(cap)
 
@@ -50,10 +62,18 @@ def run_pool(target: str, x: torch.Tensor, **kwargs) -> torch.Tensor:
 # 1. Convolution
 # ---------------------------------------------------------------------------
 
+
 class TestConv2d:
-    @pytest.mark.parametrize("k,s,p", [
-        (1, 1, 0), (3, 1, 1), (5, 2, 2), (7, 1, 3), (3, 2, 0),
-    ])
+    @pytest.mark.parametrize(
+        "k,s,p",
+        [
+            (1, 1, 0),
+            (3, 1, 1),
+            (5, 2, 2),
+            (7, 1, 3),
+            (3, 2, 0),
+        ],
+    )
     def test_conv2d_variants(self, k, s, p):
         torch.manual_seed(0)
         x = torch.randn(2, 3, 16, 16)
@@ -221,6 +241,7 @@ class TestConvTranspose2d:
 # 2. Pooling
 # ---------------------------------------------------------------------------
 
+
 class TestMaxPool2d:
     @pytest.mark.parametrize("k", [2, 3])
     def test_max_pool2d(self, k):
@@ -342,6 +363,7 @@ class TestPool1d:
 # 3. Upsampling + flatten
 # ---------------------------------------------------------------------------
 
+
 class TestUpsample:
     def test_upsample_nearest2d(self):
         x = torch.randn(1, 3, 8, 8)
@@ -359,14 +381,21 @@ class TestUpsample:
     def test_interpolate_align_corners_true_rejected(self):
         # align_corners=True would silently produce wrong values; must fall back.
         x = torch.randn(1, 2, 8, 8)
-        payload = json.dumps({
-            "inputs": [_spec(x)],
-            "nodes": [{"id": 0, "target": "interpolate",
-                       "args": [{"kind": "slot", "index": 0}],
-                       "kwargs": {"size": [16, 16], "mode": "bilinear",
-                                   "align_corners": True}}],
-            "outputs": [0],
-        }, sort_keys=True)
+        payload = json.dumps(
+            {
+                "inputs": [_spec(x)],
+                "nodes": [
+                    {
+                        "id": 0,
+                        "target": "interpolate",
+                        "args": [{"kind": "slot", "index": 0}],
+                        "kwargs": {"size": [16, 16], "mode": "bilinear", "align_corners": True},
+                    }
+                ],
+                "outputs": [0],
+            },
+            sort_keys=True,
+        )
         with pytest.raises(RuntimeError, match="TB_UNSUPPORTED"):
             tb.execute(payload, [x.__dlpack__()])
 
@@ -416,6 +445,7 @@ class TestFlatten:
 # ---------------------------------------------------------------------------
 # 4. End-to-end torch.compile: mini-CNN with no eager fallbacks
 # ---------------------------------------------------------------------------
+
 
 class TestEndToEndPhase3:
     def test_mini_cnn_via_compile(self):
@@ -492,6 +522,7 @@ class TestEndToEndPhase3:
 # ---------------------------------------------------------------------------
 # 5. Edge cases
 # ---------------------------------------------------------------------------
+
 
 class TestConvEdgeCases:
     def test_conv2d_kernel_larger_than_input(self):

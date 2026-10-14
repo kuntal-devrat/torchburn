@@ -10,11 +10,11 @@ import torch
 from ._compiled import BurnCompiledCallable
 from ._interpreter import _warn_fallback
 from ._parser.op_registry import (
-    canonical_op,
-    _getitem_as_select,
     _SUPPORTED_OPS,
     _TUPLE_OUTPUT_OPS,
+    _getitem_as_select,
     _target_key,
+    canonical_op,
 )
 
 _LOG = logging.getLogger("torchburn")
@@ -53,7 +53,11 @@ def _is_node_supported(node: torch.fx.Node) -> bool:
         for user in node.users:
             if user.op == "call_function":
                 target_k = _target_key(user.target)
-                if target_k in ("_operator.getitem", "operator.getitem", "<built-in function getitem>"):
+                if target_k in (
+                    "_operator.getitem",
+                    "operator.getitem",
+                    "<built-in function getitem>",
+                ):
                     if len(user.args) >= 2 and isinstance(user.args[1], int) and user.args[1] > 0:
                         if any(u is not node for u in user.users):
                             return False
@@ -136,11 +140,14 @@ def _partition_graph(gm: torch.fx.GraphModule, example_inputs: list[torch.Tensor
     submod_inputs: dict[str, tuple[Any, ...]] = {}
     handles = []
     for name, child in split_gm.named_children():
+
         def make_hook(submod_name: str):
             def hook(mod: torch.nn.Module, inputs: tuple[Any, ...]):
                 if submod_name not in submod_inputs:
                     submod_inputs[submod_name] = inputs
+
             return hook
+
         h = child.register_forward_pre_hook(make_hook(name))
         handles.append(h)
 
@@ -182,7 +189,9 @@ def _compile_boxed(gm: torch.fx.GraphModule, example_inputs: Any):
         from torch._functorch.aot_autograd import make_boxed_func  # type: ignore[import-untyped]
     except (ImportError, AttributeError):
         try:
-            from torch._functorch._aot_autograd.utils import make_boxed_func  # type: ignore[import-untyped]
+            from torch._functorch._aot_autograd.utils import (
+                make_boxed_func,  # type: ignore[import-untyped]
+            )
         except (ImportError, AttributeError):
             pass
 
@@ -204,25 +213,25 @@ def _compile_boxed(gm: torch.fx.GraphModule, example_inputs: Any):
             return BurnCompiledCallable(gm, inputs_list)
 
 
-def torchburn_backend(
-    gm: torch.fx.GraphModule, example_inputs: list[torch.Tensor]
-):
+def torchburn_backend(gm: torch.fx.GraphModule, example_inputs: list[torch.Tensor]):
     """Dynamo compilation backend entrypoint with native AOTAutograd training integration.
 
     Receives the traced ``torch.fx.GraphModule`` plus sample inputs, partitions
     forward and backward graphs via AOTAutograd for training or compiles the
     module directly for inference, returning high-performance native TorchBurn callables.
     """
-    needs_training = (
-        torch.is_grad_enabled()
-        and (
-            any(getattr(t, "requires_grad", False) for t in example_inputs if isinstance(t, torch.Tensor))
-            or any(p.requires_grad for p in gm.parameters())
+    needs_training = torch.is_grad_enabled() and (
+        any(
+            getattr(t, "requires_grad", False)
+            for t in example_inputs
+            if isinstance(t, torch.Tensor)
         )
+        or any(p.requires_grad for p in gm.parameters())
     )
     if needs_training:
         try:
             from torch._functorch.aot_autograd import aot_module_simplified
+
             return aot_module_simplified(
                 gm,
                 example_inputs,

@@ -12,9 +12,9 @@ import warnings
 import torch
 
 
-
 def _assert_fallback_warns(call):
     from torchburn._interpreter import _WARNED
+
     _WARNED.clear()
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
@@ -90,9 +90,9 @@ def test_mixed_run_and_fallback_ordering():
     """Supported nodes before AND after an unsupported one all run correctly."""
 
     def model(x):
-        a = x * 2          # rust
+        a = x * 2  # rust
         b = torch.special.zeta(torch.abs(a) + 1.5, 2.0)  # unsupported -> eager
-        c = b + 1          # rust
+        c = b + 1  # rust
         return c
 
     compiled = torch.compile(model, backend="torchburn")
@@ -103,6 +103,7 @@ def test_mixed_run_and_fallback_ordering():
 
 def test_fallback_warns_once_per_target():
     from torchburn._interpreter import _WARNED
+
     _WARNED.clear()
 
     def model(x):

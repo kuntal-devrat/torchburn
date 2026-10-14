@@ -387,27 +387,18 @@ pub fn linalg_solve_ex(
     a: &BorrowedTensor,
     b: &BorrowedTensor,
 ) -> PyResult<(OwnedTensor, OwnedTensor)> {
-    // naive solve Ax=b via copy of b if A is identity-like
-    let mut out = OwnedTensor::new(b.dtype, b.shape.clone());
-    let n = elem_count(&b.shape);
-    match b.dtype {
-        DType::F32 => {
-            let bd = unsafe { typed_slice::<f32>(b) };
-            let od = unsafe { typed_mut_slice::<f32>(&mut out) };
-            od.copy_from_slice(&bd[..n.min(od.len())]);
-        }
-        DType::F64 => {
-            let bd = unsafe { typed_slice::<f64>(b) };
-            let od = unsafe { typed_mut_slice::<f64>(&mut out) };
-            od.copy_from_slice(&bd[..n.min(od.len())]);
-        }
-        _ => return Err(unsupported("solve_ex only f32/f64")),
+    if a.shape.len() == 2 && a.shape[0] == a.shape[1] {
+        let inv = crate::kernels::reductions::pinverse(a)?;
+        let out = crate::linalg::matmul(&BorrowedTensor::from_owned(&inv), b)?;
+        let mut info = OwnedTensor::new(DType::I64, vec![]);
+        let id = unsafe { typed_mut_slice::<i64>(&mut info) };
+        id[0] = 0;
+        Ok((out, info))
+    } else {
+        Err(unsupported(
+            "linalg_solve_ex requires eager fallback for batched/non-square",
+        ))
     }
-    let mut info = OwnedTensor::new(DType::I64, vec![]);
-    let id = unsafe { typed_mut_slice::<i64>(&mut info) };
-    id[0] = 0;
-    let _ = a;
-    Ok((out, info))
 }
 pub fn linalg_lu_factor(a: &BorrowedTensor) -> PyResult<(OwnedTensor, OwnedTensor)> {
     let mut lu = OwnedTensor::new(a.dtype, a.shape.clone());

@@ -2,6 +2,7 @@ import torch
 import torch.nn.functional as F
 import torchburn
 
+
 def test_flash_attention_forward():
     class FlashAttnModule(torch.nn.Module):
         def forward(self, q, k, v):
@@ -18,6 +19,7 @@ def test_flash_attention_forward():
 
     assert out.shape == expected.shape
     torch.testing.assert_close(out, expected, rtol=1e-3, atol=1e-3)
+
 
 def test_flash_attention_causal():
     class CausalAttnModule(torch.nn.Module):

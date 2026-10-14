@@ -105,7 +105,7 @@ impl MetalPipelineCache {
     }
 }
 
-static METAL_DEVICE: OnceLock<MetalBackend> = OnceLock::new();
+static METAL_DEVICE: OnceLock<Option<MetalBackend>> = OnceLock::new();
 static BUFFER_CACHE: OnceLock<Mutex<MetalBufferCache>> = OnceLock::new();
 static PIPELINE_CACHE: OnceLock<Mutex<MetalPipelineCache>> = OnceLock::new();
 
@@ -119,30 +119,17 @@ impl MetalBackend {
     /// Returns `None` gracefully if no Metal device is available (non-Mac
     /// host, headless server, etc.) instead of panicking.
     pub fn instance() -> Option<&'static MetalBackend> {
-        METAL_DEVICE.get_or_init(|| {
-            match Device::system_default() {
-                Some(device) => {
+        METAL_DEVICE
+            .get_or_init(|| {
+                Device::system_default().map(|device| {
                     let command_queue = device.new_command_queue();
                     MetalBackend {
                         device,
                         command_queue,
                     }
-                }
-                None => {
-                    // Return a dummy that will be detected by the None check
-                    // below. OnceLock always inits; we use is_available()
-                    // to guard callers.
-                    return;
-                }
-            }
-        });
-        // If Device::system_default() returned None, the OnceLock body
-        // diverged (returned early). Re-check availability.
-        if Self::is_available() {
-            METAL_DEVICE.get()
-        } else {
-            None
-        }
+                })
+            })
+            .as_ref()
     }
 
     /// Get the Metal device.

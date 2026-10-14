@@ -1,18 +1,19 @@
 """
-Tests for Phase 5: graph-level operator fusion.
+Tests for graph-level operator fusion.
 
 These tests exercise the fusion planner, fused elementwise chain execution,
 GEMM epilogue fusion, and the skip-fallback safety mechanism — all through
 the torch.compile path (the registered backend).
 """
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-
 # ---------------------------------------------------------------------------
 # Helper: build a torch.compile callable against the torchburn backend
 # ---------------------------------------------------------------------------
+
 
 def _compile(model, *example_inputs):
     """Compile a model through the torchburn backend and return the callable."""
@@ -23,12 +24,14 @@ def _compile(model, *example_inputs):
 # 1. Elementwise chain fusion
 # ---------------------------------------------------------------------------
 
+
 class TestChainFusion:
     """Fused elementwise chains: add→relu→mul etc. should run without
     intermediate tensors and match torch's eager output."""
 
     def test_add_relu_mul_chain(self):
         """add → relu → mul should produce the same result as eager."""
+
         class M(nn.Module):
             def forward(self, x, y):
                 z = x + y
@@ -46,6 +49,7 @@ class TestChainFusion:
 
     def test_sigmoid_sub_chain(self):
         """sub → sigmoid chain."""
+
         class M(nn.Module):
             def forward(self, x, y):
                 return torch.sigmoid(x - y)
@@ -61,6 +65,7 @@ class TestChainFusion:
         """gelu → mul chain (common in BERT MLP).
         The fused GELU uses the tanh approximation, which differs from
         PyTorch's exact formula — tolerances are accordingly wider."""
+
         class M(nn.Module):
             def forward(self, x):
                 return F.gelu(x) * 0.5
@@ -73,6 +78,7 @@ class TestChainFusion:
 
     def test_neg_abs_add_chain(self):
         """neg → abs → add chain."""
+
         class M(nn.Module):
             def forward(self, x, y):
                 return torch.abs(-x) + y
@@ -88,6 +94,7 @@ class TestChainFusion:
 # ---------------------------------------------------------------------------
 # 2. GEMM epilogue fusion (linear → activation)
 # ---------------------------------------------------------------------------
+
 
 class TestGemmAmpilogue:
     """linear → activation should fuse the activation into the matmul output."""
@@ -134,11 +141,13 @@ class TestGemmAmpilogue:
 # 3. Broadcasting in fused chains
 # ---------------------------------------------------------------------------
 
+
 class TestFusionBroadcasting:
     """Fused elementwise chains with broadcast operands."""
 
     def test_scalar_broadcast_add_relu(self):
         """Add a scalar then relu."""
+
         class M(nn.Module):
             def forward(self, x):
                 return torch.relu(x + 1.0)
@@ -151,6 +160,7 @@ class TestFusionBroadcasting:
 
     def test_row_broadcast_mul(self):
         """Broadcast a row vector across a matrix."""
+
         class M(nn.Module):
             def forward(self, x, w):
                 return x * w
@@ -167,12 +177,14 @@ class TestFusionBroadcasting:
 # 4. Multi-output: chain members must not be exposed as graph outputs
 # ---------------------------------------------------------------------------
 
+
 class TestFusionMultiOutput:
     """Verify fusion handles graphs where intermediate chain outputs
     are requested (should fall back gracefully)."""
 
     def test_identity_passthrough(self):
         """A model that returns an intermediate (identity) should still work."""
+
         class M(nn.Module):
             def forward(self, x):
                 a = x + 1.0
@@ -190,6 +202,7 @@ class TestFusionMultiOutput:
 # 5. Fallback mechanism: unsupported ops should not crash
 # ---------------------------------------------------------------------------
 
+
 class TestFusionFallback:
     """Fusion should skip gracefully for unsupported ops, falling back
     to per-node dispatch, and the result should be correct."""
@@ -197,6 +210,7 @@ class TestFusionFallback:
     def test_reduction_breaks_chain(self):
         """A reduction in the middle of a graph breaks the fusion chain
         but should still produce correct output."""
+
         class M(nn.Module):
             def forward(self, x):
                 # x @ w produces (B, O), sum reduces to (B,), then + 1
@@ -213,6 +227,7 @@ class TestFusionFallback:
     def test_matmul_not_fused_with_unary(self):
         """matmul → activation where matmul isn't linear/addmm should not fuse
         but should still be correct."""
+
         class M(nn.Module):
             def forward(self, x, w):
                 return torch.relu(x @ w)
@@ -229,6 +244,7 @@ class TestFusionFallback:
 # 6. Transformer-style block: combination of fusions
 # ---------------------------------------------------------------------------
 
+
 class TestFusionTransformerBlock:
     """A realistic transformer block should see multiple fusion opportunities:
     linear→activation in the MLP, elementwise add chains in residuals."""
@@ -236,6 +252,7 @@ class TestFusionTransformerBlock:
     def test_mlp_block(self):
         """Two-layer MLP: LN → Linear → GELU → Linear should exercise
         both GEMM epilogue and elementwise fusion."""
+
         class MLP(nn.Module):
             def __init__(self, dim, ff):
                 super().__init__()
@@ -257,6 +274,7 @@ class TestFusionTransformerBlock:
 
     def test_residual_chain(self):
         """x + residual should be a fused add, not separate ops."""
+
         class M(nn.Module):
             def __init__(self):
                 super().__init__()
@@ -275,6 +293,7 @@ class TestFusionTransformerBlock:
 # ---------------------------------------------------------------------------
 # 7. Large tensor parallel fusion (exercises rayon threshold)
 # ---------------------------------------------------------------------------
+
 
 class TestFusionLargeTensor:
     """Large elementwise chains should exercise the parallel fused path."""

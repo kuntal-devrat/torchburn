@@ -76,20 +76,6 @@ unsafe fn dgemm(
     }
 }
 
-fn use_openblas() -> bool {
-    #[cfg(not(feature = "openblas"))]
-    {
-        false
-    }
-    #[cfg(feature = "openblas")]
-    {
-        match std::env::var("TORCHBURN_MATMUL").as_deref() {
-            Ok("matrixmultiply") | Ok("matmul") | Ok("sgemm") => false,
-            _ => true,
-        }
-    }
-}
-
 unsafe fn typed_slice<T>(t: &BorrowedTensor) -> &[T] {
     std::slice::from_raw_parts(t.data as *const T, t.buffer_len())
 }
@@ -437,57 +423,6 @@ unsafe fn dot_f32(a: *const f32, b: *const f32, len: usize) -> f32 {
 }
 
 /// C = A @ B^T where A is (M, K), B is (N, K) in memory (i.e. B^T is (K, N)).
-/// B is stored row-major (N, K): row_stride = K, col_stride = 1.
-/// To transpose, we pass row_stride = 1, col_stride = N.
-#[cfg(not(feature = "openblas"))]
-fn gemm_f32_trans_b_into(
-    a: *const f32,
-    m: usize,
-    k: usize,
-    b: *const f32,
-    b_n: usize,
-    out: *mut f32,
-    n: usize,
-) {
-    if m <= 8 && n >= 32 {
-        use rayon::prelude::*;
-        let a_p = a as usize;
-        let b_p = b as usize;
-        let out_p = out as usize;
-        (0..n).into_par_iter().for_each(|j| {
-            let a_ptr = a_p as *const f32;
-            let b_ptr = (b_p as *const f32).wrapping_add(j * k);
-            let out_ptr = out_p as *mut f32;
-            for r in 0..m {
-                let a_row = unsafe { a_ptr.add(r * k) };
-                let val = unsafe { dot_f32(a_row, b_ptr, k) };
-                unsafe {
-                    *out_ptr.add(r * n + j) = val;
-                }
-            }
-        });
-        return;
-    }
-    unsafe {
-        sgemm(
-            m,
-            k,
-            n,
-            1.0,
-            a,
-            k as isize,
-            1,
-            b,
-            1,
-            b_n as isize, // transposed: row_stride=1, col_stride=N
-            0.0,
-            out,
-            n as isize,
-            1,
-        );
-    }
-}
-
 #[cfg(not(feature = "openblas"))]
 pub fn gemm_f32_trans_b_into_accum(
     a: *const f32,
@@ -530,36 +465,6 @@ pub fn gemm_f32_trans_b_into_accum(
             1,
             b_n as isize,
             1.0,
-            out,
-            n as isize,
-            1,
-        );
-    }
-}
-
-#[cfg(not(feature = "openblas"))]
-fn gemm_f64_trans_b_into(
-    a: *const f64,
-    m: usize,
-    k: usize,
-    b: *const f64,
-    b_n: usize,
-    out: *mut f64,
-    n: usize,
-) {
-    unsafe {
-        dgemm(
-            m,
-            k,
-            n,
-            1.0,
-            a,
-            k as isize,
-            1,
-            b,
-            1,
-            b_n as isize,
-            0.0,
             out,
             n as isize,
             1,

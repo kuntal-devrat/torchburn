@@ -47,7 +47,11 @@ class TorchBurnModule(_BaseInterpreter, nn.Module):
 
     def __repr__(self) -> str:
         orig_name = type(self._original).__name__ if self._original is not None else "Module"
-        nodes = len(self.plan.get("nodes", [])) if hasattr(self, "plan") and isinstance(self.plan, dict) else 0
+        nodes = (
+            len(self.plan.get("nodes", []))
+            if hasattr(self, "plan") and isinstance(self.plan, dict)
+            else 0
+        )
         return f"<TorchBurnModule({orig_name}) nodes={nodes} handle={self._graph_handle}>"
 
     def __str__(self) -> str:

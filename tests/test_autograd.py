@@ -1,19 +1,33 @@
 """
-Tests for Phase 6: autograd backward pass.
+Tests for autograd backward pass.
 
 Gradient correctness verified against PyTorch's autograd as reference.
 """
+
+import os
+import sys
+
+import pytest
 import torch
 import torch.nn.functional as F
-import pytest
-import sys
-import os
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from torchburn.autograd import (
-    Tensor, enable, disable, reset, tape_len,
-    linear, relu, sigmoid, tanh_act, gelu, softmax,
-    mse_loss, nll_loss, cross_entropy, sum_op,
+    Tensor,
+    cross_entropy,
+    disable,
+    enable,
+    gelu,
+    linear,
+    mse_loss,
+    nll_loss,
+    relu,
+    reset,
+    sigmoid,
+    softmax,
+    sum_op,
+    tanh_act,
+    tape_len,
 )
 
 
@@ -30,6 +44,7 @@ def setup_autograd():
 # ---------------------------------------------------------------------------
 # 1. Elementwise backward (via __add__, __sub__, __mul__, __truediv__)
 # ---------------------------------------------------------------------------
+
 
 class TestElementwiseBackward:
     def test_add_grad(self):
@@ -76,6 +91,7 @@ class TestElementwiseBackward:
 # 2. Activation backward
 # ---------------------------------------------------------------------------
 
+
 class TestActivationBackward:
     def test_relu_grad(self):
         a = Tensor(torch.tensor([-1.0, 0.0, 1.0, 2.0]), requires_grad=True)
@@ -111,6 +127,7 @@ class TestActivationBackward:
 # ---------------------------------------------------------------------------
 # 3. Linear backward
 # ---------------------------------------------------------------------------
+
 
 class TestLinearBackward:
     def test_linear_no_bias(self):
@@ -151,6 +168,7 @@ class TestLinearBackward:
 # 4. Softmax backward
 # ---------------------------------------------------------------------------
 
+
 class TestSoftmaxBackward:
     def test_softmax_grad(self):
         a = Tensor(torch.randn(2, 5), requires_grad=True)
@@ -168,6 +186,7 @@ class TestSoftmaxBackward:
 # 5. Sum backward
 # ---------------------------------------------------------------------------
 
+
 class TestSumBackward:
     def test_sum_grad(self):
         a = Tensor(torch.tensor([[1.0, 2.0], [3.0, 4.0]]), requires_grad=True)
@@ -180,41 +199,43 @@ class TestSumBackward:
 # 6. Loss backward
 # ---------------------------------------------------------------------------
 
+
 class TestLossBackward:
     def test_mse_loss_grad(self):
         inp = Tensor(torch.randn(4, 4), requires_grad=True)
         target = Tensor(torch.randn(4, 4))
-        loss = mse_loss(inp, target, reduction='mean')
+        loss = mse_loss(inp, target, reduction="mean")
         loss.backward()
 
         ref = inp.data.clone().requires_grad_(True)
-        F.mse_loss(ref, target.data, reduction='mean').backward()
+        F.mse_loss(ref, target.data, reduction="mean").backward()
         torch.testing.assert_close(inp.grad, ref.grad, rtol=1e-4, atol=1e-4)
 
     def test_nll_loss_grad(self):
         inp = Tensor(torch.randn(4, 10), requires_grad=True)
         target = Tensor(torch.tensor([2, 5, 7, 3]))
-        loss = nll_loss(inp, target, reduction='mean')
+        loss = nll_loss(inp, target, reduction="mean")
         loss.backward()
 
         ref = inp.data.clone().requires_grad_(True)
-        F.nll_loss(ref, target.data.long(), reduction='mean').backward()
+        F.nll_loss(ref, target.data.long(), reduction="mean").backward()
         torch.testing.assert_close(inp.grad, ref.grad, rtol=1e-4, atol=1e-4)
 
     def test_cross_entropy_grad(self):
         inp = Tensor(torch.randn(4, 10), requires_grad=True)
         target = Tensor(torch.tensor([2, 5, 7, 3]))
-        loss = cross_entropy(inp, target, reduction='mean')
+        loss = cross_entropy(inp, target, reduction="mean")
         loss.backward()
 
         ref = inp.data.clone().requires_grad_(True)
-        F.cross_entropy(ref, target.data.long(), reduction='mean').backward()
+        F.cross_entropy(ref, target.data.long(), reduction="mean").backward()
         torch.testing.assert_close(inp.grad, ref.grad, rtol=1e-4, atol=1e-4)
 
 
 # ---------------------------------------------------------------------------
 # 7. Chained operations
 # ---------------------------------------------------------------------------
+
 
 class TestChainedOps:
     def test_add_then_relu(self):
@@ -248,6 +269,7 @@ class TestChainedOps:
 # 8. Tape management
 # ---------------------------------------------------------------------------
 
+
 class TestTapeManagement:
     def test_tape_len(self):
         a = Tensor(torch.randn(2, 2), requires_grad=True)
@@ -269,7 +291,8 @@ class TestTapeManagement:
         _ = a + a
         assert tape_len() > 0
         import torchburn._torchburn as _native
-        monkeypatch.setattr(_native, "autograd_reset", None) # trigger exception
+
+        monkeypatch.setattr(_native, "autograd_reset", None)  # trigger exception
         reset()
         assert tape_len() == 0
         enable()  # re-enable for fixture teardown

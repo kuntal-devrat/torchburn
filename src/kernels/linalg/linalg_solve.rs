@@ -2,8 +2,10 @@
 
 use super::*;
 
-pub fn lu_solve(b: &BorrowedTensor, lu_data: &BorrowedTensor) -> PyResult<OwnedTensor> {
-    crate::linalg::matmul(lu_data, b)
+pub fn lu_solve(_b: &BorrowedTensor, _lu_data: &BorrowedTensor) -> PyResult<OwnedTensor> {
+    Err(crate::dlpack::unsupported(
+        "lu_solve requires eager fallback",
+    ))
 }
 
 pub fn lu_unpack(lu_data: &BorrowedTensor) -> PyResult<(OwnedTensor, OwnedTensor, OwnedTensor)> {
@@ -11,7 +13,14 @@ pub fn lu_unpack(lu_data: &BorrowedTensor) -> PyResult<(OwnedTensor, OwnedTensor
 }
 
 pub fn linalg_solve(a: &BorrowedTensor, b: &BorrowedTensor) -> PyResult<OwnedTensor> {
-    crate::linalg::matmul(a, b)
+    if a.shape.len() == 2 && a.shape[0] == a.shape[1] {
+        let inv = crate::kernels::reductions::pinverse(a)?;
+        crate::linalg::matmul(&BorrowedTensor::from_owned(&inv), b)
+    } else {
+        Err(crate::dlpack::unsupported(
+            "linalg_solve: general batched or non-square solve requires eager fallback",
+        ))
+    }
 }
 
 pub fn linalg_inv(a: &BorrowedTensor) -> PyResult<OwnedTensor> {
@@ -30,9 +39,8 @@ pub fn linalg_slogdet(a: &BorrowedTensor) -> PyResult<(OwnedTensor, OwnedTensor)
     crate::kernels::reductions::slogdet(a)
 }
 
-pub fn linalg_cond(a: &BorrowedTensor) -> PyResult<OwnedTensor> {
-    let mut out = OwnedTensor::new(a.dtype, vec![]);
-    let od = unsafe { typed_mut_slice::<f32>(&mut out) };
-    od[0] = 1.0;
-    Ok(out)
+pub fn linalg_cond(_a: &BorrowedTensor) -> PyResult<OwnedTensor> {
+    Err(crate::dlpack::unsupported(
+        "linalg_cond requires eager fallback",
+    ))
 }

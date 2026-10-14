@@ -19,8 +19,7 @@ from __future__ import annotations
 import os
 
 import pytest
-
-import torch  # noqa: F401  (imported for side-effect-free dtype checks below)
+import torch
 import torchburn as tb
 
 MODEL = os.environ.get("TORCHBURN_TEST_MODEL", r"d:\torchburn\models\qwen_0_5b")
@@ -119,8 +118,8 @@ def test_wgpu_cpu_logit_parity_floor(quantized_model):
 
 
 def test_wgpu_prefill_and_kv_len(quantized_model):
-    from torchburn.quantization import create_wgpu_qwen_decoder
     from torchburn.llm.speculative import SpeculativeDecoder
+    from torchburn.quantization import create_wgpu_qwen_decoder
 
     try:
         gpu = create_wgpu_qwen_decoder(quantized_model, max_seq_len=256)
@@ -150,11 +149,7 @@ def test_wgpu_chunked_passes(quantized_model):
     except MemoryError as e:
         pytest.skip(f"wgpu OOM: {e}")
 
-    expected_default = (
-        dec_default.num_layers
-        if getattr(dec_default, "is_discrete", False)
-        else 6
-    )
+    expected_default = dec_default.num_layers if getattr(dec_default, "is_discrete", False) else 6
     assert dec_default.layers_per_pass == expected_default
 
     # Test explicit layers_per_pass
@@ -170,7 +165,9 @@ def test_wgpu_chunked_passes(quantized_model):
     dec_chunk3.reset_kv_cache()
     tokens_default = _greedy_stream(dec_default, n=8, start=42)
     tokens_chunk3 = _greedy_stream(dec_chunk3, n=8, start=42)
-    assert tokens_default == tokens_chunk3, "Chunked passes (3 layers/pass) diverged from default (6 layers/pass)"
+    assert tokens_default == tokens_chunk3, (
+        "Chunked passes (3 layers/pass) diverged from default (6 layers/pass)"
+    )
 
     # Test env var override
     old_val = os.environ.get("TORCHBURN_WGPU_CHUNK_LAYERS")
@@ -183,4 +180,3 @@ def test_wgpu_chunked_passes(quantized_model):
             os.environ.pop("TORCHBURN_WGPU_CHUNK_LAYERS", None)
         else:
             os.environ["TORCHBURN_WGPU_CHUNK_LAYERS"] = old_val
-

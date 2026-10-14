@@ -147,49 +147,92 @@ pub fn block_diag(tensors: &[BorrowedTensor]) -> PyResult<OwnedTensor> {
     Ok(out)
 }
 
-pub fn cartesian_prod(tensors: &[BorrowedTensor]) -> PyResult<OwnedTensor> {
-    let total_rows: i64 = tensors
-        .iter()
-        .map(|t| t.shape.first().copied().unwrap_or(1))
-        .product();
-    let total_cols = tensors.len() as i64;
-    let mut out = OwnedTensor::new(DType::F32, vec![total_rows, total_cols]);
-    let od = unsafe { typed_mut_slice::<f32>(&mut out) };
-    od.fill(0.0);
-    Ok(out)
+pub fn cartesian_prod(_tensors: &[BorrowedTensor]) -> PyResult<OwnedTensor> {
+    Err(unsupported("cartesian_prod requires eager fallback"))
 }
 
-pub fn combinations(a: &BorrowedTensor, r: usize) -> PyResult<OwnedTensor> {
-    let n = a.shape[0] as usize;
-    let out_rows = if r <= n {
-        (1..=n).product::<usize>() / ((1..=r).product::<usize>() * (1..=(n - r)).product::<usize>())
-    } else {
-        1
-    };
-    let mut out = OwnedTensor::new(a.dtype, vec![out_rows as i64, r as i64]);
-    let od = unsafe { typed_mut_slice::<f32>(&mut out) };
-    let ad = unsafe { typed_slice::<f32>(a) };
-    for i in 0..od.len() {
-        od[i] = ad[i % ad.len()];
-    }
-    Ok(out)
+pub fn combinations(_a: &BorrowedTensor, _r: usize) -> PyResult<OwnedTensor> {
+    Err(unsupported("combinations requires eager fallback"))
 }
 
 // ── 86-93. Padding ──
 pub fn pad(input: &BorrowedTensor, pad: &[i64], mode: &str, value: f64) -> PyResult<OwnedTensor> {
-    let mut out_shape = input.shape.clone();
+    if mode != "constant" {
+        return Err(unsupported(&format!(
+            "pad mode '{mode}' requires eager fallback"
+        )));
+    }
     let ndim = input.shape.len();
-    for i in 0..pad.len() / 2 {
+    let num_padded_dims = pad.len() / 2;
+    if num_padded_dims > ndim {
+        return Err(unsupported("padding dimensions exceed tensor rank"));
+    }
+    let mut out_shape = input.shape.clone();
+    for i in 0..num_padded_dims {
         let dim = ndim - 1 - i;
         out_shape[dim] += pad[2 * i] + pad[2 * i + 1];
     }
+    let out_strides = crate::dlpack::contiguous_strides(&out_shape);
     let mut out = OwnedTensor::new(input.dtype, out_shape);
-    let od = unsafe { typed_mut_slice::<f32>(&mut out) };
-    od.fill(value as f32);
-    let id = unsafe { typed_slice::<f32>(input) };
-    let copy_len = id.len().min(od.len());
-    od[..copy_len].copy_from_slice(&id[..copy_len]);
-    let _ = mode;
+    match input.dtype {
+        DType::F32 => {
+            let od = unsafe { typed_mut_slice::<f32>(&mut out) };
+            od.fill(value as f32);
+            let id = unsafe { typed_slice::<f32>(input) };
+            let in_n = elem_count(&input.shape);
+            let mut in_coords = vec![0usize; ndim];
+            for i in 0..in_n {
+                let mut rem = i;
+                for d in (0..ndim).rev() {
+                    let s = input.shape[d].max(1) as usize;
+                    in_coords[d] = rem % s;
+                    rem /= s;
+                }
+                let mut out_idx = 0usize;
+                for d in 0..ndim {
+                    let pad_before = if d >= ndim - num_padded_dims {
+                        let pad_idx = (ndim - 1 - d) * 2;
+                        pad[pad_idx].max(0) as usize
+                    } else {
+                        0
+                    };
+                    out_idx += (in_coords[d] + pad_before) * (out_strides[d] as usize);
+                }
+                if out_idx < od.len() {
+                    od[out_idx] = id[i];
+                }
+            }
+        }
+        DType::F64 => {
+            let od = unsafe { typed_mut_slice::<f64>(&mut out) };
+            od.fill(value);
+            let id = unsafe { typed_slice::<f64>(input) };
+            let in_n = elem_count(&input.shape);
+            let mut in_coords = vec![0usize; ndim];
+            for i in 0..in_n {
+                let mut rem = i;
+                for d in (0..ndim).rev() {
+                    let s = input.shape[d].max(1) as usize;
+                    in_coords[d] = rem % s;
+                    rem /= s;
+                }
+                let mut out_idx = 0usize;
+                for d in 0..ndim {
+                    let pad_before = if d >= ndim - num_padded_dims {
+                        let pad_idx = (ndim - 1 - d) * 2;
+                        pad[pad_idx].max(0) as usize
+                    } else {
+                        0
+                    };
+                    out_idx += (in_coords[d] + pad_before) * (out_strides[d] as usize);
+                }
+                if out_idx < od.len() {
+                    od[out_idx] = id[i];
+                }
+            }
+        }
+        _ => return Err(unsupported("pad only supports f32/f64")),
+    }
     Ok(out)
 }
 

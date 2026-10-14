@@ -2,6 +2,7 @@
 
 import os
 import threading
+
 import pytest
 import torch
 import torchburn
@@ -116,11 +117,9 @@ def test_wgpu_int4_gemv_concurrency_and_cache():
 
     def worker(worker_id):
         try:
-            for i in range(10):
+            for _i in range(10):
                 x = torch.randn(cols, dtype=torch.float32)
-                y = torchburn.quantization.wgpu_w4a32_grouped_linear(
-                    x, w, scales, None, group_size
-                )
+                y = torchburn.quantization.wgpu_w4a32_grouped_linear(x, w, scales, None, group_size)
                 assert y.shape == (rows,)
                 assert not torch.isnan(y).any()
         except Exception as e:
@@ -227,7 +226,7 @@ def test_device_routing_env_checks():
 
 def test_llm_engine_stream_metrics_precision():
     """Verify that generate_stream emits valid float metrics and avoids wasted steps."""
-    from torchburn.llm import ModelConfig, UniversalTransformer, GenerationConfig, EngineConfig
+    from torchburn.llm import EngineConfig, GenerationConfig, ModelConfig, UniversalTransformer
     from torchburn.llm.engine import UniversalEngine
 
     cfg = ModelConfig(
@@ -244,8 +243,10 @@ def test_llm_engine_stream_metrics_precision():
 
     class MockTokenizer:
         eos_token_id = 99
+
         def encode(self, text):
             return [1, 2]
+
         def decode(self, ids, skip_special_tokens=False):
             return "tok"
 
@@ -254,7 +255,9 @@ def test_llm_engine_stream_metrics_precision():
     engine._wgpu_decoder = None
 
     # Test max_new_tokens=1
-    packets = list(engine.generate_stream("test", GenerationConfig(max_new_tokens=1, temperature=0.0)))
+    packets = list(
+        engine.generate_stream("test", GenerationConfig(max_new_tokens=1, temperature=0.0))
+    )
     summary = next(p for p in packets if p["type"] == "summary")
     assert summary["tokens_generated"] == 1
     assert isinstance(summary["avg_ms_per_token"], float)
@@ -262,7 +265,9 @@ def test_llm_engine_stream_metrics_precision():
     assert "decode_latency_sec" in summary
 
     # Test max_new_tokens=3
-    packets3 = list(engine.generate_stream("test", GenerationConfig(max_new_tokens=3, temperature=0.0)))
+    packets3 = list(
+        engine.generate_stream("test", GenerationConfig(max_new_tokens=3, temperature=0.0))
+    )
     summary3 = next(p for p in packets3 if p["type"] == "summary")
     assert summary3["tokens_generated"] == 3
     assert isinstance(summary3["avg_ms_per_token"], float)
@@ -271,7 +276,7 @@ def test_llm_engine_stream_metrics_precision():
 
 def test_llm_engine_stream_vs_batch_native():
     """Verify stream=True uses decode_and_sample while generate() uses generate_loop."""
-    from torchburn.llm import ModelConfig, UniversalTransformer, GenerationConfig, EngineConfig
+    from torchburn.llm import EngineConfig, GenerationConfig, ModelConfig, UniversalTransformer
     from torchburn.llm.engine import UniversalEngine
 
     cfg = ModelConfig(
@@ -286,8 +291,10 @@ def test_llm_engine_stream_vs_batch_native():
 
     class MockTokenizer:
         eos_token_id = 99
+
         def encode(self, text):
             return [1, 2]
+
         def decode(self, ids, skip_special_tokens=False):
             return "tok"
 
@@ -297,15 +304,20 @@ def test_llm_engine_stream_vs_batch_native():
         def __init__(self):
             self.generate_loop_called = False
             self.decode_and_sample_called = 0
+
         def kv_len(self):
             return 0
+
         def prefill_tokens(self, tokens, offset):
             pass
+
         def get_logits(self):
             return [0.0] * 100
+
         def generate_loop(self, next_token, seq_len, max_new_tokens, *args):
             self.generate_loop_called = True
             return [10, 11], seq_len + 2
+
         def decode_and_sample(self, next_token, offset, *args):
             self.decode_and_sample_called += 1
             return 10
@@ -314,7 +326,11 @@ def test_llm_engine_stream_vs_batch_native():
     engine._rust_decoder = mock
 
     # When streaming (default stream=True), generate_loop must NOT be called
-    packets = list(engine.generate_stream("test", GenerationConfig(max_new_tokens=2, temperature=0.0), stream=True))
+    packets = list(
+        engine.generate_stream(
+            "test", GenerationConfig(max_new_tokens=2, temperature=0.0), stream=True
+        )
+    )
     assert mock.generate_loop_called is False
     assert mock.decode_and_sample_called == 1
     tokens = [p for p in packets if p["type"] == "token"]
@@ -328,7 +344,7 @@ def test_llm_engine_stream_vs_batch_native():
 
 def test_op_registry_chunk_and_scatter():
     """Verify chunk and scatter ops are registered in _FUNCTION_TO_OP, _ATEN_TO_OP, and _METHOD_TO_OP."""
-    from torchburn._parser.op_registry import _FUNCTION_TO_OP, _ATEN_TO_OP, _METHOD_TO_OP
+    from torchburn._parser.op_registry import _ATEN_TO_OP, _FUNCTION_TO_OP, _METHOD_TO_OP
 
     assert _FUNCTION_TO_OP.get("torch.chunk") == "chunk"
     assert _ATEN_TO_OP.get("aten.chunk") == "chunk"
@@ -360,10 +376,16 @@ def test_quantized_linear_device_routing():
         if dev_env in ("cpu", "native_cpu"):
             gpu_preferred = False
         else:
-            gpu_preferred = (
-                layer.backend in ("gpu", "igpu", "dgpu", "wgpu", "burn-wgpu", "vulkan", "dx12", "metal")
-                or dev_env in ("gpu", "igpu", "dgpu", "wgpu", "burn-wgpu", "vulkan", "dx12", "metal")
-            )
+            gpu_preferred = layer.backend in (
+                "gpu",
+                "igpu",
+                "dgpu",
+                "wgpu",
+                "burn-wgpu",
+                "vulkan",
+                "dx12",
+                "metal",
+            ) or dev_env in ("gpu", "igpu", "dgpu", "wgpu", "burn-wgpu", "vulkan", "dx12", "metal")
         assert gpu_preferred is False
     finally:
         os.environ.pop("TORCHBURN_DEVICE", None)
@@ -373,10 +395,16 @@ def test_quantized_linear_device_routing():
         os.environ["TORCHBURN_DEVICE"] = dev
         try:
             dev_env = os.environ.get("TORCHBURN_DEVICE", "").strip().lower()
-            gpu_preferred = (
-                layer.backend in ("gpu", "igpu", "dgpu", "wgpu", "burn-wgpu", "vulkan", "dx12", "metal")
-                or dev_env in ("gpu", "igpu", "dgpu", "wgpu", "burn-wgpu", "vulkan", "dx12", "metal")
-            )
+            gpu_preferred = layer.backend in (
+                "gpu",
+                "igpu",
+                "dgpu",
+                "wgpu",
+                "burn-wgpu",
+                "vulkan",
+                "dx12",
+                "metal",
+            ) or dev_env in ("gpu", "igpu", "dgpu", "wgpu", "burn-wgpu", "vulkan", "dx12", "metal")
             assert gpu_preferred is True, f"Failed for device {dev}"
         finally:
             os.environ.pop("TORCHBURN_DEVICE", None)
@@ -403,7 +431,9 @@ def test_fused_add_rmsnorm_compat_shader_source():
     """Verify that fused_add_rmsnorm_compat.wgsl exists and is free of subgroup builtins."""
     import pathlib
 
-    shader_path = pathlib.Path(__file__).parent.parent / "src" / "shaders" / "fused_add_rmsnorm_compat.wgsl"
+    shader_path = (
+        pathlib.Path(__file__).parent.parent / "src" / "shaders" / "fused_add_rmsnorm_compat.wgsl"
+    )
     assert shader_path.is_file(), "fused_add_rmsnorm_compat.wgsl must exist"
     content = shader_path.read_text(encoding="utf-8")
     assert "subgroupAdd" not in content, "compat shader must not contain subgroupAdd"
@@ -431,7 +461,8 @@ def test_chunk_parity_and_no_fallback():
 
     # Ensure no eager fallback warning was triggered
     fallback_warnings = [
-        w for w in recorded
+        w
+        for w in recorded
         if "falling back to eager PyTorch" in str(w.message) and "chunk" in str(w.message)
     ]
     assert len(fallback_warnings) == 0, f"Unexpected fallback warnings: {fallback_warnings}"
@@ -440,6 +471,7 @@ def test_chunk_parity_and_no_fallback():
 def test_layer_norm_eval_no_fallback():
     """Verify LayerNorm executes natively in inference/eval without eager fallback."""
     import warnings
+
     import torch.nn as nn
 
     ln = nn.LayerNorm(4)
@@ -455,7 +487,8 @@ def test_layer_norm_eval_no_fallback():
     assert torch.allclose(tb_out, pt_out, atol=1e-5)
 
     fallback_warnings = [
-        w for w in recorded
+        w
+        for w in recorded
         if "falling back to eager PyTorch" in str(w.message) and "layer_norm" in str(w.message)
     ]
     assert len(fallback_warnings) == 0, f"Unexpected fallback warnings: {fallback_warnings}"
@@ -535,7 +568,9 @@ def test_attn_decode_shader_bounds():
     assert shader_path.is_file(), "attn_decode.wgsl must exist"
     content = shader_path.read_text(encoding="utf-8")
     assert "array<vec4<f32>, 4>" in content, "shader must allocate 4 vec4s for high head_dim"
-    assert "min((total_vec4 + 63u) / 64u, 4u)" in content, "shader must clamp passes to array capacity"
+    assert "min((total_vec4 + 63u) / 64u, 4u)" in content, (
+        "shader must clamp passes to array capacity"
+    )
 
 
 def test_memory_pool_peak_cached_words():
@@ -552,9 +587,108 @@ def test_wgpu_decoder_device_loss_attributes():
     if native_mod is None or not hasattr(native_mod, "WgpuQwenDecoder"):
         pytest.skip("WgpuQwenDecoder not compiled in this build")
 
-    cls = getattr(native_mod, "WgpuQwenDecoder")
+    cls = native_mod.WgpuQwenDecoder
     assert hasattr(cls, "is_device_lost")
     assert hasattr(cls, "mark_device_lost")
 
 
+def test_unary_op_non_contiguous_strides():
+    """Verify that unary math ops (asin, acos, sinh, cosh, atan) produce exact
+    parity on non-contiguous sliced tensors without stride corruption."""
+    from torchburn import _torchburn as native
 
+    x = torch.linspace(-0.8, 0.8, 20).reshape(4, 5)
+    sliced = x[:, ::2]  # non-contiguous view with stride (5, 2)
+    assert not sliced.is_contiguous()
+
+    for op in ["asin", "acos", "sinh", "cosh", "atan"]:
+        payload = {
+            "inputs": [{"shape": list(sliced.shape), "dtype": "f32"}],
+            "nodes": [{"id": 0, "target": op, "args": [{"kind": "slot", "index": 0}]}],
+            "outputs": [0],
+        }
+        res = native.execute_from_dict(payload, [sliced.__dlpack__()])
+        out = torch.from_dlpack(res[0])
+        expected = getattr(torch, op)(sliced)
+        assert torch.allclose(out, expected, atol=1e-5), f"Mismatch for {op} on non-contiguous view"
+
+
+def test_multidim_broadcasting_correctness():
+    """Verify that binary ops (atan2, remainder, hypot, fmod) correctly broadcast
+    across multi-dimensional shapes ([4, 1] vs [4, 3]) without flat modulo corruption."""
+    from torchburn import _torchburn as native
+
+    a = torch.tensor([[1.0], [2.0], [3.0], [4.0]])
+    b = torch.tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0], [10.0, 11.0, 12.0]])
+
+    payload = {
+        "inputs": [
+            {"shape": list(a.shape), "dtype": "f32"},
+            {"shape": list(b.shape), "dtype": "f32"},
+        ],
+        "nodes": [
+            {
+                "id": 0,
+                "target": "atan2",
+                "args": [{"kind": "slot", "index": 0}, {"kind": "slot", "index": 1}],
+            }
+        ],
+        "outputs": [0],
+    }
+    res = native.execute_from_dict(payload, [a.__dlpack__(), b.__dlpack__()])
+    out = torch.from_dlpack(res[0])
+    expected = torch.atan2(a, b)
+    assert torch.allclose(out, expected, atol=1e-5)
+
+
+def test_linalg_solve_mathematical_accuracy():
+    """Verify that linalg_solve accurately solves A X = B (not A * B)."""
+    from torchburn import _torchburn as native
+
+    A = torch.tensor([[3.0, 1.0], [1.0, 2.0]], dtype=torch.float32)
+    B = torch.tensor([[9.0], [8.0]], dtype=torch.float32)
+
+    payload = {
+        "inputs": [
+            {"shape": list(A.shape), "dtype": "f32"},
+            {"shape": list(B.shape), "dtype": "f32"},
+        ],
+        "nodes": [
+            {
+                "id": 0,
+                "target": "linalg_solve",
+                "args": [{"kind": "slot", "index": 0}, {"kind": "slot", "index": 1}],
+            }
+        ],
+        "outputs": [0],
+    }
+    res = native.execute_from_dict(payload, [A.__dlpack__(), B.__dlpack__()])
+    out = torch.from_dlpack(res[0])
+    # Expected solution to 3x + y = 9 and x + 2y = 8 is x = 2, y = 3
+    expected = torch.tensor([[2.0], [3.0]], dtype=torch.float32)
+    assert torch.allclose(out, expected, atol=1e-4)
+
+
+def test_constant_pad_coordinate_accuracy():
+    """Verify that pad properly places input values at spatial offsets."""
+    from torchburn import _torchburn as native
+
+    x = torch.tensor([[1.0, 2.0], [3.0, 4.0]], dtype=torch.float32)
+    # pad left=1, right=1, top=2, bottom=2
+    pad_spec = [1, 1, 2, 2]
+    payload = {
+        "inputs": [{"shape": [2, 2], "dtype": "f32"}],
+        "nodes": [
+            {
+                "id": 0,
+                "target": "constant_pad_nd",
+                "args": [{"kind": "slot", "index": 0}],
+                "kwargs": {"pad": pad_spec, "value": 0.0},
+            }
+        ],
+        "outputs": [0],
+    }
+    res = native.execute_from_dict(payload, [x.__dlpack__()])
+    out = torch.from_dlpack(res[0])
+    expected = torch.nn.functional.pad(x, pad_spec, mode="constant", value=0.0)
+    assert torch.allclose(out, expected)

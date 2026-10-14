@@ -24,6 +24,7 @@ use super::*;
 // ════════════════════════════════════════════════════════════════════════════
 
 pub const V2_BLOCK_BYTES: usize = 34;
+#[allow(dead_code)]
 pub const V2_PACKED_BYTES: usize = 32;
 
 /// IEEE-754 binary16 -> binary32 (no dependency on the `half` crate).

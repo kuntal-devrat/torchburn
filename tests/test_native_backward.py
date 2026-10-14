@@ -1,6 +1,7 @@
 """Tests for native backward activation & embedding kernels, training batch norm, and end-to-end AOTAutograd training."""
 
 import json
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -11,7 +12,9 @@ from torchburn._parser.op_registry import _ATEN_TO_OP
 def run_plan(plan, inputs):
     capsules = [torch.to_dlpack(t.contiguous()) for t in inputs]
     dtype_map = {torch.float32: "f32", torch.float64: "f64", torch.int64: "i64", torch.int32: "i32"}
-    plan["inputs"] = [{"shape": list(t.shape), "dtype": dtype_map.get(t.dtype, "f32")} for t in inputs]
+    plan["inputs"] = [
+        {"shape": list(t.shape), "dtype": dtype_map.get(t.dtype, "f32")} for t in inputs
+    ]
     out_capsules = _native.execute(json.dumps(plan), capsules)
     return [torch.from_dlpack(c) for c in out_capsules]
 
@@ -182,7 +185,11 @@ class TestNativeBackwardMath:
                     "id": 2,
                     "target": "embedding_backward",
                     "args": [{"kind": "input", "index": 0}, {"kind": "input", "index": 1}],
-                    "kwargs": {"num_weights": num_embeddings, "padding_idx": -1, "scale_grad_by_freq": False},
+                    "kwargs": {
+                        "num_weights": num_embeddings,
+                        "padding_idx": -1,
+                        "scale_grad_by_freq": False,
+                    },
                 }
             ],
             "outputs": [2],
@@ -198,7 +205,9 @@ class TestNativeBackwardMath:
         bias = torch.randn(16)
 
         # PyTorch training batch norm
-        expected = F.batch_norm(x, running_mean, running_var, weight, bias, training=True, momentum=0.1, eps=1e-5)
+        expected = F.batch_norm(
+            x, running_mean, running_var, weight, bias, training=True, momentum=0.1, eps=1e-5
+        )
 
         plan = {
             "inputs": [0, 1, 2, 3, 4],
@@ -374,6 +383,7 @@ class TestConcurrencyAndStrides:
     def test_autograd_multithreaded_backwards(self):
         """Verify autograd lock minimization by running parallel backward loops."""
         import threading
+
         import torchburn.autograd as ta
 
         errors = []

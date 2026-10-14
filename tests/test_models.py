@@ -1,23 +1,26 @@
 """
-Tests for Phase 13: Model-Level Validation.
+Tests for Model-Level Validation.
 
 Tests ResNet-18 and BERT-Tiny correctness through torch.compile with torchburn.
 Verifies output matches PyTorch eager within atol=1e-3.
 """
+
+import os
+import sys
+import time
+
+import pytest
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import pytest
-import sys
-import os
-import time
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 
 # ---------------------------------------------------------------------------
 # ResNet-18
 # ---------------------------------------------------------------------------
+
 
 class BasicBlock(nn.Module):
     def __init__(self, in_c, out_c, stride=1):
@@ -76,6 +79,7 @@ class TestResNet18:
     @pytest.fixture(autouse=True)
     def _reset_dynamo(self):
         torch._dynamo.reset()
+
     def test_resnet18_inference(self):
         """ResNet-18 inference matches PyTorch eager."""
         model = ResNet18(num_classes=10)
@@ -87,8 +91,7 @@ class TestResNet18:
             compiled = torch.compile(model, backend="torchburn")
             out = compiled(x)
 
-        assert torch.allclose(ref, out, atol=1e-3), \
-            f"max diff: {(ref - out).abs().max().item()}"
+        assert torch.allclose(ref, out, atol=1e-3), f"max diff: {(ref - out).abs().max().item()}"
 
     def test_resnet18_batch(self):
         """ResNet-18 with batch size > 1."""
@@ -101,8 +104,7 @@ class TestResNet18:
             compiled = torch.compile(model, backend="torchburn")
             out = compiled(x)
 
-        assert torch.allclose(ref, out, atol=1e-3), \
-            f"max diff: {(ref - out).abs().max().item()}"
+        assert torch.allclose(ref, out, atol=1e-3), f"max diff: {(ref - out).abs().max().item()}"
 
     def test_resnet18_fallback_coverage(self):
         """Check what percentage of ops are native."""
@@ -111,6 +113,7 @@ class TestResNet18:
         x = torch.randn(1, 3, 224, 224)
 
         import warnings
+
         with warnings.catch_warnings(record=True) as w:
             warnings.simplefilter("always")
             compiled = torch.compile(model, backend="torchburn")
@@ -127,15 +130,18 @@ class TestResNet18:
 # BERT-Tiny
 # ---------------------------------------------------------------------------
 
+
 class BertTiny(nn.Module):
     def __init__(self, vocab=30522, hidden=128, num_heads=2, num_layers=2, num_classes=2):
         super().__init__()
         self.embed = nn.Embedding(vocab, hidden)
         self.pos_embed = nn.Embedding(512, hidden)
         encoder_layer = nn.TransformerEncoderLayer(
-            d_model=hidden, nhead=num_heads,
-            dim_feedforward=hidden * 4, batch_first=True,
-            activation='gelu',
+            d_model=hidden,
+            nhead=num_heads,
+            dim_feedforward=hidden * 4,
+            batch_first=True,
+            activation="gelu",
         )
         self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
         self.classifier = nn.Linear(hidden, num_classes)
@@ -167,8 +173,7 @@ class TestBertTiny:
             compiled = torch.compile(model, backend="torchburn")
             out = compiled(input_ids)
 
-        assert torch.allclose(ref, out, atol=0.08), \
-            f"max diff: {(ref - out).abs().max().item()}"
+        assert torch.allclose(ref, out, atol=0.08), f"max diff: {(ref - out).abs().max().item()}"
 
     def test_bert_tiny_single(self):
         """BERT-Tiny with batch size 1."""
@@ -182,8 +187,7 @@ class TestBertTiny:
             compiled = torch.compile(model, backend="torchburn")
             out = compiled(input_ids)
 
-        assert torch.allclose(ref, out, atol=0.08), \
-            f"max diff: {(ref - out).abs().max().item()}"
+        assert torch.allclose(ref, out, atol=0.08), f"max diff: {(ref - out).abs().max().item()}"
 
     def test_bert_tiny_fallback_coverage(self):
         """Check what percentage of ops are native."""
@@ -192,6 +196,7 @@ class TestBertTiny:
         input_ids = torch.randint(0, 30522, (2, 128))
 
         import warnings
+
         with warnings.catch_warnings(record=True) as w:
             warnings.simplefilter("always")
             compiled = torch.compile(model, backend="torchburn")
@@ -207,6 +212,7 @@ class TestBertTiny:
 # ---------------------------------------------------------------------------
 # Small Transformer Block
 # ---------------------------------------------------------------------------
+
 
 class TransformerBlock(nn.Module):
     def __init__(self, d_model=128, n_heads=4, d_ff=512):
@@ -233,6 +239,7 @@ class TestTransformerBlock:
     @pytest.fixture(autouse=True)
     def _reset_dynamo(self):
         torch._dynamo.reset()
+
     def test_transformer_block(self):
         """Transformer block inference matches PyTorch eager."""
         model = TransformerBlock(d_model=128, n_heads=4)
@@ -244,18 +251,19 @@ class TestTransformerBlock:
             compiled = torch.compile(model, backend="torchburn")
             out = compiled(x)
 
-        assert torch.allclose(ref, out, atol=1e-3), \
-            f"max diff: {(ref - out).abs().max().item()}"
+        assert torch.allclose(ref, out, atol=1e-3), f"max diff: {(ref - out).abs().max().item()}"
 
 
 # ---------------------------------------------------------------------------
 # Benchmark Suite
 # ---------------------------------------------------------------------------
 
+
 class TestBenchmarkSuite:
     @pytest.fixture(autouse=True)
     def _reset_dynamo(self):
         torch._dynamo.reset()
+
     def test_benchmark_vision(self):
         """Benchmark ResNet-18 inference."""
         model = ResNet18(num_classes=10)
@@ -283,7 +291,7 @@ class TestBenchmarkSuite:
 
             ms_per_iter = elapsed / N * 1000
             ms_per_iter_eager = elapsed_eager / N * 1000
-            print(f"\nResNet-18 benchmark:")
+            print("\nResNet-18 benchmark:")
             print(f"  torchburn: {ms_per_iter:.1f} ms/iter")
             print(f"  eager:     {ms_per_iter_eager:.1f} ms/iter")
             print(f"  ratio:     {ms_per_iter / ms_per_iter_eager:.2f}x")
@@ -315,7 +323,7 @@ class TestBenchmarkSuite:
 
             ms_per_iter = elapsed / N * 1000
             ms_per_iter_eager = elapsed_eager / N * 1000
-            print(f"\nBERT-Tiny benchmark:")
+            print("\nBERT-Tiny benchmark:")
             print(f"  torchburn: {ms_per_iter:.1f} ms/iter")
             print(f"  eager:     {ms_per_iter_eager:.1f} ms/iter")
             print(f"  ratio:     {ms_per_iter / ms_per_iter_eager:.2f}x")

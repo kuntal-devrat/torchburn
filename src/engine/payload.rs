@@ -116,33 +116,6 @@ pub(crate) enum Slot {
     },
     Tuple(Vec<OwnedTensor>),
 }
-impl Slot {
-    /// Take an element from a Tuple slot, leaving a None placeholder.
-    /// Returns None if the slot is not a Tuple or the index is out of bounds.
-    pub(crate) fn take_tuple_elem(&mut self, index: usize) -> Option<OwnedTensor> {
-        match self {
-            Slot::Tuple(elems) => {
-                if index < elems.len() {
-                    Some(std::mem::take(&mut elems[index]))
-                } else {
-                    None
-                }
-            }
-            _ => None,
-        }
-    }
-
-    pub(crate) fn is_tuple(&self) -> bool {
-        matches!(self, Slot::Tuple(_))
-    }
-
-    pub(crate) fn tuple_len(&self) -> usize {
-        match self {
-            Slot::Tuple(elems) => elems.len(),
-            _ => 0,
-        }
-    }
-}
 
 /// All supported targets — keep in sync with _parser.py.
 /// Uses OnceLock to avoid allocating ~450 Strings on every call.

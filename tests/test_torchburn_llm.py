@@ -1,6 +1,7 @@
 """Tests for TorchBurn Universal LLM API and UniversalTransformer architecture."""
 
 import os
+
 import pytest
 import torch
 import torchburn as tb
@@ -57,7 +58,7 @@ def test_universal_transformer_forward_and_decode():
     assert logits.shape == (1, 4, 1000)
     assert len(kv_caches) == 2
     # Verify KV cache shapes: [1, 2, 4, 64]
-    k, v = kv_caches[0]
+    k, _ = kv_caches[0]
     assert k.shape == (1, 2, 4, 64)
 
     # Decode step (batch=1, seq_len=1, offset=4)
@@ -121,4 +122,3 @@ def test_wgpu_decoder_igpu():
     resp = llm.generate("The capital of France is", max_tokens=8, temperature=0.0)
     assert isinstance(resp, str)
     assert len(resp) > 0
-

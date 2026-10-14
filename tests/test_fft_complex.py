@@ -1,6 +1,7 @@
 import torch
 import torchburn
 
+
 def test_complex_and_real_imag():
     class ComplexOpsModule(torch.nn.Module):
         def forward(self, re, im):
@@ -19,6 +20,7 @@ def test_complex_and_real_imag():
     expected = mod(re, im)
 
     torch.testing.assert_close(out, expected, rtol=1e-4, atol=1e-4)
+
 
 def test_fft_shifts():
     class FFTShiftModule(torch.nn.Module):

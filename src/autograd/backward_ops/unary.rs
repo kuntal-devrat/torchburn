@@ -5,6 +5,7 @@ use super::super::*;
 // --- Unary backward ops: relu, sigmoid, tanh, gelu, abs, neg, exp, log, sqrt, etc. ---
 
 #[derive(Clone, Copy)]
+#[allow(dead_code)]
 pub(crate) enum UnaryOpType {
     Relu,
     Sigmoid,
@@ -31,7 +32,6 @@ pub(crate) enum UnaryOpType {
 }
 
 struct UnaryBackward {
-    #[allow(dead_code)]
     op_type: UnaryOpType,
     input_id: usize,
     /// Op parameters (e.g. negative_slope for leaky_relu, exp for pow).

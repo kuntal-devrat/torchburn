@@ -1,23 +1,25 @@
 """
-Tests for Phase 11: GPU Execution via wgpu.
+Tests for GPU Execution via wgpu.
 
 Tests device detection, TORCHBURN_DEVICE env var, GPU info API,
 and GPU execution correctness for elementwise, matmul, and transformer ops.
 """
+
 import os
-import torch
-import torch.nn.functional as F
-import pytest
 import sys
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+import pytest
+import torch
+import torch.nn.functional as F
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import torchburn
 from torchburn import _torchburn
-
 
 # ---------------------------------------------------------------------------
 # GPU Detection & Info
 # ---------------------------------------------------------------------------
+
 
 class TestGPUDetection:
     def test_gpu_info_returns_dict(self):
@@ -58,10 +60,15 @@ class TestGPUDetection:
         """gpu_backend() matches gpu_info()['backend']."""
         assert torchburn.gpu_backend() == torchburn.gpu_info()["backend"]
 
+    def test_is_metal_available_returns_bool(self):
+        """is_metal_available() returns a boolean across all platforms."""
+        assert isinstance(torchburn.is_metal_available(), bool)
+
 
 # ---------------------------------------------------------------------------
 # Device Override (TORCHBURN_DEVICE)
 # ---------------------------------------------------------------------------
+
 
 class TestDeviceOverride:
     def test_device_override_cpu(self):
@@ -93,6 +100,7 @@ class TestDeviceOverride:
 # ---------------------------------------------------------------------------
 # GPU Execution Correctness
 # ---------------------------------------------------------------------------
+
 
 class TestGPUElementwise:
     """Elementwise ops should produce correct results on GPU."""
@@ -254,7 +262,7 @@ class TestGPUTransformer:
                 q = q.transpose(1, 2)
                 k = k.transpose(1, 2)
                 v = v.transpose(1, 2)
-                att = (q @ k.transpose(-2, -1)) * (self.head_dim ** -0.5)
+                att = (q @ k.transpose(-2, -1)) * (self.head_dim**-0.5)
                 att = torch.softmax(att, dim=-1)
                 out = att @ v
                 out = out.transpose(1, 2).reshape(B, T, C)
@@ -271,6 +279,7 @@ class TestGPUTransformer:
 # Engine Selection
 # ---------------------------------------------------------------------------
 
+
 class TestEngineSelection:
     def test_active_engine_reflects_env(self):
         """active_engine() returns the expected engine name."""
@@ -284,9 +293,11 @@ class TestEngineSelection:
 # Fallback behavior
 # ---------------------------------------------------------------------------
 
+
 class TestGPUFallback:
     def test_unsupported_op_falls_back(self):
         """Unsupported ops fall back to eager PyTorch correctly."""
+
         class M(torch.nn.Module):
             def forward(self, x):
                 return torch.erf(x)  # unsupported -> eager
@@ -299,11 +310,12 @@ class TestGPUFallback:
 
     def test_mixed_native_and_fallback(self):
         """Mix of native and fallback ops produces correct results."""
+
         class M(torch.nn.Module):
             def forward(self, x, y):
-                a = x + y         # native
+                a = x + y  # native
                 b = torch.erf(a)  # fallback
-                c = b * x         # native
+                c = b * x  # native
                 return c
 
         m = M()

@@ -18,9 +18,6 @@ unsafe fn typed_slice<T>(t: &BorrowedTensor) -> &[T] {
 unsafe fn typed_mut_slice<T>(t: &mut OwnedTensor) -> &mut [T] {
     std::slice::from_raw_parts_mut(t.data.as_mut_ptr() as *mut T, t.elem_count())
 }
-
-const PAR_CHUNK: usize = 16 * 1024;
-
 // ---------------------------------------------------------------------------
 // Comparison ops — return f32 (1.0/0.0) so results stay in the float engine
 // ---------------------------------------------------------------------------

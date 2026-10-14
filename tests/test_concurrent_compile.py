@@ -9,9 +9,10 @@ Validates:
 
 import os
 import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
 import torch
 import torch.nn as nn
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -64,7 +65,9 @@ def test_concurrent_compile_distinct_models():
         compiled = torch.compile(model, backend="torchburn")
         expected = model(inp)
         actual = compiled(inp)
-        assert torch.allclose(actual, expected, atol=1e-3, rtol=1e-3), f"Parity mismatch in thread {idx}"
+        assert torch.allclose(actual, expected, atol=1e-3, rtol=1e-3), (
+            f"Parity mismatch in thread {idx}"
+        )
         return idx
 
     with ThreadPoolExecutor(max_workers=8) as executor:

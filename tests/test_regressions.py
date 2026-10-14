@@ -10,6 +10,7 @@ class TestExpandDimMinusOne:
     def _run(self, fn, shape):
         from torch.fx.experimental.proxy_tensor import make_fx
         from torchburn._compiled import BurnCompiledCallable
+
         x = torch.randn(*shape)
         gm = make_fx(fn)(x)
         cb = BurnCompiledCallable(gm, [x])
@@ -21,18 +22,21 @@ class TestExpandDimMinusOne:
         # unsqueeze(0) on (4,8) -> (1,4,8), expand(3, -1, -1) -> (3,4,8)
         def fn(x):
             return x.unsqueeze(0).expand(3, -1, -1)
+
         self._run(fn, (4, 8))
 
     def test_expand_minus1_broadcast(self):
         # unsqueeze(0) on (1,4,8) -> (1,1,4,8), expand(-1, 5, -1, -1) -> (1,5,4,8)
         def fn(x):
             return x.unsqueeze(0).expand(-1, 5, -1, -1)
+
         self._run(fn, (1, 4, 8))
 
     def test_expand_minus1_multiple(self):
         # (2,4) -> unsqueeze(0) -> (1,2,4), expand(3, -1, -1) -> (3,2,4)
         def fn(x):
             return x.unsqueeze(0).expand(-1, -1, 4)
+
         self._run(fn, (2, 4))
 
 
@@ -42,6 +46,7 @@ class TestMultiNorm:
     def _run(self, fn, shape=(4, 8), atol=1e-4):
         from torch.fx.experimental.proxy_tensor import make_fx
         from torchburn._compiled import BurnCompiledCallable
+
         x = torch.randn(*shape)
         gm = make_fx(fn)(x)
         cb = BurnCompiledCallable(gm, [x])
@@ -56,7 +61,7 @@ class TestMultiNorm:
         self._run(lambda x: torch.linalg.vector_norm(x, ord=2, dim=1))
 
     def test_linf_norm(self):
-        self._run(lambda x: torch.linalg.vector_norm(x, ord=float('inf'), dim=1))
+        self._run(lambda x: torch.linalg.vector_norm(x, ord=float("inf"), dim=1))
 
     def test_l0_norm(self):
         self._run(lambda x: torch.linalg.vector_norm(x, ord=0, dim=1))
@@ -74,8 +79,10 @@ class TestMixedPrecision:
     def test_fp16_add(self):
         def fn(x):
             return x + x
+
         from torch.fx.experimental.proxy_tensor import make_fx
         from torchburn._compiled import BurnCompiledCallable
+
         x = torch.randn(4, 8, dtype=torch.float16)
         gm = make_fx(fn)(x)
         cb = BurnCompiledCallable(gm, [x])
@@ -86,8 +93,10 @@ class TestMixedPrecision:
     def test_bf16_add(self):
         def fn(x):
             return x + x
+
         from torch.fx.experimental.proxy_tensor import make_fx
         from torchburn._compiled import BurnCompiledCallable
+
         x = torch.randn(4, 8, dtype=torch.bfloat16)
         gm = make_fx(fn)(x)
         cb = BurnCompiledCallable(gm, [x])
@@ -98,8 +107,10 @@ class TestMixedPrecision:
     def test_fp16_mul(self):
         def fn(x):
             return x * 2.0
+
         from torch.fx.experimental.proxy_tensor import make_fx
         from torchburn._compiled import BurnCompiledCallable
+
         x = torch.randn(4, 8, dtype=torch.float16)
         gm = make_fx(fn)(x)
         cb = BurnCompiledCallable(gm, [x])
@@ -112,6 +123,7 @@ class TestChunkSplitting:
 
     def test_split_threshold(self):
         from torchburn._compiled import BurnCompiledCallable
+
         assert BurnCompiledCallable._MAX_CHUNK_NODES == 128
 
     def test_medium_model_runs(self):
@@ -119,12 +131,14 @@ class TestChunkSplitting:
             def __init__(self):
                 super().__init__()
                 self.layers = nn.ModuleList([nn.Linear(32, 32) for _ in range(10)])
+
             def forward(self, x):
                 for layer in self.layers:
                     x = torch.relu(layer(x))
                 return x
+
         model = MediumModel()
-        compiled = torch.compile(model, backend='torchburn')
+        compiled = torch.compile(model, backend="torchburn")
         x = torch.randn(4, 32)
         out = compiled(x)
         ref = model(x)
@@ -136,14 +150,18 @@ class TestProfilingAPI:
 
     def test_profile_context_manager(self):
         import torchburn
+
         with torchburn.profile() as p:
             pass
         assert p.wall_time_ms >= 0
         # burn_ndarray may appear with wgpu unavailable suffix on headless CI
-        assert p.engine in ("native_cpu", "burn_ndarray", "burn_wgpu") or p.engine.startswith("burn_ndarray")
+        assert p.engine in ("native_cpu", "burn_ndarray", "burn_wgpu") or p.engine.startswith(
+            "burn_ndarray"
+        )
 
     def test_coverage_report(self):
         import torchburn
+
         report = torchburn.coverage_report()
         assert "supported_targets" in report
         assert "target_count" in report
@@ -151,6 +169,7 @@ class TestProfilingAPI:
 
     def test_memory_stats(self):
         import torchburn
+
         torchburn.reset_stats()
         stats = torchburn.memory_stats()
         assert stats["calls"] == 0
@@ -158,6 +177,7 @@ class TestProfilingAPI:
 
     def test_reset_stats(self):
         import torchburn
+
         torchburn.reset_stats()
         with torchburn.profile():
             pass
@@ -173,6 +193,7 @@ class TestProfilingAPI:
 
     def test_supported_ops(self):
         import torchburn
+
         ops = torchburn.supported_ops()
         assert "add" in ops
         assert "matmul" in ops

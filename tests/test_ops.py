@@ -10,7 +10,6 @@ import json
 
 import pytest
 import torch
-
 from torchburn import _torchburn as tb
 
 
@@ -22,7 +21,13 @@ def run_binary(target: str, a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     payload = json.dumps(
         {
             "inputs": inputs,
-            "nodes": [{"id": 0, "target": target, "args": [{"kind": "slot", "index": 0}, {"kind": "slot", "index": 1}]}],
+            "nodes": [
+                {
+                    "id": 0,
+                    "target": target,
+                    "args": [{"kind": "slot", "index": 0}, {"kind": "slot", "index": 1}],
+                }
+            ],
             "outputs": [0],
         },
         sort_keys=True,
@@ -34,7 +39,12 @@ def run_binary(target: str, a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
 def run_unary(target: str, a: torch.Tensor) -> torch.Tensor:
     payload = json.dumps(
         {
-            "inputs": [{"shape": [int(s) for s in a.shape], "dtype": "f32" if a.dtype == torch.float32 else "f64"}],
+            "inputs": [
+                {
+                    "shape": [int(s) for s in a.shape],
+                    "dtype": "f32" if a.dtype == torch.float32 else "f64",
+                }
+            ],
             "nodes": [{"id": 0, "target": target, "args": [{"kind": "slot", "index": 0}]}],
             "outputs": [0],
         },

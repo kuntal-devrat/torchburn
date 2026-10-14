@@ -77,12 +77,12 @@ pub(crate) unsafe fn capsule_to_owned(view: &dlpack::BorrowedTensor) -> dlpack::
         for d in 0..ndim {
             phys += idx[d] * view.strides[d];
         }
-        let phys_usize = phys.max(0) as usize;
-        // Bounds check: skip elements beyond the valid buffer range to
-        // prevent out-of-bounds reads from malformed DLPack capsules.
-        if phys_usize >= buf_len {
+        // Bounds check: skip elements with negative physical offsets or beyond the valid
+        // buffer range to prevent incorrect indexing or out-of-bounds reads.
+        if phys < 0 || (phys as usize) >= buf_len {
             continue;
         }
+        let phys_usize = phys as usize;
         let src = view.data.add(phys_usize * elem);
         let dst = dst_base.add(out_off * elem);
         std::ptr::copy_nonoverlapping(src, dst, elem);

@@ -1,20 +1,22 @@
 """Top-level LLM API for TorchBurn."""
 
 from __future__ import annotations
+
 import os
-from typing import Optional, Union, Generator, List, Dict, Any
+from typing import Any, Dict, Generator, List, Optional, Union
+
 import torch
 
-from .config import GenerationConfig, EngineConfig
+from .config import EngineConfig, GenerationConfig
+from .engine import UniversalEngine
+from .loader import ModelLoader
 from .model import UniversalTransformer
 from .tokenizer import UniversalTokenizer
-from .loader import ModelLoader
-from .engine import UniversalEngine
 
 
 class LLM:
     """Universal, zero-CUDA LLM inference interface.
-    
+
     Usage::
         import torchburn as tb
 
@@ -63,7 +65,7 @@ class LLM:
         local_files_only: bool = False,
     ) -> LLM:
         """Loads any model from Hugging Face Hub, local trained directory, or weight file.
-        
+
         Args:
             model_id_or_path: Hugging Face repo ID or local checkpoint path.
             quant: Quantization precision ('int4', 'int8', or 'none'). Default: 'int4'.
@@ -74,14 +76,21 @@ class LLM:
             local_files_only: Whether to exclusively look for local files without internet access.
         """
         engine_cfg = EngineConfig(device=device, quantization=quant, num_threads=num_threads)
-        model, config, root_path = ModelLoader.load(
+        model, _config, root_path = ModelLoader.load(
             model_id_or_path,
             quant=quant,
             token=token,
             cache_dir=cache_dir,
             local_files_only=local_files_only,
         )
-        tok_cand = root_path if (os.path.exists(root_path) and os.path.isfile(os.path.join(root_path, "tokenizer.json"))) else model_id_or_path
+        tok_cand = (
+            root_path
+            if (
+                os.path.exists(root_path)
+                and os.path.isfile(os.path.join(root_path, "tokenizer.json"))
+            )
+            else model_id_or_path
+        )
         tokenizer = UniversalTokenizer.from_pretrained(
             tok_cand,
             token=token,
@@ -89,7 +98,6 @@ class LLM:
             local_files_only=local_files_only,
         )
         return cls(model, tokenizer, engine_cfg)
-
 
     @classmethod
     def from_model(
@@ -183,7 +191,9 @@ class LLM:
         )
 
         print("\n\033[92m=== TorchBurn LLM Interactive Chat Started ===\033[0m")
-        print(f"Device: {self.engine_config.device} | Quantization: {self.engine_config.quantization}")
+        print(
+            f"Device: {self.engine_config.device} | Quantization: {self.engine_config.quantization}"
+        )
         print("Type 'exit', 'quit', or 'q' to end.\n")
 
         while True:
@@ -208,7 +218,9 @@ class LLM:
             max_ctx = getattr(model_config, "max_position_embeddings", 32768)
             budget = max(256, max_ctx - max_tokens - 64)
             while len(history) > 2:
-                trial_prompt = self.tokenizer.apply_chat_template(history, add_generation_prompt=True)
+                trial_prompt = self.tokenizer.apply_chat_template(
+                    history, add_generation_prompt=True
+                )
                 trial_ids = self.tokenizer.encode(trial_prompt)
                 if len(trial_ids) <= budget:
                     break
@@ -216,7 +228,9 @@ class LLM:
                 idx = 1 if history[0].get("role") == "system" else 0
                 history.pop(idx)
 
-            formatted_prompt = self.tokenizer.apply_chat_template(history, add_generation_prompt=True)
+            formatted_prompt = self.tokenizer.apply_chat_template(
+                history, add_generation_prompt=True
+            )
 
             print("\033[96m\033[1mAI\033[0m: ", end="", flush=True)
 
@@ -255,7 +269,9 @@ class LLM:
                 tok_sec = summary.get("decode_tok_sec", 0)
                 n_tok = summary.get("tokens_generated", 0)
                 avg_ms = summary.get("avg_ms_per_token", 0)
-                print(f"\033[2m⚡ [{n_tok} tokens | {avg_ms:.1f}ms/tok | {tok_sec:.1f} tok/s]\033[0m\n")
+                print(
+                    f"\033[2m⚡ [{n_tok} tokens | {avg_ms:.1f}ms/tok | {tok_sec:.1f} tok/s]\033[0m\n"
+                )
 
             response_text = "".join(collected).strip()
             history.append({"role": "assistant", "content": response_text})

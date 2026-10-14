@@ -1,4 +1,4 @@
-//! Phase 6: reverse-mode automatic differentiation (autograd).
+//! Reverse-mode automatic differentiation (autograd).
 //!
 //! Architecture:
 //!
@@ -31,12 +31,18 @@ use std::collections::HashMap;
 pub mod tape;
 
 pub use self::tape::{
-    backward, disable, enable, is_enabled, reset, save_borrowed, save_data, tape_len, TensorMeta,
+    active_recording_threads, backward, disable, enable, is_enabled, record_guard, reset,
+    save_borrowed, save_data, tape_len, AutogradGuard, TensorMeta,
 };
 pub(crate) use self::tape::{record, BackwardOp};
 
 pub mod backward_ops;
 
+#[allow(deprecated)]
+#[deprecated(
+    since = "1.0.1",
+    note = "Legacy tape recording API; use direct batch backward instead"
+)]
 pub use self::backward_ops::{
     record_add, record_cat, record_div, record_dropout, record_layer_norm, record_linear,
     record_matmul, record_mse_loss, record_mul, record_nll_loss, record_permute, record_reshape,

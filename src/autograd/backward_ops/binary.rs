@@ -109,8 +109,6 @@ pub(crate) enum BinOpType {
 }
 
 struct ElemwiseBinaryBackward {
-    // dead code — used via record_add/sub/mul/div
-    #[allow(dead_code)]
     op_type: BinOpType,
     a_id: usize,
     b_id: usize,

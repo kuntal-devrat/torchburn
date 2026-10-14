@@ -2,10 +2,9 @@
 
 import numpy as np
 import pytest
-
 from torchburn.llm.gguf_loader import (
-    GGUFLoader,
     GGML_TYPE_Q5_0,
+    GGUFLoader,
     _dequant_q4_k,
     _dequant_q6_k,
 )
@@ -56,7 +55,9 @@ def test_local_only_model_resolution_never_falls_back_to_network(tmp_path):
 
 def test_local_only_tokenizer_resolution_is_explicit(tmp_path):
     with pytest.raises(FileNotFoundError, match="local files only"):
-        UniversalTokenizer.from_pretrained(str(tmp_path / "missing-tokenizer"), local_files_only=True)
+        UniversalTokenizer.from_pretrained(
+            str(tmp_path / "missing-tokenizer"), local_files_only=True
+        )
 
 
 def test_gguf_unsupported_types_are_not_zero_filled():

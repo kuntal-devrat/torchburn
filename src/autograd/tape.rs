@@ -63,10 +63,27 @@ pub(crate) trait BackwardOp: Send + Sync {
 // Thread-local tape
 // ---------------------------------------------------------------------------
 
+/// Sentinel stored in thread-local storage that decrements `ACTIVE_RECORDING_THREADS`
+/// when the thread terminates, preventing diagnostic counter leaks even if `disable()`
+/// was not explicitly called.
+struct ThreadAutogradSentinel {
+    enabled: bool,
+}
+
+impl Drop for ThreadAutogradSentinel {
+    fn drop(&mut self) {
+        if self.enabled {
+            self.enabled = false;
+            ACTIVE_RECORDING_THREADS.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+}
+
 thread_local! {
     static TAPE: RefCell<Vec<Box<dyn BackwardOp>>> = RefCell::new(Vec::new());
     static TAPE_META: RefCell<Vec<TapeEntryMeta>> = RefCell::new(Vec::new());
-    static ENABLED: RefCell<bool> = RefCell::new(false);
+    static SENTINEL: RefCell<ThreadAutogradSentinel> =
+        RefCell::new(ThreadAutogradSentinel { enabled: false });
     /// Saved tensor data indexed by tensor ID.
     static SAVED_DATA: RefCell<HashMap<usize, Box<OwnedTensor>>> = RefCell::new(HashMap::new());
 }
@@ -78,10 +95,10 @@ struct TapeEntryMeta {
 
 /// Enable autograd recording for the current thread.
 pub fn enable() {
-    ENABLED.with(|e| {
-        let mut en = e.borrow_mut();
-        if !*en {
-            *en = true;
+    SENTINEL.with(|s| {
+        let mut sentinel = s.borrow_mut();
+        if !sentinel.enabled {
+            sentinel.enabled = true;
             ACTIVE_RECORDING_THREADS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
     });
@@ -89,10 +106,10 @@ pub fn enable() {
 
 /// Disable autograd recording for the current thread.
 pub fn disable() {
-    ENABLED.with(|e| {
-        let mut en = e.borrow_mut();
-        if *en {
-            *en = false;
+    SENTINEL.with(|s| {
+        let mut sentinel = s.borrow_mut();
+        if sentinel.enabled {
+            sentinel.enabled = false;
             ACTIVE_RECORDING_THREADS.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
         }
     });
@@ -105,7 +122,55 @@ pub fn disable() {
 
 /// Check if autograd is enabled on this thread.
 pub fn is_enabled() -> bool {
-    ENABLED.with(|e| *e.borrow())
+    SENTINEL.with(|s| s.borrow().enabled)
+}
+
+/// Number of threads currently recording autograd operations.
+pub fn active_recording_threads() -> usize {
+    ACTIVE_RECORDING_THREADS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// RAII guard that enables autograd recording on creation and disables it on drop.
+pub struct AutogradGuard {
+    active: bool,
+}
+
+impl AutogradGuard {
+    /// Create a new RAII guard and enable autograd recording for the current thread.
+    pub fn new() -> Self {
+        enable();
+        Self { active: true }
+    }
+
+    /// Explicitly disable recording before drop.
+    pub fn disable(&mut self) {
+        if self.active {
+            disable();
+            self.active = false;
+        }
+    }
+
+    /// Check if this guard is actively holding an enabled recording session.
+    pub fn is_active(&self) -> bool {
+        self.active
+    }
+}
+
+impl Default for AutogradGuard {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Drop for AutogradGuard {
+    fn drop(&mut self) {
+        self.disable();
+    }
+}
+
+/// Create an RAII drop guard that enables autograd recording and disables it when dropped.
+pub fn record_guard() -> AutogradGuard {
+    AutogradGuard::new()
 }
 
 /// Record an operation on the tape.
@@ -384,4 +449,83 @@ pub fn reset() {
 /// Number of ops currently recorded on the tape.
 pub fn tape_len() -> usize {
     TAPE.with(|t| t.borrow().len())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn test_enable_disable_lifecycle() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        let initial = active_recording_threads();
+        enable();
+        assert!(is_enabled());
+        assert_eq!(active_recording_threads(), initial + 1);
+
+        disable();
+        assert!(!is_enabled());
+        assert_eq!(active_recording_threads(), initial);
+    }
+
+    #[test]
+    fn test_thread_exit_cleans_up_active_recording_threads() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        let initial = active_recording_threads();
+        let handle = std::thread::spawn(move || {
+            enable();
+            assert!(is_enabled());
+            assert_eq!(active_recording_threads(), initial + 1);
+            // Thread terminates without explicit disable()
+        });
+        handle.join().unwrap();
+        // The thread-local sentinel drop implementation MUST have decremented ACTIVE_RECORDING_THREADS.
+        assert_eq!(active_recording_threads(), initial);
+    }
+
+    #[test]
+    fn test_autograd_guard_raii() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        let initial = active_recording_threads();
+        {
+            let guard = AutogradGuard::new();
+            assert!(is_enabled());
+            assert!(guard.is_active());
+            assert_eq!(active_recording_threads(), initial + 1);
+        }
+        // Guard dropped
+        assert!(!is_enabled());
+        assert_eq!(active_recording_threads(), initial);
+    }
+
+    #[test]
+    fn test_concurrent_threads_active_count() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        let initial = active_recording_threads();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(5));
+        let mut handles = Vec::new();
+
+        for _ in 0..4 {
+            let b = barrier.clone();
+            handles.push(std::thread::spawn(move || {
+                let _guard = AutogradGuard::new();
+                b.wait();
+                b.wait();
+            }));
+        }
+
+        // Wait until all 4 threads have enabled autograd
+        barrier.wait();
+        assert_eq!(active_recording_threads(), initial + 4);
+
+        // Release threads
+        barrier.wait();
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        assert_eq!(active_recording_threads(), initial);
+    }
 }

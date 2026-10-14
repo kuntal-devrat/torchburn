@@ -1,6 +1,6 @@
-"""Comprehensive Phase 2 operator coverage tests.
+"""Comprehensive operator coverage tests.
 
-Validates every Phase 2 operator introduced in linalg.rs, reductions.rs,
+Validates core operators introduced in linalg.rs, reductions.rs,
 activations.rs, math_ops.rs, norm.rs, and shape_ops.rs against PyTorch
 reference values.  Each test is written to fail loudly on a regression.
 """
@@ -12,12 +12,12 @@ import json
 import pytest
 import torch
 import torch.nn.functional as F
-
 from torchburn import _torchburn as tb
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _spec(t: torch.Tensor) -> dict:
     dtype = {
@@ -31,49 +31,87 @@ def _spec(t: torch.Tensor) -> dict:
 
 
 def run_unary(target: str, a: torch.Tensor, **kwargs) -> torch.Tensor:
-    payload = json.dumps({
-        "inputs": [_spec(a)],
-        "nodes": [{"id": 0, "target": target, "args": [{"kind": "slot", "index": 0}], "kwargs": kwargs}],
-        "outputs": [0],
-    }, sort_keys=True)
+    payload = json.dumps(
+        {
+            "inputs": [_spec(a)],
+            "nodes": [
+                {
+                    "id": 0,
+                    "target": target,
+                    "args": [{"kind": "slot", "index": 0}],
+                    "kwargs": kwargs,
+                }
+            ],
+            "outputs": [0],
+        },
+        sort_keys=True,
+    )
     (cap,) = tb.execute(payload, [a.__dlpack__()])
     return torch.from_dlpack(cap)
 
 
 def run_binary(target: str, a: torch.Tensor, b: torch.Tensor, **kwargs) -> torch.Tensor:
-    payload = json.dumps({
-        "inputs": [_spec(a), _spec(b)],
-        "nodes": [{"id": 0, "target": target, "args": [
-            {"kind": "slot", "index": 0}, {"kind": "slot", "index": 1}
-        ], "kwargs": kwargs}],
-        "outputs": [0],
-    }, sort_keys=True)
+    payload = json.dumps(
+        {
+            "inputs": [_spec(a), _spec(b)],
+            "nodes": [
+                {
+                    "id": 0,
+                    "target": target,
+                    "args": [{"kind": "slot", "index": 0}, {"kind": "slot", "index": 1}],
+                    "kwargs": kwargs,
+                }
+            ],
+            "outputs": [0],
+        },
+        sort_keys=True,
+    )
     (cap,) = tb.execute(payload, [a.__dlpack__(), b.__dlpack__()])
     return torch.from_dlpack(cap)
 
 
-def run_ternary(target: str, a: torch.Tensor, b: torch.Tensor, c: torch.Tensor, **kwargs) -> torch.Tensor:
-    payload = json.dumps({
-        "inputs": [_spec(a), _spec(b), _spec(c)],
-        "nodes": [{"id": 0, "target": target, "args": [
-            {"kind": "slot", "index": 0},
-            {"kind": "slot", "index": 1},
-            {"kind": "slot", "index": 2},
-        ], "kwargs": kwargs}],
-        "outputs": [0],
-    }, sort_keys=True)
+def run_ternary(
+    target: str, a: torch.Tensor, b: torch.Tensor, c: torch.Tensor, **kwargs
+) -> torch.Tensor:
+    payload = json.dumps(
+        {
+            "inputs": [_spec(a), _spec(b), _spec(c)],
+            "nodes": [
+                {
+                    "id": 0,
+                    "target": target,
+                    "args": [
+                        {"kind": "slot", "index": 0},
+                        {"kind": "slot", "index": 1},
+                        {"kind": "slot", "index": 2},
+                    ],
+                    "kwargs": kwargs,
+                }
+            ],
+            "outputs": [0],
+        },
+        sort_keys=True,
+    )
     (cap,) = tb.execute(payload, [a.__dlpack__(), b.__dlpack__(), c.__dlpack__()])
     return torch.from_dlpack(cap)
 
 
 def run_quinary(target: str, tensors: list[torch.Tensor], **kwargs) -> torch.Tensor:
-    payload = json.dumps({
-        "inputs": [_spec(t) for t in tensors],
-        "nodes": [{"id": 0, "target": target, "args": [
-            {"kind": "slot", "index": i} for i in range(len(tensors))
-        ], "kwargs": kwargs}],
-        "outputs": [0],
-    }, sort_keys=True)
+    payload = json.dumps(
+        {
+            "inputs": [_spec(t) for t in tensors],
+            "nodes": [
+                {
+                    "id": 0,
+                    "target": target,
+                    "args": [{"kind": "slot", "index": i} for i in range(len(tensors))],
+                    "kwargs": kwargs,
+                }
+            ],
+            "outputs": [0],
+        },
+        sort_keys=True,
+    )
     (cap,) = tb.execute(payload, [t.__dlpack__() for t in tensors])
     return torch.from_dlpack(cap)
 
@@ -82,15 +120,19 @@ def run_quinary(target: str, tensors: list[torch.Tensor], **kwargs) -> torch.Ten
 # 1. Comparison ops
 # ---------------------------------------------------------------------------
 
+
 class TestComparisons:
-    @pytest.mark.parametrize("op,ref", [
-        ("eq", lambda a, b: (a == b).float()),
-        ("ne", lambda a, b: (a != b).float()),
-        ("lt", lambda a, b: (a < b).float()),
-        ("le", lambda a, b: (a <= b).float()),
-        ("gt", lambda a, b: (a > b).float()),
-        ("ge", lambda a, b: (a >= b).float()),
-    ])
+    @pytest.mark.parametrize(
+        "op,ref",
+        [
+            ("eq", lambda a, b: (a == b).float()),
+            ("ne", lambda a, b: (a != b).float()),
+            ("lt", lambda a, b: (a < b).float()),
+            ("le", lambda a, b: (a <= b).float()),
+            ("gt", lambda a, b: (a > b).float()),
+            ("ge", lambda a, b: (a >= b).float()),
+        ],
+    )
     def test_comparison_f32(self, op, ref):
         a = torch.randn(4, 5)
         b = torch.randn(4, 5)
@@ -119,6 +161,7 @@ class TestComparisons:
 # 1b. Logical ops + dtype cast
 # ---------------------------------------------------------------------------
 
+
 class TestLogicalOps:
     def test_logical_and_f32(self):
         a = torch.tensor([[1.0, 0.0], [0.5, -2.0]])
@@ -138,7 +181,7 @@ class TestLogicalOps:
         assert torch.allclose(got, (~a.bool()).float())
 
     def test_logical_broadcast(self):
-        a = torch.tensor([[1.0], [0.0]])   # (2,1)
+        a = torch.tensor([[1.0], [0.0]])  # (2,1)
         b = torch.tensor([[1.0, 0.0, 1.0]])  # (1,3)
         got = run_binary("logical_and", a, b)
         assert torch.allclose(got, (a.bool() & b.bool()).float())
@@ -152,13 +195,21 @@ class TestLogicalOps:
 class TestDtypeCast:
     def test_to_dtype_f64(self):
         x = torch.randn(4, 4, dtype=torch.float32)
-        payload = json.dumps({
-            "inputs": [_spec(x)],
-            "nodes": [{"id": 0, "target": "to_dtype",
-                       "args": [{"kind": "slot", "index": 0}],
-                       "kwargs": {"dtype": "f64"}}],
-            "outputs": [0],
-        }, sort_keys=True)
+        payload = json.dumps(
+            {
+                "inputs": [_spec(x)],
+                "nodes": [
+                    {
+                        "id": 0,
+                        "target": "to_dtype",
+                        "args": [{"kind": "slot", "index": 0}],
+                        "kwargs": {"dtype": "f64"},
+                    }
+                ],
+                "outputs": [0],
+            },
+            sort_keys=True,
+        )
         (cap,) = tb.execute(payload, [x.__dlpack__()])
         got = torch.from_dlpack(cap)
         assert got.dtype == torch.float64
@@ -166,13 +217,21 @@ class TestDtypeCast:
 
     def test_to_dtype_f32_from_f64(self):
         x = torch.randn(4, 4, dtype=torch.float64)
-        payload = json.dumps({
-            "inputs": [_spec(x)],
-            "nodes": [{"id": 0, "target": "to_dtype",
-                       "args": [{"kind": "slot", "index": 0}],
-                       "kwargs": {"dtype": "f32"}}],
-            "outputs": [0],
-        }, sort_keys=True)
+        payload = json.dumps(
+            {
+                "inputs": [_spec(x)],
+                "nodes": [
+                    {
+                        "id": 0,
+                        "target": "to_dtype",
+                        "args": [{"kind": "slot", "index": 0}],
+                        "kwargs": {"dtype": "f32"},
+                    }
+                ],
+                "outputs": [0],
+            },
+            sort_keys=True,
+        )
         (cap,) = tb.execute(payload, [x.__dlpack__()])
         got = torch.from_dlpack(cap)
         assert got.dtype == torch.float32
@@ -181,27 +240,42 @@ class TestDtypeCast:
     def test_to_dtype_positional_arg(self):
         # x.to(torch.float64) arrives with dtype as a positional const arg
         x = torch.randn(3, 3, dtype=torch.float32)
-        payload = json.dumps({
-            "inputs": [_spec(x)],
-            "nodes": [{"id": 0, "target": "to_dtype",
-                       "args": [{"kind": "slot", "index": 0},
-                                {"kind": "const", "value": "f64"}],
-                       "kwargs": {}}],
-            "outputs": [0],
-        }, sort_keys=True)
+        payload = json.dumps(
+            {
+                "inputs": [_spec(x)],
+                "nodes": [
+                    {
+                        "id": 0,
+                        "target": "to_dtype",
+                        "args": [{"kind": "slot", "index": 0}, {"kind": "const", "value": "f64"}],
+                        "kwargs": {},
+                    }
+                ],
+                "outputs": [0],
+            },
+            sort_keys=True,
+        )
         (cap,) = tb.execute(payload, [x.__dlpack__()])
         got = torch.from_dlpack(cap)
         assert got.dtype == torch.float64
 
     def test_to_dtype_same_dtype_copy(self):
         x = torch.randn(4, 4, dtype=torch.float32)
-        payload = json.dumps({
-            "inputs": [_spec(x)],
-            "nodes": [{"id": 0, "target": "to_dtype",
-                       "args": [{"kind": "slot", "index": 0}],
-                       "kwargs": {"dtype": "f32"}}],
-            "outputs": [0],
-        }, sort_keys=True)
+        payload = json.dumps(
+            {
+                "inputs": [_spec(x)],
+                "nodes": [
+                    {
+                        "id": 0,
+                        "target": "to_dtype",
+                        "args": [{"kind": "slot", "index": 0}],
+                        "kwargs": {"dtype": "f32"},
+                    }
+                ],
+                "outputs": [0],
+            },
+            sort_keys=True,
+        )
         (cap,) = tb.execute(payload, [x.__dlpack__()])
         got = torch.from_dlpack(cap)
         assert got.dtype == torch.float32
@@ -212,19 +286,23 @@ class TestDtypeCast:
 # 2. Unary math ops
 # ---------------------------------------------------------------------------
 
+
 class TestUnaryMath:
-    @pytest.mark.parametrize("op,ref,prep", [
-        ("abs", torch.abs, lambda x: x),
-        ("neg", torch.neg, lambda x: x),
-        ("sign", torch.sign, lambda x: x),
-        ("sqrt", torch.sqrt, lambda x: x.abs()),
-        ("rsqrt", torch.rsqrt, lambda x: x.abs() + 0.01),
-        ("exp", torch.exp, lambda x: x.clamp(-5, 5)),
-        ("log", torch.log, lambda x: x.abs() + 0.01),
-        ("reciprocal", torch.reciprocal, lambda x: x + 0.01),
-        ("ceil", torch.ceil, lambda x: x),
-        ("floor", torch.floor, lambda x: x),
-    ])
+    @pytest.mark.parametrize(
+        "op,ref,prep",
+        [
+            ("abs", torch.abs, lambda x: x),
+            ("neg", torch.neg, lambda x: x),
+            ("sign", torch.sign, lambda x: x),
+            ("sqrt", torch.sqrt, lambda x: x.abs()),
+            ("rsqrt", torch.rsqrt, lambda x: x.abs() + 0.01),
+            ("exp", torch.exp, lambda x: x.clamp(-5, 5)),
+            ("log", torch.log, lambda x: x.abs() + 0.01),
+            ("reciprocal", torch.reciprocal, lambda x: x + 0.01),
+            ("ceil", torch.ceil, lambda x: x),
+            ("floor", torch.floor, lambda x: x),
+        ],
+    )
     def test_unary_f32(self, op, ref, prep):
         torch.manual_seed(42)
         x = torch.randn(8, 8)
@@ -260,15 +338,19 @@ class TestUnaryMath:
 # 3. Activations
 # ---------------------------------------------------------------------------
 
+
 class TestActivations:
-    @pytest.mark.parametrize("op,ref", [
-        ("sigmoid", torch.sigmoid),
-        ("tanh", torch.tanh),
-        ("selu", F.selu),
-        ("softplus", F.softplus),
-        ("hardswish", F.hardswish),
-        ("mish", F.mish),
-    ])
+    @pytest.mark.parametrize(
+        "op,ref",
+        [
+            ("sigmoid", torch.sigmoid),
+            ("tanh", torch.tanh),
+            ("selu", F.selu),
+            ("softplus", F.softplus),
+            ("hardswish", F.hardswish),
+            ("mish", F.mish),
+        ],
+    )
     def test_activation_f32(self, op, ref):
         x = torch.randn(6, 8)
         got = run_unary(op, x)
@@ -327,6 +409,7 @@ class TestActivations:
 # ---------------------------------------------------------------------------
 # 4. Reductions
 # ---------------------------------------------------------------------------
+
 
 class TestReductions:
     def test_sum_all(self):
@@ -395,7 +478,11 @@ class TestReductions:
         if got.dtype != ref.dtype:
             got = got.float() if ref.dtype == torch.float32 else got.long()
             ref = ref.float() if got.dtype == torch.float32 else ref
-        assert torch.allclose(got.float(), ref.float()) if got.dtype.is_floating_point else torch.equal(got, ref)
+        assert (
+            torch.allclose(got.float(), ref.float())
+            if got.dtype.is_floating_point
+            else torch.equal(got, ref)
+        )
 
     def test_argmin(self):
         x = torch.randn(4, 8)
@@ -403,7 +490,11 @@ class TestReductions:
         ref = x.argmin(dim=1)
         if got.dtype != ref.dtype:
             got = got.float() if ref.dtype == torch.float32 else got.long()
-        assert torch.allclose(got.float(), ref.float()) if got.dtype.is_floating_point else torch.equal(got, ref)
+        assert (
+            torch.allclose(got.float(), ref.float())
+            if got.dtype.is_floating_point
+            else torch.equal(got, ref)
+        )
 
     def test_std_unbiased_f32(self):
         x = torch.randn(32)
@@ -480,6 +571,7 @@ class TestReductions:
 # 5. Linear algebra
 # ---------------------------------------------------------------------------
 
+
 class TestLinAlg:
     def test_matmul_square_f32(self):
         a = torch.randn(32, 32)
@@ -493,15 +585,25 @@ class TestLinAlg:
         bias = torch.randn(5)
         mat1 = torch.randn(3, 4)
         mat2 = torch.randn(4, 5)
-        payload = json.dumps({
-            "inputs": [_spec(bias), _spec(mat1), _spec(mat2)],
-            "nodes": [{"id": 0, "target": "addmm", "args": [
-                {"kind": "slot", "index": 0},
-                {"kind": "slot", "index": 1},
-                {"kind": "slot", "index": 2},
-            ], "kwargs": {}}],
-            "outputs": [0],
-        }, sort_keys=True)
+        payload = json.dumps(
+            {
+                "inputs": [_spec(bias), _spec(mat1), _spec(mat2)],
+                "nodes": [
+                    {
+                        "id": 0,
+                        "target": "addmm",
+                        "args": [
+                            {"kind": "slot", "index": 0},
+                            {"kind": "slot", "index": 1},
+                            {"kind": "slot", "index": 2},
+                        ],
+                        "kwargs": {},
+                    }
+                ],
+                "outputs": [0],
+            },
+            sort_keys=True,
+        )
         (cap,) = tb.execute(payload, [bias.__dlpack__(), mat1.__dlpack__(), mat2.__dlpack__()])
         got = torch.from_dlpack(cap)
         ref = torch.addmm(bias, mat1, mat2)
@@ -511,15 +613,25 @@ class TestLinAlg:
         bias = torch.randn(5, dtype=torch.float64)
         mat1 = torch.randn(3, 4, dtype=torch.float64)
         mat2 = torch.randn(4, 5, dtype=torch.float64)
-        payload = json.dumps({
-            "inputs": [_spec(bias), _spec(mat1), _spec(mat2)],
-            "nodes": [{"id": 0, "target": "addmm", "args": [
-                {"kind": "slot", "index": 0},
-                {"kind": "slot", "index": 1},
-                {"kind": "slot", "index": 2},
-            ], "kwargs": {}}],
-            "outputs": [0],
-        }, sort_keys=True)
+        payload = json.dumps(
+            {
+                "inputs": [_spec(bias), _spec(mat1), _spec(mat2)],
+                "nodes": [
+                    {
+                        "id": 0,
+                        "target": "addmm",
+                        "args": [
+                            {"kind": "slot", "index": 0},
+                            {"kind": "slot", "index": 1},
+                            {"kind": "slot", "index": 2},
+                        ],
+                        "kwargs": {},
+                    }
+                ],
+                "outputs": [0],
+            },
+            sort_keys=True,
+        )
         (cap,) = tb.execute(payload, [bias.__dlpack__(), mat1.__dlpack__(), mat2.__dlpack__()])
         got = torch.from_dlpack(cap)
         ref = torch.addmm(bias, mat1, mat2)
@@ -529,15 +641,25 @@ class TestLinAlg:
         bias = torch.randn(5)
         mat1 = torch.randn(3, 4)
         mat2 = torch.randn(3, 5)  # inner dims 4 != 3
-        payload = json.dumps({
-            "inputs": [_spec(bias), _spec(mat1), _spec(mat2)],
-            "nodes": [{"id": 0, "target": "addmm", "args": [
-                {"kind": "slot", "index": 0},
-                {"kind": "slot", "index": 1},
-                {"kind": "slot", "index": 2},
-            ], "kwargs": {}}],
-            "outputs": [0],
-        }, sort_keys=True)
+        payload = json.dumps(
+            {
+                "inputs": [_spec(bias), _spec(mat1), _spec(mat2)],
+                "nodes": [
+                    {
+                        "id": 0,
+                        "target": "addmm",
+                        "args": [
+                            {"kind": "slot", "index": 0},
+                            {"kind": "slot", "index": 1},
+                            {"kind": "slot", "index": 2},
+                        ],
+                        "kwargs": {},
+                    }
+                ],
+                "outputs": [0],
+            },
+            sort_keys=True,
+        )
         with pytest.raises(RuntimeError, match="TB_UNSUPPORTED"):
             tb.execute(payload, [bias.__dlpack__(), mat1.__dlpack__(), mat2.__dlpack__()])
 
@@ -592,13 +714,21 @@ class TestLinAlg:
     def test_linear_no_bias(self):
         x = torch.randn(4, 16)
         w = torch.randn(8, 16)  # (out, in)
-        payload = json.dumps({
-            "inputs": [_spec(x), _spec(w)],
-            "nodes": [{"id": 0, "target": "linear",
-                       "args": [{"kind": "slot", "index": 0}, {"kind": "slot", "index": 1}],
-                       "kwargs": {}}],
-            "outputs": [0],
-        }, sort_keys=True)
+        payload = json.dumps(
+            {
+                "inputs": [_spec(x), _spec(w)],
+                "nodes": [
+                    {
+                        "id": 0,
+                        "target": "linear",
+                        "args": [{"kind": "slot", "index": 0}, {"kind": "slot", "index": 1}],
+                        "kwargs": {},
+                    }
+                ],
+                "outputs": [0],
+            },
+            sort_keys=True,
+        )
         (cap,) = tb.execute(payload, [x.__dlpack__(), w.__dlpack__()])
         got = torch.from_dlpack(cap)
         ref = F.linear(x, w)
@@ -608,15 +738,25 @@ class TestLinAlg:
         x = torch.randn(4, 16)
         w = torch.randn(8, 16)
         b = torch.randn(8)
-        payload = json.dumps({
-            "inputs": [_spec(x), _spec(w), _spec(b)],
-            "nodes": [{"id": 0, "target": "linear",
-                       "args": [{"kind": "slot", "index": 0},
-                                {"kind": "slot", "index": 1},
-                                {"kind": "slot", "index": 2}],
-                       "kwargs": {}}],
-            "outputs": [0],
-        }, sort_keys=True)
+        payload = json.dumps(
+            {
+                "inputs": [_spec(x), _spec(w), _spec(b)],
+                "nodes": [
+                    {
+                        "id": 0,
+                        "target": "linear",
+                        "args": [
+                            {"kind": "slot", "index": 0},
+                            {"kind": "slot", "index": 1},
+                            {"kind": "slot", "index": 2},
+                        ],
+                        "kwargs": {},
+                    }
+                ],
+                "outputs": [0],
+            },
+            sort_keys=True,
+        )
         (cap,) = tb.execute(payload, [x.__dlpack__(), w.__dlpack__(), b.__dlpack__()])
         got = torch.from_dlpack(cap)
         ref = F.linear(x, w, b)
@@ -638,6 +778,7 @@ class TestLinAlg:
 # ---------------------------------------------------------------------------
 # 6. Normalization layers
 # ---------------------------------------------------------------------------
+
 
 class TestNormLayers:
     def test_layer_norm_f32(self):
@@ -668,17 +809,25 @@ class TestNormLayers:
     def test_rms_norm(self):
         x = torch.randn(4, 16)
         w = torch.ones(16)
-        payload = json.dumps({
-            "inputs": [_spec(x), _spec(w)],
-            "nodes": [{"id": 0, "target": "rms_norm",
-                       "args": [{"kind": "slot", "index": 0}, {"kind": "slot", "index": 1}],
-                       "kwargs": {"eps": 1e-6}}],
-            "outputs": [0],
-        }, sort_keys=True)
+        payload = json.dumps(
+            {
+                "inputs": [_spec(x), _spec(w)],
+                "nodes": [
+                    {
+                        "id": 0,
+                        "target": "rms_norm",
+                        "args": [{"kind": "slot", "index": 0}, {"kind": "slot", "index": 1}],
+                        "kwargs": {"eps": 1e-6},
+                    }
+                ],
+                "outputs": [0],
+            },
+            sort_keys=True,
+        )
         (cap,) = tb.execute(payload, [x.__dlpack__(), w.__dlpack__()])
         got = torch.from_dlpack(cap)
         # Manual reference
-        rms = torch.sqrt((x ** 2).mean(dim=-1, keepdim=True) + 1e-6)
+        rms = torch.sqrt((x**2).mean(dim=-1, keepdim=True) + 1e-6)
         ref = x / rms * w
         assert torch.allclose(got, ref, atol=1e-5)
 
@@ -690,13 +839,21 @@ class TestNormLayers:
         rv = torch.ones(8)
         # torch signature: (x, running_mean, running_var, weight, bias, ...)
         tensors = [x, rm, rv, w, b]
-        payload = json.dumps({
-            "inputs": [_spec(t) for t in tensors],
-            "nodes": [{"id": 0, "target": "batch_norm",
-                       "args": [{"kind": "slot", "index": i} for i in range(5)],
-                       "kwargs": {"eps": 1e-5, "training": False}}],
-            "outputs": [0],
-        }, sort_keys=True)
+        payload = json.dumps(
+            {
+                "inputs": [_spec(t) for t in tensors],
+                "nodes": [
+                    {
+                        "id": 0,
+                        "target": "batch_norm",
+                        "args": [{"kind": "slot", "index": i} for i in range(5)],
+                        "kwargs": {"eps": 1e-5, "training": False},
+                    }
+                ],
+                "outputs": [0],
+            },
+            sort_keys=True,
+        )
         (cap,) = tb.execute(payload, [t.__dlpack__() for t in tensors])
         got = torch.from_dlpack(cap)
         ref = F.batch_norm(x, rm, rv, w, b, training=False, eps=1e-5)
@@ -707,13 +864,21 @@ class TestNormLayers:
         w = torch.ones(8)
         b = torch.zeros(8)
         tensors = [x, w, b]
-        payload = json.dumps({
-            "inputs": [_spec(t) for t in tensors],
-            "nodes": [{"id": 0, "target": "group_norm",
-                       "args": [{"kind": "slot", "index": i} for i in range(3)],
-                       "kwargs": {"num_groups": 4, "eps": 1e-5}}],
-            "outputs": [0],
-        }, sort_keys=True)
+        payload = json.dumps(
+            {
+                "inputs": [_spec(t) for t in tensors],
+                "nodes": [
+                    {
+                        "id": 0,
+                        "target": "group_norm",
+                        "args": [{"kind": "slot", "index": i} for i in range(3)],
+                        "kwargs": {"num_groups": 4, "eps": 1e-5},
+                    }
+                ],
+                "outputs": [0],
+            },
+            sort_keys=True,
+        )
         (cap,) = tb.execute(payload, [t.__dlpack__() for t in tensors])
         got = torch.from_dlpack(cap)
         ref = F.group_norm(x, 4, w, b, eps=1e-5)
@@ -723,6 +888,7 @@ class TestNormLayers:
 # ---------------------------------------------------------------------------
 # 7. Shape ops
 # ---------------------------------------------------------------------------
+
 
 class TestShapeOps:
     def test_reshape(self):
@@ -764,13 +930,21 @@ class TestShapeOps:
         """Regression test: old cat() just appended bytes and only worked for dim=0 when 1D."""
         a = torch.randn(3, 4)
         b = torch.randn(5, 4)
-        payload = json.dumps({
-            "inputs": [_spec(a), _spec(b)],
-            "nodes": [{"id": 0, "target": "cat",
-                       "args": [{"kind": "slot", "index": 0}, {"kind": "slot", "index": 1}],
-                       "kwargs": {"dim": 0}}],
-            "outputs": [0],
-        }, sort_keys=True)
+        payload = json.dumps(
+            {
+                "inputs": [_spec(a), _spec(b)],
+                "nodes": [
+                    {
+                        "id": 0,
+                        "target": "cat",
+                        "args": [{"kind": "slot", "index": 0}, {"kind": "slot", "index": 1}],
+                        "kwargs": {"dim": 0},
+                    }
+                ],
+                "outputs": [0],
+            },
+            sort_keys=True,
+        )
         (cap,) = tb.execute(payload, [a.__dlpack__(), b.__dlpack__()])
         got = torch.from_dlpack(cap)
         ref = torch.cat([a, b], dim=0)
@@ -781,13 +955,21 @@ class TestShapeOps:
         """Regression test: old cat was wrong for dim=1."""
         a = torch.randn(4, 3)
         b = torch.randn(4, 5)
-        payload = json.dumps({
-            "inputs": [_spec(a), _spec(b)],
-            "nodes": [{"id": 0, "target": "cat",
-                       "args": [{"kind": "slot", "index": 0}, {"kind": "slot", "index": 1}],
-                       "kwargs": {"dim": 1}}],
-            "outputs": [0],
-        }, sort_keys=True)
+        payload = json.dumps(
+            {
+                "inputs": [_spec(a), _spec(b)],
+                "nodes": [
+                    {
+                        "id": 0,
+                        "target": "cat",
+                        "args": [{"kind": "slot", "index": 0}, {"kind": "slot", "index": 1}],
+                        "kwargs": {"dim": 1},
+                    }
+                ],
+                "outputs": [0],
+            },
+            sort_keys=True,
+        )
         (cap,) = tb.execute(payload, [a.__dlpack__(), b.__dlpack__()])
         got = torch.from_dlpack(cap)
         ref = torch.cat([a, b], dim=1)
@@ -796,13 +978,21 @@ class TestShapeOps:
 
     def test_cat_3tensors_dim0(self):
         tensors = [torch.randn(2, 4) for _ in range(3)]
-        payload = json.dumps({
-            "inputs": [_spec(t) for t in tensors],
-            "nodes": [{"id": 0, "target": "cat",
-                       "args": [{"kind": "slot", "index": i} for i in range(3)],
-                       "kwargs": {"dim": 0}}],
-            "outputs": [0],
-        }, sort_keys=True)
+        payload = json.dumps(
+            {
+                "inputs": [_spec(t) for t in tensors],
+                "nodes": [
+                    {
+                        "id": 0,
+                        "target": "cat",
+                        "args": [{"kind": "slot", "index": i} for i in range(3)],
+                        "kwargs": {"dim": 0},
+                    }
+                ],
+                "outputs": [0],
+            },
+            sort_keys=True,
+        )
         (cap,) = tb.execute(payload, [t.__dlpack__() for t in tensors])
         got = torch.from_dlpack(cap)
         ref = torch.cat(tensors, dim=0)
@@ -811,13 +1001,21 @@ class TestShapeOps:
     def test_cat_3d_dim1(self):
         a = torch.randn(2, 3, 5)
         b = torch.randn(2, 7, 5)
-        payload = json.dumps({
-            "inputs": [_spec(a), _spec(b)],
-            "nodes": [{"id": 0, "target": "cat",
-                       "args": [{"kind": "slot", "index": 0}, {"kind": "slot", "index": 1}],
-                       "kwargs": {"dim": 1}}],
-            "outputs": [0],
-        }, sort_keys=True)
+        payload = json.dumps(
+            {
+                "inputs": [_spec(a), _spec(b)],
+                "nodes": [
+                    {
+                        "id": 0,
+                        "target": "cat",
+                        "args": [{"kind": "slot", "index": 0}, {"kind": "slot", "index": 1}],
+                        "kwargs": {"dim": 1},
+                    }
+                ],
+                "outputs": [0],
+            },
+            sort_keys=True,
+        )
         (cap,) = tb.execute(payload, [a.__dlpack__(), b.__dlpack__()])
         got = torch.from_dlpack(cap)
         ref = torch.cat([a, b], dim=1)
@@ -826,13 +1024,21 @@ class TestShapeOps:
 
     def test_stack_dim0(self):
         tensors = [torch.randn(4) for _ in range(3)]
-        payload = json.dumps({
-            "inputs": [_spec(t) for t in tensors],
-            "nodes": [{"id": 0, "target": "stack",
-                       "args": [{"kind": "slot", "index": i} for i in range(3)],
-                       "kwargs": {"dim": 0}}],
-            "outputs": [0],
-        }, sort_keys=True)
+        payload = json.dumps(
+            {
+                "inputs": [_spec(t) for t in tensors],
+                "nodes": [
+                    {
+                        "id": 0,
+                        "target": "stack",
+                        "args": [{"kind": "slot", "index": i} for i in range(3)],
+                        "kwargs": {"dim": 0},
+                    }
+                ],
+                "outputs": [0],
+            },
+            sort_keys=True,
+        )
         (cap,) = tb.execute(payload, [t.__dlpack__() for t in tensors])
         got = torch.from_dlpack(cap)
         ref = torch.stack(tensors, dim=0)
@@ -863,11 +1069,21 @@ class TestShapeOps:
         """Phase 4: int64 index tensors are now first-class engine dtypes."""
         x = torch.randn(4, 8)
         idx = torch.tensor([2, 0, 3])
-        payload = json.dumps({
-            "inputs": [_spec(x), _spec(idx)],
-            "nodes": [{"id": 0, "target": "index_select", "args": [{"kind": "slot", "index": 0}, {"kind": "slot", "index": 1}], "kwargs": {"dim": 0}}],
-            "outputs": [0],
-        }, sort_keys=True)
+        payload = json.dumps(
+            {
+                "inputs": [_spec(x), _spec(idx)],
+                "nodes": [
+                    {
+                        "id": 0,
+                        "target": "index_select",
+                        "args": [{"kind": "slot", "index": 0}, {"kind": "slot", "index": 1}],
+                        "kwargs": {"dim": 0},
+                    }
+                ],
+                "outputs": [0],
+            },
+            sort_keys=True,
+        )
         (cap,) = tb.execute(payload, [x.__dlpack__(), idx.__dlpack__()])
         got = torch.from_dlpack(cap)
         assert torch.allclose(got, x.index_select(0, idx))
@@ -875,22 +1091,42 @@ class TestShapeOps:
     def test_gather(self):
         x = torch.randn(4, 6)
         g = torch.randint(0, 4, (2, 6))
-        payload = json.dumps({
-            "inputs": [_spec(x), _spec(g)],
-            "nodes": [{"id": 0, "target": "gather", "args": [{"kind": "slot", "index": 0}, {"kind": "slot", "index": 1}], "kwargs": {"dim": 0}}],
-            "outputs": [0],
-        }, sort_keys=True)
+        payload = json.dumps(
+            {
+                "inputs": [_spec(x), _spec(g)],
+                "nodes": [
+                    {
+                        "id": 0,
+                        "target": "gather",
+                        "args": [{"kind": "slot", "index": 0}, {"kind": "slot", "index": 1}],
+                        "kwargs": {"dim": 0},
+                    }
+                ],
+                "outputs": [0],
+            },
+            sort_keys=True,
+        )
         (cap,) = tb.execute(payload, [x.__dlpack__(), g.__dlpack__()])
         got = torch.from_dlpack(cap)
         assert torch.allclose(got, x.gather(0, g))
 
     def test_transpose(self):
         x = torch.randn(2, 3, 4)
-        payload = json.dumps({
-            "inputs": [_spec(x)],
-            "nodes": [{"id": 0, "target": "transpose", "args": [{"kind": "slot", "index": 0}], "kwargs": {"d0": 1, "d1": 2}}],
-            "outputs": [0],
-        }, sort_keys=True)
+        payload = json.dumps(
+            {
+                "inputs": [_spec(x)],
+                "nodes": [
+                    {
+                        "id": 0,
+                        "target": "transpose",
+                        "args": [{"kind": "slot", "index": 0}],
+                        "kwargs": {"d0": 1, "d1": 2},
+                    }
+                ],
+                "outputs": [0],
+            },
+            sort_keys=True,
+        )
         (cap,) = tb.execute(payload, [x.__dlpack__()])
         got = torch.from_dlpack(cap)
         assert torch.allclose(got, x.transpose(1, 2))
@@ -912,13 +1148,21 @@ class TestShapeOps:
     def test_masked_fill(self):
         x = torch.randn(4, 4)
         mask = (x > 0).float()
-        payload = json.dumps({
-            "inputs": [_spec(x), _spec(mask)],
-            "nodes": [{"id": 0, "target": "masked_fill",
-                       "args": [{"kind": "slot", "index": 0}, {"kind": "slot", "index": 1}],
-                       "kwargs": {"value": -1e9}}],
-            "outputs": [0],
-        }, sort_keys=True)
+        payload = json.dumps(
+            {
+                "inputs": [_spec(x), _spec(mask)],
+                "nodes": [
+                    {
+                        "id": 0,
+                        "target": "masked_fill",
+                        "args": [{"kind": "slot", "index": 0}, {"kind": "slot", "index": 1}],
+                        "kwargs": {"value": -1e9},
+                    }
+                ],
+                "outputs": [0],
+            },
+            sort_keys=True,
+        )
         (cap,) = tb.execute(payload, [x.__dlpack__(), mask.__dlpack__()])
         got = torch.from_dlpack(cap)
         ref = x.masked_fill(mask.bool(), -1e9)
@@ -929,9 +1173,11 @@ class TestShapeOps:
 # 8. End-to-end torch.compile tests for Phase 2 operators
 # ---------------------------------------------------------------------------
 
+
 class TestEndToEndPhase2:
     def test_matmul_via_compile(self):
         """nn.Linear (which uses aten.addmm / aten.mm) should route through native engine."""
+
         # Use a model with only linear ops that should be supported
         def model(x, w):
             return x @ w  # aten.mm
@@ -994,22 +1240,32 @@ class TestEndToEndPhase2:
 # 9. Multi-node payload: chaining operators inside a single Rust dispatch
 # ---------------------------------------------------------------------------
 
+
 class TestChainedPayload:
     def test_sum_then_relu(self):
         """Two ops in one payload, second node references first node's output."""
         x = torch.randn(4, 8)
-        payload = json.dumps({
-            "inputs": [_spec(x)],
-            "nodes": [
-                {"id": 0, "target": "sum",
-                 "args": [{"kind": "slot", "index": 0}],
-                 "kwargs": {"dim": 1, "keepdim": True}},
-                {"id": 1, "target": "relu",
-                 "args": [{"kind": "slot", "index": 1}],  # slot 1 = first output (base 1)
-                 "kwargs": {}},
-            ],
-            "outputs": [1],
-        }, sort_keys=True)
+        payload = json.dumps(
+            {
+                "inputs": [_spec(x)],
+                "nodes": [
+                    {
+                        "id": 0,
+                        "target": "sum",
+                        "args": [{"kind": "slot", "index": 0}],
+                        "kwargs": {"dim": 1, "keepdim": True},
+                    },
+                    {
+                        "id": 1,
+                        "target": "relu",
+                        "args": [{"kind": "slot", "index": 1}],  # slot 1 = first output (base 1)
+                        "kwargs": {},
+                    },
+                ],
+                "outputs": [1],
+            },
+            sort_keys=True,
+        )
         (cap,) = tb.execute(payload, [x.__dlpack__()])
         got = torch.from_dlpack(cap)
         ref = torch.relu(x.sum(dim=1, keepdim=True))
@@ -1019,18 +1275,27 @@ class TestChainedPayload:
         a = torch.randn(4, 8)
         b = torch.randn(8, 4)
         bias = torch.randn(4, 4)
-        payload = json.dumps({
-            "inputs": [_spec(a), _spec(b), _spec(bias)],
-            "nodes": [
-                {"id": 0, "target": "matmul",
-                 "args": [{"kind": "slot", "index": 0}, {"kind": "slot", "index": 1}],
-                 "kwargs": {}},
-                {"id": 1, "target": "add",
-                 "args": [{"kind": "slot", "index": 3}, {"kind": "slot", "index": 2}],
-                 "kwargs": {}},  # slot 3 = matmul output (3 inputs + 0th node)
-            ],
-            "outputs": [1],
-        }, sort_keys=True)
+        payload = json.dumps(
+            {
+                "inputs": [_spec(a), _spec(b), _spec(bias)],
+                "nodes": [
+                    {
+                        "id": 0,
+                        "target": "matmul",
+                        "args": [{"kind": "slot", "index": 0}, {"kind": "slot", "index": 1}],
+                        "kwargs": {},
+                    },
+                    {
+                        "id": 1,
+                        "target": "add",
+                        "args": [{"kind": "slot", "index": 3}, {"kind": "slot", "index": 2}],
+                        "kwargs": {},
+                    },  # slot 3 = matmul output (3 inputs + 0th node)
+                ],
+                "outputs": [1],
+            },
+            sort_keys=True,
+        )
         (cap,) = tb.execute(payload, [a.__dlpack__(), b.__dlpack__(), bias.__dlpack__()])
         got = torch.from_dlpack(cap)
         ref = (a @ b) + bias
@@ -1040,6 +1305,7 @@ class TestChainedPayload:
 # ---------------------------------------------------------------------------
 # 10. Edge cases and error handling
 # ---------------------------------------------------------------------------
+
 
 class TestEdgeCases:
     def test_sum_empty_dim_keepdim(self):
@@ -1089,10 +1355,12 @@ class TestEdgeCases:
 # without promotion the export path silently reduced over ALL dims.  These
 # tests lock the promotion + getitem-alias behaviour in place.
 
+
 class TestExportPathReductions:
     def _run(self, fn, shape=(4, 8), atol=1e-4):
         from torch.fx.experimental.proxy_tensor import make_fx
         from torchburn._compiled import BurnCompiledCallable
+
         x = torch.randn(*shape)
         gm = make_fx(fn)(x)
         cb = BurnCompiledCallable(gm, [x])
@@ -1133,6 +1401,7 @@ class TestExportPathReductions:
         x = torch.randn(4, 8)
         from torch.fx.experimental.proxy_tensor import make_fx
         from torchburn._compiled import BurnCompiledCallable
+
         gm = make_fx(lambda t: torch.argmax(t, dim=1))(x)
         out = BurnCompiledCallable(gm, [x])(x)
         ref = torch.argmax(x, dim=1)
@@ -1171,8 +1440,7 @@ class TestExportPathReductions:
         assert torch.equal(out, fn(x))  # int64 indices preserved
 
     def test_sum_multidim_falls_back(self):
-        """dim=[0,1] is rejected by the engine -> eager fallback, correct result."""
-        out, ref = self._run(lambda x: torch.sum(x, dim=[0, 1]), shape=(3, 4, 5))
+        self._run(lambda x: torch.sum(x, dim=[0, 1]), shape=(3, 4, 5))
 
     def test_norm_p2_dim(self):
         self._run(lambda x: torch.norm(x, 2, dim=1))

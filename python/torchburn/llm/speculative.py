@@ -32,13 +32,14 @@ import random
 from dataclasses import dataclass, field
 from typing import Any, Optional, Sequence
 
-
 # ---------------------------------------------------------------------------
 # Sampling helpers
 # ---------------------------------------------------------------------------
 
+
 def _softmax(logits: list[float], temperature: float = 1.0) -> list[float]:
     import torch as _torch
+
     t = _torch.tensor(logits, dtype=_torch.float32)
     if temperature <= 0.0:
         # Greedy
@@ -65,6 +66,7 @@ def _argmax(logits: list[float]) -> int:
 # ---------------------------------------------------------------------------
 # Speculative Decoder
 # ---------------------------------------------------------------------------
+
 
 class SpeculativeDecoder:
     """Speculative decoding: draft model proposes K tokens, target verifies.
@@ -126,7 +128,7 @@ class SpeculativeDecoder:
             draft_probs: list[list[float]] = []
             current_token = generated[-1] if generated else prompt_ids[-1]
 
-            for k in range(self.K):
+            for _k in range(self.K):
                 logits = self.draft.step(current_token, offset + len(draft_tokens))
                 probs = _softmax(logits, self.temperature)
                 tok = _sample(probs)
@@ -143,14 +145,20 @@ class SpeculativeDecoder:
             target_probs_list: list[list[float]] = []
             target_probs_final: list[float] = []
             native_accepted = False
-            if hasattr(self.target, "speculative_accept") and hasattr(self.target, "logits") is False:
+            if (
+                hasattr(self.target, "speculative_accept")
+                and hasattr(self.target, "logits") is False
+            ):
                 try:
-                    import torch as _torch  # noqa: F401
                     flat: list[float] = []
                     for dp in draft_probs:
                         flat.extend(dp)
                     n_acc, bonus = self.target.speculative_accept(
-                        offset, draft_tokens, flat, self.temperature, 1.0,
+                        offset,
+                        draft_tokens,
+                        flat,
+                        self.temperature,
+                        1.0,
                     )
                     # speculative_accept already advanced target KV through drafts;
                     # rewind semantics: accepted tokens are final, bonus sampled.
@@ -179,7 +187,9 @@ class SpeculativeDecoder:
                         verify_in = [generated[-1] if generated else prompt_ids[-1]] + draft_tokens
                         rows = self.target.verify_tokens(offset, verify_in)
                         # rows[0..K] are target logits at each draft position
-                        target_probs_list = [_softmax(list(r), self.temperature) for r in rows[:len(draft_tokens)]]
+                        target_probs_list = [
+                            _softmax(list(r), self.temperature) for r in rows[: len(draft_tokens)]
+                        ]
                         target_probs_final = _softmax(list(rows[-1]), self.temperature)
                     except Exception:
                         target_probs_list = []
@@ -190,8 +200,10 @@ class SpeculativeDecoder:
                         target_probs_list.append(_softmax(logits, self.temperature))
                         verify_input = draft_tok
                     # Final target logits after last draft token
-                    final_logits = self.target.step(draft_tokens[-1] if draft_tokens else verify_input,
-                                                     offset + len(draft_tokens))
+                    final_logits = self.target.step(
+                        draft_tokens[-1] if draft_tokens else verify_input,
+                        offset + len(draft_tokens),
+                    )
                     target_probs_final = _softmax(final_logits, self.temperature)
 
             # Native path already appended + advanced offset; next round.
@@ -202,7 +214,7 @@ class SpeculativeDecoder:
 
             # ── Acceptance / rejection sampling ─────────────────────────────
             n_accepted = 0
-            for k, (draft_tok, dp, tp) in enumerate(
+            for _k, (draft_tok, dp, tp) in enumerate(
                 zip(draft_tokens, draft_probs, target_probs_list)
             ):
                 p_draft = dp[draft_tok]
@@ -242,9 +254,11 @@ class SpeculativeDecoder:
 # Multi-sequence batched decoder
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class _SeqState:
     """State for one sequence in a batch."""
+
     prompt: list[int]
     generated: list[int] = field(default_factory=list)
     offset: int = 0

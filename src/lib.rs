@@ -5,8 +5,6 @@
 //! capsules (REQ-003); graph structure is hashed with BLAKE3 (REQ-004); and
 //! unsupported operators are flagged so the Python interpreter can route them
 //! to native PyTorch eager execution (REQ-002).
-
-#![allow(dead_code)]
 #![warn(clippy::all)]
 // Kernel dispatch needs many params (tensor shapes, strides, dtypes)
 #![allow(clippy::too_many_arguments)]
@@ -68,7 +66,6 @@
 // Module declarations
 // ---------------------------------------------------------------------------
 
-#[allow(dead_code)]
 pub mod autograd;
 mod cache;
 mod dlpack;
@@ -147,6 +144,7 @@ fn _torchburn(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(ffi::gpu_ffi::gpu_available, m)?)?;
     m.add_function(wrap_pyfunction!(ffi::gpu_ffi::wgpu_clear_weight_cache, m)?)?;
     m.add_function(wrap_pyfunction!(ffi::gpu_ffi::wgpu_clear_buffer_pool, m)?)?;
+    m.add_function(wrap_pyfunction!(ffi::gpu_ffi::is_metal_available, m)?)?;
 
     // Debug FFI
     m.add_function(wrap_pyfunction!(ffi::debug_ffi::cpu_features_report, m)?)?;
@@ -154,9 +152,14 @@ fn _torchburn(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(ffi::debug_ffi::capsule_dump, m)?)?;
 
     // Autograd FFI
+    m.add_class::<ffi::autograd_ffi::PyAutogradGuard>()?;
     m.add_function(wrap_pyfunction!(ffi::autograd_ffi::autograd_enable, m)?)?;
     m.add_function(wrap_pyfunction!(ffi::autograd_ffi::autograd_disable, m)?)?;
     m.add_function(wrap_pyfunction!(ffi::autograd_ffi::autograd_is_enabled, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        ffi::autograd_ffi::autograd_active_recording_threads,
+        m
+    )?)?;
     m.add_function(wrap_pyfunction!(ffi::autograd_ffi::autograd_backward, m)?)?;
     m.add_function(wrap_pyfunction!(ffi::autograd_ffi::autograd_reset, m)?)?;
     m.add_function(wrap_pyfunction!(ffi::autograd_ffi::autograd_tape_len, m)?)?;

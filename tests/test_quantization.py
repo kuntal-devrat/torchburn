@@ -1,6 +1,7 @@
-import torch
 import pytest
+import torch
 import torchburn
+
 
 def test_quantize_dequantize_per_tensor():
     class QuantDequantModule(torch.nn.Module):
@@ -19,6 +20,7 @@ def test_quantize_dequantize_per_tensor():
     expected = mod(x)
 
     torch.testing.assert_close(out, expected, rtol=1e-4, atol=1e-4)
+
 
 def test_quantized_linear_sim():
     class QuantizedMatmul(torch.nn.Module):

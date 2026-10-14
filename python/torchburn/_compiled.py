@@ -31,7 +31,11 @@ class BurnCompiledCallable(_BaseInterpreter):
         return self._interpret(env)
 
     def __repr__(self) -> str:
-        nodes = len(self.plan.get("nodes", [])) if hasattr(self, "plan") and isinstance(self.plan, dict) else 0
+        nodes = (
+            len(self.plan.get("nodes", []))
+            if hasattr(self, "plan") and isinstance(self.plan, dict)
+            else 0
+        )
         phases = len(self._phases) if hasattr(self, "_phases") else 0
         return f"<BurnCompiledCallable nodes={nodes} phases={phases} handle={self._graph_handle}>"
 

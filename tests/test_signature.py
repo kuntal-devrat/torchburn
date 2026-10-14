@@ -3,18 +3,21 @@
 from __future__ import annotations
 
 import torch
-
 import torchburn
 from torchburn import _torchburn as tb
 
 
 def test_engine_surface():
-    assert any(tb.active_engine().startswith(base) for base in ("native_cpu", "burn_ndarray", "burn_wgpu"))
+    assert any(
+        tb.active_engine().startswith(base) for base in ("native_cpu", "burn_ndarray", "burn_wgpu")
+    )
     targets = tb.supported_targets()
     # Phase 1 ops are always present
     assert {"add", "sub", "mul", "div", "relu"}.issubset(set(targets))
     # Phase 2 ops are also present
-    assert {"matmul", "linear", "bmm", "sum", "mean", "sigmoid", "layer_norm"}.issubset(set(targets))
+    assert {"matmul", "linear", "bmm", "sum", "mean", "sigmoid", "layer_norm"}.issubset(
+        set(targets)
+    )
     # There are many more ops now
     assert len(targets) >= 40
 

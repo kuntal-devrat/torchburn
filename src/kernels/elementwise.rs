@@ -19,94 +19,65 @@ const PAR_CHUNK: usize = 16 * 1024;
 macro_rules! unary_op {
     ($name:ident, $f32_expr:expr, $f64_expr:expr) => {
         pub fn $name(a: &BorrowedTensor) -> PyResult<OwnedTensor> {
+            if !a.is_contiguous() {
+                let contig = crate::shape_ops::to_contiguous(a)?;
+                return $name(&BorrowedTensor::from_owned(&contig));
+            }
             let mut out = OwnedTensor::new(a.dtype, a.shape.clone());
             match a.dtype {
                 DType::F32 => {
                     let src = unsafe { typed_slice::<f32>(a) };
                     let dst = unsafe { typed_mut_slice::<f32>(&mut out) };
-                    // SIMD for simple ops that wide supports (abs, neg) will use scalar fallback for now
-                    // but we keep the structure for future wide::exp etc.
-                    if a.is_contiguous() {
-                        use rayon::prelude::*;
-                        dst.par_chunks_mut(PAR_CHUNK)
-                            .enumerate()
-                            .for_each(|(ci, chunk)| {
-                                let s = ci * PAR_CHUNK;
-                                for (j, o) in chunk.iter_mut().enumerate() {
-                                    *o = $f32_expr(src[s + j]);
-                                }
-                            });
-                    } else {
-                        // strided fallback
-                        let n = elem_count(&a.shape);
-                        for i in 0..n {
-                            dst[i] = $f32_expr(src[i]);
-                        }
-                    }
+                    use rayon::prelude::*;
+                    dst.par_chunks_mut(PAR_CHUNK)
+                        .enumerate()
+                        .for_each(|(ci, chunk)| {
+                            let s = ci * PAR_CHUNK;
+                            for (j, o) in chunk.iter_mut().enumerate() {
+                                *o = $f32_expr(src[s + j]);
+                            }
+                        });
                 }
                 DType::F64 => {
                     let src = unsafe { typed_slice::<f64>(a) };
                     let dst = unsafe { typed_mut_slice::<f64>(&mut out) };
-                    if a.is_contiguous() {
-                        use rayon::prelude::*;
-                        dst.par_chunks_mut(PAR_CHUNK)
-                            .enumerate()
-                            .for_each(|(ci, chunk)| {
-                                let s = ci * PAR_CHUNK;
-                                for (j, o) in chunk.iter_mut().enumerate() {
-                                    *o = $f64_expr(src[s + j]);
-                                }
-                            });
-                    } else {
-                        let n = elem_count(&a.shape);
-                        for i in 0..n {
-                            dst[i] = $f64_expr(src[i]);
-                        }
-                    }
+                    use rayon::prelude::*;
+                    dst.par_chunks_mut(PAR_CHUNK)
+                        .enumerate()
+                        .for_each(|(ci, chunk)| {
+                            let s = ci * PAR_CHUNK;
+                            for (j, o) in chunk.iter_mut().enumerate() {
+                                *o = $f64_expr(src[s + j]);
+                            }
+                        });
                 }
                 DType::F16 => {
                     let src = unsafe { typed_slice::<half::f16>(a) };
                     let dst = unsafe { typed_mut_slice::<half::f16>(&mut out) };
-                    if a.is_contiguous() {
-                        use rayon::prelude::*;
-                        dst.par_chunks_mut(PAR_CHUNK)
-                            .enumerate()
-                            .for_each(|(ci, chunk)| {
-                                let s = ci * PAR_CHUNK;
-                                for (j, o) in chunk.iter_mut().enumerate() {
-                                    let v = src[s + j].to_f32();
-                                    *o = half::f16::from_f32($f32_expr(v));
-                                }
-                            });
-                    } else {
-                        let n = elem_count(&a.shape);
-                        for i in 0..n {
-                            let v = src[i].to_f32();
-                            dst[i] = half::f16::from_f32($f32_expr(v));
-                        }
-                    }
+                    use rayon::prelude::*;
+                    dst.par_chunks_mut(PAR_CHUNK)
+                        .enumerate()
+                        .for_each(|(ci, chunk)| {
+                            let s = ci * PAR_CHUNK;
+                            for (j, o) in chunk.iter_mut().enumerate() {
+                                let v = src[s + j].to_f32();
+                                *o = half::f16::from_f32($f32_expr(v));
+                            }
+                        });
                 }
                 DType::BF16 => {
                     let src = unsafe { typed_slice::<half::bf16>(a) };
                     let dst = unsafe { typed_mut_slice::<half::bf16>(&mut out) };
-                    if a.is_contiguous() {
-                        use rayon::prelude::*;
-                        dst.par_chunks_mut(PAR_CHUNK)
-                            .enumerate()
-                            .for_each(|(ci, chunk)| {
-                                let s = ci * PAR_CHUNK;
-                                for (j, o) in chunk.iter_mut().enumerate() {
-                                    let v = src[s + j].to_f32();
-                                    *o = half::bf16::from_f32($f32_expr(v));
-                                }
-                            });
-                    } else {
-                        let n = elem_count(&a.shape);
-                        for i in 0..n {
-                            let v = src[i].to_f32();
-                            dst[i] = half::bf16::from_f32($f32_expr(v));
-                        }
-                    }
+                    use rayon::prelude::*;
+                    dst.par_chunks_mut(PAR_CHUNK)
+                        .enumerate()
+                        .for_each(|(ci, chunk)| {
+                            let s = ci * PAR_CHUNK;
+                            for (j, o) in chunk.iter_mut().enumerate() {
+                                let v = src[s + j].to_f32();
+                                *o = half::bf16::from_f32($f32_expr(v));
+                            }
+                        });
                 }
                 _ => {
                     return Err(unsupported(concat!(
@@ -141,127 +112,127 @@ unary_op!(log1p, |x: f32| x.ln_1p(), |x: f64| x.ln_1p());
 unary_op!(log2, |x: f32| x.log2(), |x: f64| x.log2());
 unary_op!(log10, |x: f32| x.log10(), |x: f64| x.log10());
 
+// ── general multi-dimensional coordinate broadcasting helper ──
+fn broadcast_apply_binary<A: Copy, B: Copy, Out: Copy, F>(
+    a: &BorrowedTensor,
+    b: &BorrowedTensor,
+    out: &mut OwnedTensor,
+    f: F,
+) where
+    F: Fn(A, B) -> Out,
+{
+    let out_shape = out.shape.clone();
+    let a_data = unsafe { typed_slice::<A>(a) };
+    let b_data = unsafe { typed_slice::<B>(b) };
+    let out_data = unsafe { typed_mut_slice::<Out>(out) };
+    let n = out_data.len();
+    if n == 0 {
+        return;
+    }
+    let a_contig = a.is_contiguous();
+    let b_contig = b.is_contiguous();
+    if a.shape == b.shape && a_contig && b_contig && a.shape == out_shape {
+        for i in 0..n {
+            out_data[i] = f(a_data[i], b_data[i]);
+        }
+        return;
+    }
+    if a.elem_count() == 1 && b_contig && b.shape == out_shape {
+        let scalar = a_data[0];
+        for i in 0..n {
+            out_data[i] = f(scalar, b_data[i]);
+        }
+        return;
+    }
+    if b.elem_count() == 1 && a_contig && a.shape == out_shape {
+        let scalar = b_data[0];
+        for i in 0..n {
+            out_data[i] = f(a_data[i], scalar);
+        }
+        return;
+    }
+
+    let out_rank = out_shape.len();
+    let a_rank = a.shape.len();
+    let b_rank = b.shape.len();
+    let a_pad = out_rank.saturating_sub(a_rank);
+    let b_pad = out_rank.saturating_sub(b_rank);
+    let mut coords = vec![0usize; out_rank];
+    for oi in 0..n {
+        let mut rem = oi;
+        for d in (0..out_rank).rev() {
+            coords[d] = rem % (out_shape[d].max(1) as usize);
+            rem /= out_shape[d].max(1) as usize;
+        }
+        let mut ai = 0usize;
+        let mut bi = 0usize;
+        for d in 0..out_rank {
+            let off = coords[d];
+            if d >= a_pad && a.shape[d - a_pad] > 1 {
+                ai += off * a.strides[d - a_pad] as usize;
+            }
+            if d >= b_pad && b.shape[d - b_pad] > 1 {
+                bi += off * b.strides[d - b_pad] as usize;
+            }
+        }
+        out_data[oi] = f(a_data[ai], b_data[bi]);
+    }
+}
+
 // ── binary math (6) ──
 pub fn atan2(a: &BorrowedTensor, b: &BorrowedTensor) -> PyResult<OwnedTensor> {
     let out_shape = crate::kernels::broadcast_shape(&a.shape, &b.shape)?;
-    let mut out = OwnedTensor::new(a.dtype, out_shape.clone());
+    let mut out = OwnedTensor::new(a.dtype, out_shape);
     match a.dtype {
-        DType::F32 => {
-            let ad = unsafe { typed_slice::<f32>(a) };
-            let bd = unsafe { typed_slice::<f32>(b) };
-            let od = unsafe { typed_mut_slice::<f32>(&mut out) };
-            for i in 0..od.len() {
-                od[i] = ad[i % ad.len()].atan2(bd[i % bd.len()]);
-            }
-        }
-        DType::F64 => {
-            let ad = unsafe { typed_slice::<f64>(a) };
-            let bd = unsafe { typed_slice::<f64>(b) };
-            let od = unsafe { typed_mut_slice::<f64>(&mut out) };
-            for i in 0..od.len() {
-                od[i] = ad[i % ad.len()].atan2(bd[i % bd.len()]);
-            }
-        }
+        DType::F32 => broadcast_apply_binary::<f32, f32, f32, _>(a, b, &mut out, |x, y| x.atan2(y)),
+        DType::F64 => broadcast_apply_binary::<f64, f64, f64, _>(a, b, &mut out, |x, y| x.atan2(y)),
         _ => return Err(unsupported("atan2 only supports f32/f64")),
     }
     Ok(out)
 }
 pub fn hypot(a: &BorrowedTensor, b: &BorrowedTensor) -> PyResult<OwnedTensor> {
     let out_shape = crate::kernels::broadcast_shape(&a.shape, &b.shape)?;
-    let mut out = OwnedTensor::new(a.dtype, out_shape.clone());
+    let mut out = OwnedTensor::new(a.dtype, out_shape);
     match a.dtype {
-        DType::F32 => {
-            let ad = unsafe { typed_slice::<f32>(a) };
-            let bd = unsafe { typed_slice::<f32>(b) };
-            let od = unsafe { typed_mut_slice::<f32>(&mut out) };
-            for i in 0..od.len() {
-                od[i] = ad[i % ad.len()].hypot(bd[i % bd.len()]);
-            }
-        }
-        DType::F64 => {
-            let ad = unsafe { typed_slice::<f64>(a) };
-            let bd = unsafe { typed_slice::<f64>(b) };
-            let od = unsafe { typed_mut_slice::<f64>(&mut out) };
-            for i in 0..od.len() {
-                od[i] = ad[i % ad.len()].hypot(bd[i % bd.len()]);
-            }
-        }
+        DType::F32 => broadcast_apply_binary::<f32, f32, f32, _>(a, b, &mut out, |x, y| x.hypot(y)),
+        DType::F64 => broadcast_apply_binary::<f64, f64, f64, _>(a, b, &mut out, |x, y| x.hypot(y)),
         _ => return Err(unsupported("hypot only supports f32/f64")),
     }
     Ok(out)
 }
 pub fn fmod(a: &BorrowedTensor, b: &BorrowedTensor) -> PyResult<OwnedTensor> {
     let out_shape = crate::kernels::broadcast_shape(&a.shape, &b.shape)?;
-    let mut out = OwnedTensor::new(a.dtype, out_shape.clone());
+    let mut out = OwnedTensor::new(a.dtype, out_shape);
     match a.dtype {
-        DType::F32 => {
-            let ad = unsafe { typed_slice::<f32>(a) };
-            let bd = unsafe { typed_slice::<f32>(b) };
-            let od = unsafe { typed_mut_slice::<f32>(&mut out) };
-            for i in 0..od.len() {
-                od[i] = ad[i % ad.len()] % bd[i % bd.len()];
-            }
-        }
-        DType::F64 => {
-            let ad = unsafe { typed_slice::<f64>(a) };
-            let bd = unsafe { typed_slice::<f64>(b) };
-            let od = unsafe { typed_mut_slice::<f64>(&mut out) };
-            for i in 0..od.len() {
-                od[i] = ad[i % ad.len()] % bd[i % bd.len()];
-            }
-        }
+        DType::F32 => broadcast_apply_binary::<f32, f32, f32, _>(a, b, &mut out, |x, y| x % y),
+        DType::F64 => broadcast_apply_binary::<f64, f64, f64, _>(a, b, &mut out, |x, y| x % y),
         _ => return Err(unsupported("fmod only supports f32/f64")),
     }
     Ok(out)
 }
 pub fn remainder(a: &BorrowedTensor, b: &BorrowedTensor) -> PyResult<OwnedTensor> {
-    // PyTorch remainder is like Python % (floored)
     let out_shape = crate::kernels::broadcast_shape(&a.shape, &b.shape)?;
-    let mut out = OwnedTensor::new(a.dtype, out_shape.clone());
+    let mut out = OwnedTensor::new(a.dtype, out_shape);
     match a.dtype {
-        DType::F32 => {
-            let ad = unsafe { typed_slice::<f32>(a) };
-            let bd = unsafe { typed_slice::<f32>(b) };
-            let od = unsafe { typed_mut_slice::<f32>(&mut out) };
-            for i in 0..od.len() {
-                let av = ad[i % ad.len()];
-                let bv = bd[i % bd.len()];
-                od[i] = av - (av / bv).floor() * bv;
-            }
-        }
-        DType::F64 => {
-            let ad = unsafe { typed_slice::<f64>(a) };
-            let bd = unsafe { typed_slice::<f64>(b) };
-            let od = unsafe { typed_mut_slice::<f64>(&mut out) };
-            for i in 0..od.len() {
-                let av = ad[i % ad.len()];
-                let bv = bd[i % bd.len()];
-                od[i] = av - (av / bv).floor() * bv;
-            }
-        }
+        DType::F32 => broadcast_apply_binary::<f32, f32, f32, _>(a, b, &mut out, |x, y| {
+            x - (x / y).floor() * y
+        }),
+        DType::F64 => broadcast_apply_binary::<f64, f64, f64, _>(a, b, &mut out, |x, y| {
+            x - (x / y).floor() * y
+        }),
         _ => return Err(unsupported("remainder only supports f32/f64")),
     }
     Ok(out)
 }
 pub fn copysign(a: &BorrowedTensor, b: &BorrowedTensor) -> PyResult<OwnedTensor> {
     let out_shape = crate::kernels::broadcast_shape(&a.shape, &b.shape)?;
-    let mut out = OwnedTensor::new(a.dtype, out_shape.clone());
+    let mut out = OwnedTensor::new(a.dtype, out_shape);
     match a.dtype {
         DType::F32 => {
-            let ad = unsafe { typed_slice::<f32>(a) };
-            let bd = unsafe { typed_slice::<f32>(b) };
-            let od = unsafe { typed_mut_slice::<f32>(&mut out) };
-            for i in 0..od.len() {
-                od[i] = ad[i % ad.len()].copysign(bd[i % bd.len()]);
-            }
+            broadcast_apply_binary::<f32, f32, f32, _>(a, b, &mut out, |x, y| x.copysign(y))
         }
         DType::F64 => {
-            let ad = unsafe { typed_slice::<f64>(a) };
-            let bd = unsafe { typed_slice::<f64>(b) };
-            let od = unsafe { typed_mut_slice::<f64>(&mut out) };
-            for i in 0..od.len() {
-                od[i] = ad[i % ad.len()].copysign(bd[i % bd.len()]);
-            }
+            broadcast_apply_binary::<f64, f64, f64, _>(a, b, &mut out, |x, y| x.copysign(y))
         }
         _ => return Err(unsupported("copysign only supports f32/f64")),
     }
@@ -269,24 +240,16 @@ pub fn copysign(a: &BorrowedTensor, b: &BorrowedTensor) -> PyResult<OwnedTensor>
 }
 pub fn lerp(a: &BorrowedTensor, b: &BorrowedTensor, w: f64) -> PyResult<OwnedTensor> {
     let out_shape = crate::kernels::broadcast_shape(&a.shape, &b.shape)?;
-    let mut out = OwnedTensor::new(a.dtype, out_shape.clone());
+    let mut out = OwnedTensor::new(a.dtype, out_shape);
     match a.dtype {
         DType::F32 => {
-            let ad = unsafe { typed_slice::<f32>(a) };
-            let bd = unsafe { typed_slice::<f32>(b) };
-            let od = unsafe { typed_mut_slice::<f32>(&mut out) };
             let wf = w as f32;
-            for i in 0..od.len() {
-                od[i] = ad[i % ad.len()] + wf * (bd[i % bd.len()] - ad[i % ad.len()]);
-            }
+            broadcast_apply_binary::<f32, f32, f32, _>(a, b, &mut out, move |x, y| {
+                x + wf * (y - x)
+            });
         }
         DType::F64 => {
-            let ad = unsafe { typed_slice::<f64>(a) };
-            let bd = unsafe { typed_slice::<f64>(b) };
-            let od = unsafe { typed_mut_slice::<f64>(&mut out) };
-            for i in 0..od.len() {
-                od[i] = ad[i % ad.len()] + w * (bd[i % bd.len()] - ad[i % ad.len()]);
-            }
+            broadcast_apply_binary::<f64, f64, f64, _>(a, b, &mut out, move |x, y| x + w * (y - x));
         }
         _ => return Err(unsupported("lerp only supports f32/f64")),
     }
@@ -296,62 +259,55 @@ pub fn lerp(a: &BorrowedTensor, b: &BorrowedTensor, w: f64) -> PyResult<OwnedTen
 // ── bitwise for i64/i32 ──
 pub fn bitwise_and(a: &BorrowedTensor, b: &BorrowedTensor) -> PyResult<OwnedTensor> {
     let out_shape = crate::kernels::broadcast_shape(&a.shape, &b.shape)?;
-    let mut out = OwnedTensor::new(DType::I64, out_shape.clone());
-    let ad = unsafe { typed_slice::<i64>(a) };
-    let bd = unsafe { typed_slice::<i64>(b) };
-    let od = unsafe { typed_mut_slice::<i64>(&mut out) };
-    for i in 0..od.len() {
-        od[i] = ad[i % ad.len()] & bd[i % bd.len()];
-    }
+    let mut out = OwnedTensor::new(DType::I64, out_shape);
+    broadcast_apply_binary::<i64, i64, i64, _>(a, b, &mut out, |x, y| x & y);
     Ok(out)
 }
 pub fn bitwise_or(a: &BorrowedTensor, b: &BorrowedTensor) -> PyResult<OwnedTensor> {
     let out_shape = crate::kernels::broadcast_shape(&a.shape, &b.shape)?;
-    let mut out = OwnedTensor::new(DType::I64, out_shape.clone());
-    let ad = unsafe { typed_slice::<i64>(a) };
-    let bd = unsafe { typed_slice::<i64>(b) };
-    let od = unsafe { typed_mut_slice::<i64>(&mut out) };
-    for i in 0..od.len() {
-        od[i] = ad[i % ad.len()] | bd[i % bd.len()];
-    }
+    let mut out = OwnedTensor::new(DType::I64, out_shape);
+    broadcast_apply_binary::<i64, i64, i64, _>(a, b, &mut out, |x, y| x | y);
     Ok(out)
 }
 pub fn bitwise_xor(a: &BorrowedTensor, b: &BorrowedTensor) -> PyResult<OwnedTensor> {
     let out_shape = crate::kernels::broadcast_shape(&a.shape, &b.shape)?;
-    let mut out = OwnedTensor::new(DType::I64, out_shape.clone());
-    let ad = unsafe { typed_slice::<i64>(a) };
-    let bd = unsafe { typed_slice::<i64>(b) };
-    let od = unsafe { typed_mut_slice::<i64>(&mut out) };
-    for i in 0..od.len() {
-        od[i] = ad[i % ad.len()] ^ bd[i % bd.len()];
-    }
+    let mut out = OwnedTensor::new(DType::I64, out_shape);
+    broadcast_apply_binary::<i64, i64, i64, _>(a, b, &mut out, |x, y| x ^ y);
     Ok(out)
 }
 pub fn bitwise_not(a: &BorrowedTensor) -> PyResult<OwnedTensor> {
+    if !a.is_contiguous() {
+        let contig = crate::shape_ops::to_contiguous(a)?;
+        return bitwise_not(&BorrowedTensor::from_owned(&contig));
+    }
     let mut out = OwnedTensor::new(DType::I64, a.shape.clone());
     let ad = unsafe { typed_slice::<i64>(a) };
     let od = unsafe { typed_mut_slice::<i64>(&mut out) };
     for i in 0..od.len() {
-        od[i] = !ad[i % ad.len()];
+        od[i] = !ad[i];
     }
     Ok(out)
 }
 
 // ── predicates isfinite/isinf/isnan → bool tensor stored as f32 0/1 then cast? we return bool dtype
 pub fn isfinite(a: &BorrowedTensor) -> PyResult<OwnedTensor> {
+    if !a.is_contiguous() {
+        let contig = crate::shape_ops::to_contiguous(a)?;
+        return isfinite(&BorrowedTensor::from_owned(&contig));
+    }
     let mut out = OwnedTensor::new(DType::Bool, a.shape.clone());
     let od = unsafe { typed_mut_slice::<u8>(&mut out) };
     match a.dtype {
         DType::F32 => {
             let ad = unsafe { typed_slice::<f32>(a) };
             for i in 0..od.len() {
-                od[i] = if ad[i % ad.len()].is_finite() { 1 } else { 0 };
+                od[i] = if ad[i].is_finite() { 1 } else { 0 };
             }
         }
         DType::F64 => {
             let ad = unsafe { typed_slice::<f64>(a) };
             for i in 0..od.len() {
-                od[i] = if ad[i % ad.len()].is_finite() { 1 } else { 0 };
+                od[i] = if ad[i].is_finite() { 1 } else { 0 };
             }
         }
         _ => return Err(unsupported("isfinite only supports f32/f64")),
@@ -359,19 +315,23 @@ pub fn isfinite(a: &BorrowedTensor) -> PyResult<OwnedTensor> {
     Ok(out)
 }
 pub fn isinf(a: &BorrowedTensor) -> PyResult<OwnedTensor> {
+    if !a.is_contiguous() {
+        let contig = crate::shape_ops::to_contiguous(a)?;
+        return isinf(&BorrowedTensor::from_owned(&contig));
+    }
     let mut out = OwnedTensor::new(DType::Bool, a.shape.clone());
     let od = unsafe { typed_mut_slice::<u8>(&mut out) };
     match a.dtype {
         DType::F32 => {
             let ad = unsafe { typed_slice::<f32>(a) };
             for i in 0..od.len() {
-                od[i] = if ad[i % ad.len()].is_infinite() { 1 } else { 0 };
+                od[i] = if ad[i].is_infinite() { 1 } else { 0 };
             }
         }
         DType::F64 => {
             let ad = unsafe { typed_slice::<f64>(a) };
             for i in 0..od.len() {
-                od[i] = if ad[i % ad.len()].is_infinite() { 1 } else { 0 };
+                od[i] = if ad[i].is_infinite() { 1 } else { 0 };
             }
         }
         _ => return Err(unsupported("isinf only supports f32/f64")),
@@ -379,19 +339,23 @@ pub fn isinf(a: &BorrowedTensor) -> PyResult<OwnedTensor> {
     Ok(out)
 }
 pub fn isnan(a: &BorrowedTensor) -> PyResult<OwnedTensor> {
+    if !a.is_contiguous() {
+        let contig = crate::shape_ops::to_contiguous(a)?;
+        return isnan(&BorrowedTensor::from_owned(&contig));
+    }
     let mut out = OwnedTensor::new(DType::Bool, a.shape.clone());
     let od = unsafe { typed_mut_slice::<u8>(&mut out) };
     match a.dtype {
         DType::F32 => {
             let ad = unsafe { typed_slice::<f32>(a) };
             for i in 0..od.len() {
-                od[i] = if ad[i % ad.len()].is_nan() { 1 } else { 0 };
+                od[i] = if ad[i].is_nan() { 1 } else { 0 };
             }
         }
         DType::F64 => {
             let ad = unsafe { typed_slice::<f64>(a) };
             for i in 0..od.len() {
-                od[i] = if ad[i % ad.len()].is_nan() { 1 } else { 0 };
+                od[i] = if ad[i].is_nan() { 1 } else { 0 };
             }
         }
         _ => return Err(unsupported("isnan only supports f32/f64")),
@@ -948,48 +912,42 @@ pub fn exp2(a: &BorrowedTensor) -> PyResult<OwnedTensor> {
 }
 pub fn ldexp(a: &BorrowedTensor, exp: &BorrowedTensor) -> PyResult<OwnedTensor> {
     let out_shape = crate::kernels::broadcast_shape(&a.shape, &exp.shape)?;
-    let mut out = OwnedTensor::new(a.dtype, out_shape.clone());
+    let mut out = OwnedTensor::new(a.dtype, out_shape);
     match a.dtype {
-        DType::F32 => {
-            let ad = unsafe { typed_slice::<f32>(a) };
-            let od = unsafe { typed_mut_slice::<f32>(&mut out) };
-            match exp.dtype {
-                DType::F32 => {
-                    let ed = unsafe { typed_slice::<f32>(exp) };
-                    for i in 0..od.len() {
-                        let e = ed[i % ed.len()] as i32;
-                        od[i] = ad[i % ad.len()] * (2.0f32).powi(e);
-                    }
-                }
-                DType::I32 => {
-                    let ed = unsafe { typed_slice::<i32>(exp) };
-                    for i in 0..od.len() {
-                        let e = ed[i % ed.len()];
-                        od[i] = ad[i % ad.len()] * (2.0f32).powi(e);
-                    }
-                }
-                DType::I64 => {
-                    let ed = unsafe { typed_slice::<i64>(exp) };
-                    for i in 0..od.len() {
-                        let e = ed[i % ed.len()] as i32;
-                        od[i] = ad[i % ad.len()] * (2.0f32).powi(e);
-                    }
-                }
-                _ => return Err(unsupported("ldexp exponent must be f32/i32/i64")),
+        DType::F32 => match exp.dtype {
+            DType::F32 => {
+                broadcast_apply_binary::<f32, f32, f32, _>(a, exp, &mut out, |x, e| {
+                    x * (2.0f32).powi(e as i32)
+                });
             }
-        }
+            DType::I32 => {
+                broadcast_apply_binary::<f32, i32, f32, _>(a, exp, &mut out, |x, e| {
+                    x * (2.0f32).powi(e)
+                });
+            }
+            DType::I64 => {
+                broadcast_apply_binary::<f32, i64, f32, _>(a, exp, &mut out, |x, e| {
+                    x * (2.0f32).powi(e as i32)
+                });
+            }
+            _ => return Err(unsupported("ldexp exponent must be f32/i32/i64")),
+        },
         _ => return Err(unsupported("ldexp only supports f32")),
     }
     Ok(out)
 }
 pub fn bucketize(a: &BorrowedTensor, boundaries: &BorrowedTensor) -> PyResult<OwnedTensor> {
+    if !a.is_contiguous() {
+        let contig = crate::shape_ops::to_contiguous(a)?;
+        return bucketize(&BorrowedTensor::from_owned(&contig), boundaries);
+    }
     let mut out = OwnedTensor::new(DType::I64, a.shape.clone());
     let ad = unsafe { typed_slice::<f32>(a) };
     let bd = unsafe { typed_slice::<f32>(boundaries) };
     let od = unsafe { typed_mut_slice::<i64>(&mut out) };
     let nb = elem_count(&boundaries.shape);
     for i in 0..od.len() {
-        let v = ad[i % ad.len()];
+        let v = ad[i];
         let mut lo = 0;
         while lo < nb && bd[lo] <= v {
             lo += 1;

@@ -1,12 +1,14 @@
 """
-Tests for Phase 7: extended operator coverage.
+Tests for extended operator coverage.
 """
+
+import os
+import sys
+
 import torch
 import torch.nn.functional as F
-import sys
-import os
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 
 def _compile(model, *example_inputs):
@@ -16,6 +18,7 @@ def _compile(model, *example_inputs):
 # ---------------------------------------------------------------------------
 # scatter
 # ---------------------------------------------------------------------------
+
 
 class TestScatter:
     def test_scatter_basic(self):
@@ -38,6 +41,7 @@ class TestScatter:
 # ---------------------------------------------------------------------------
 # repeat
 # ---------------------------------------------------------------------------
+
 
 class TestRepeat:
     def test_repeat_1d(self):
@@ -71,6 +75,7 @@ class TestRepeat:
 # prelu
 # ---------------------------------------------------------------------------
 
+
 class TestPrelu:
     def test_prelu_basic(self):
         """prelu applies parametric ReLU."""
@@ -95,6 +100,7 @@ class TestPrelu:
 # ---------------------------------------------------------------------------
 # nonzero
 # ---------------------------------------------------------------------------
+
 
 class TestNonzero:
     def test_nonzero_basic(self):
@@ -130,6 +136,7 @@ class TestNonzero:
 # einsum
 # ---------------------------------------------------------------------------
 
+
 class TestEinsum:
     def test_einsum_matmul(self):
         """einsum 'ij,jk->ik' is matrix multiply."""
@@ -138,22 +145,24 @@ class TestEinsum:
 
         class M(torch.nn.Module):
             def forward(self, x, y):
-                return torch.einsum('ij,jk->ik', x, y)
+                return torch.einsum("ij,jk->ik", x, y)
 
         model = M().eval()
         cc = _compile(model, a, b)
         out = cc(a, b)
-        ref = torch.einsum('ij,jk->ik', a, b)
+        ref = torch.einsum("ij,jk->ik", a, b)
         torch.testing.assert_close(out, ref, rtol=1e-5, atol=1e-5)
 
 
 # ---------------------------------------------------------------------------
-# End-to-end: Phase 7 ops in a training-style model
+# End-to-end: extended ops in a training-style model
 # ---------------------------------------------------------------------------
 
-class TestPhase7EndToEnd:
+
+class TestSpecialOpsEndToEnd:
     def test_model_with_prelu(self):
         """Model using PReLU in forward pass."""
+
         class M(torch.nn.Module):
             def __init__(self):
                 super().__init__()
@@ -172,13 +181,14 @@ class TestPhase7EndToEnd:
 
     def test_model_with_einsum(self):
         """Model using einsum in forward pass."""
+
         class M(torch.nn.Module):
             def __init__(self):
                 super().__init__()
                 self.w = torch.nn.Parameter(torch.randn(8, 8))
 
             def forward(self, x):
-                return torch.einsum('bi,ij->bj', x, self.w)
+                return torch.einsum("bi,ij->bj", x, self.w)
 
         model = M().eval()
         x = torch.randn(2, 8)

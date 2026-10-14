@@ -8,9 +8,10 @@ Verifies that:
 4. `clear_memory_pool()` cleans up cached buffers properly.
 """
 
+import gc
 import os
 import sys
-import gc
+
 import torch
 import torch.nn as nn
 
@@ -19,6 +20,7 @@ import torchburn
 
 try:
     import psutil
+
     HAS_PSUTIL = True
 except ImportError:
     HAS_PSUTIL = False
@@ -59,7 +61,7 @@ def test_memory_pool_recycling_soak():
 
     # Soak run: 1,000 iterations
     iterations = 1000
-    for i in range(iterations):
+    for _i in range(iterations):
         inp = torch.randn(8, 64)
         out = compiled_model(inp)
         assert out.shape == (8, 64)
@@ -79,10 +81,14 @@ def test_memory_pool_recycling_soak():
 
     # 2. Vast majority of allocations must be hits from the recycled pool (>80% hit rate)
     iteration_hit_rate = hit_delta / max(alloc_delta, 1)
-    assert iteration_hit_rate > 0.8, f"Soak hit rate too low: {iteration_hit_rate:.2%} ({hit_delta}/{alloc_delta})"
+    assert iteration_hit_rate > 0.8, (
+        f"Soak hit rate too low: {iteration_hit_rate:.2%} ({hit_delta}/{alloc_delta})"
+    )
 
     # 3. Cached buffers must stay bounded (not growing with iterations)
-    assert stats_end["cached_buffers"] < 100, f"Pool cached buffers exploded: {stats_end['cached_buffers']}"
+    assert stats_end["cached_buffers"] < 100, (
+        f"Pool cached buffers exploded: {stats_end['cached_buffers']}"
+    )
 
     # 4. If psutil is available, verify RSS didn't explode
     if HAS_PSUTIL and rss_start > 0:

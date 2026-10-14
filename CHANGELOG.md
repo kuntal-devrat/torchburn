@@ -5,6 +5,27 @@ All notable changes to TorchBurn will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.2] - 2026-10-14
+
+### Fixed
+- **Unary Math Operators on Non-Contiguous Inputs**:
+  - Ensured all 14 unary math kernels (`atan`, `asin`, `acos`, `sinh`, `cosh`, `asinh`, `acosh`, `atanh`, `erf`, `erfc`, `expm1`, `log1p`, `log2`, `log10`) convert non-contiguous strided views to contiguous layouts via `to_contiguous` before chunked rayon execution, eliminating strided memory corruption.
+- **Operator Stub Fallback & Parity**:
+  - Replaced dummy stubs in `lu_solve`, `linalg_cond`, `gru_cell`, `lstm_cell`, `cartesian_prod`, `combinations`, and non-constant `pad` modes with explicit `UnsupportedOpError` exceptions, enabling clean PyTorch eager fallback.
+- **DLPack Memory Safety**:
+  - Guarded capsule allocation failure in `owned_to_capsule_owned` and `owned_to_capsule_typed` to reclaim buffer pointers if capsule construction fails.
+  - Added null pointer guards to `dlpack_capsule_destructor`.
+- **Platform Portability & Metal Device Singleton**:
+  - Resolved closure return type mismatch in `src/metal/backend.rs` by wrapping `METAL_DEVICE` in `OnceLock<Option<MetalBackend>>`.
+  - Replaced phantom `hasattr(..., "MetalBackend")` checks in LLM engine device detection with verified native bindings.
+- **Thread Safety & Diagnostic Teardown**:
+  - Ensured active autograd recording thread count cleans up properly on thread termination even if `autograd_disable()` is not explicitly called.
+
+### Changed
+- **Test Suite & Code Hygiene**:
+  - Cleaned up test class and file naming across all test suites, replacing legacy phase-prefixed names with domain-specific naming (`test_production_readiness.py`, `test_audit_remediation.py`, `TestSpecialOpsEndToEnd`, etc.).
+  - Configured project-wide `ruff` linting and formatting across Python and test suites with 0 warnings.
+
 ## [1.0.1] - 2026-10-06
 
 ### Fixed

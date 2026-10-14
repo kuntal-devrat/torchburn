@@ -1,13 +1,14 @@
-"""torchburn Phase 1 + Phase 2 optimization benchmark.
+"""torchburn quantized int4 GEMV optimization benchmark.
 
 Measures before/after kernel performance on the local machine:
   1. CPU int4 GEMV micro-benchmark (v1 vs v2 interleaved layout)
   2. End-to-end Qwen2.5-0.5B int4 decode throughput (tok/s), CPU vs iGPU
 
 Usage:
-    python benchmarks/bench_phase12.py --yes          # full run (~350MB download on first use)
-    python benchmarks/bench_phase12.py --gemv-only    # kernel-only, no model download
+    python benchmarks/bench_quantized_gemv.py --yes          # full run (~350MB download on first use)
+    python benchmarks/bench_quantized_gemv.py --gemv-only    # kernel-only, no model download
 """
+
 import argparse
 import os
 import statistics
@@ -21,7 +22,6 @@ def bench_gemv():
     """Kernel-level A/B: v1 (per-row + f32 scales) vs v2 (interleaved + f16
     scales), via the Python-facing quantized-linear ops on realistic shapes."""
     import torch
-
     import torchburn as tb
     from torchburn import _torchburn as _native
 
@@ -61,8 +61,10 @@ def bench_gemv():
             tb.w4a32_grouped_linear_v2(x, w_v2, group_size=group)
         t_v2 = (time.perf_counter() - t0) / reps
 
-        print(f"  {name:26s} v1: {t_v1*1e3:8.3f} ms | v2: {t_v2*1e3:8.3f} ms"
-              f" | speedup: {t_v1/t_v2:5.2f}x | max|d|: {max_diff:.2e}")
+        print(
+            f"  {name:26s} v1: {t_v1 * 1e3:8.3f} ms | v2: {t_v2 * 1e3:8.3f} ms"
+            f" | speedup: {t_v1 / t_v2:5.2f}x | max|d|: {max_diff:.2e}"
+        )
 
 
 def bench_llm(device: str):
@@ -102,8 +104,10 @@ def main():
     args = ap.parse_args()
 
     if not args.gemv_only and not args.yes:
-        print("LLM benchmark downloads ~350MB from Hugging Face. "
-              "Re-run with --yes, or use --gemv-only.")
+        print(
+            "LLM benchmark downloads ~350MB from Hugging Face. "
+            "Re-run with --yes, or use --gemv-only."
+        )
         sys.exit(0)
 
     bench_gemv()

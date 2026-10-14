@@ -27,8 +27,9 @@ from __future__ import annotations
 import json
 import threading
 import weakref
-import torch
 from typing import Optional
+
+import torch
 
 from . import _torchburn as _native
 
@@ -36,13 +37,28 @@ from . import _torchburn as _native
 # Thread-local tape — records (target, saved_capsules, kwargs, input_ids)
 # ---------------------------------------------------------------------------
 
+
 class _TapeEntry:
     """One recorded op on the tape."""
-    __slots__ = ("target", "input_ids", "output_id", "saved_capsules",
-                 "saved_data", "kwargs", "n_inputs")
 
-    def __init__(self, target: str, input_ids: list[int], output_id: int,
-                 saved_data: list[torch.Tensor], kwargs: dict):
+    __slots__ = (
+        "target",
+        "input_ids",
+        "output_id",
+        "saved_capsules",
+        "saved_data",
+        "kwargs",
+        "n_inputs",
+    )
+
+    def __init__(
+        self,
+        target: str,
+        input_ids: list[int],
+        output_id: int,
+        saved_data: list[torch.Tensor],
+        kwargs: dict,
+    ):
         self.target = target
         self.input_ids = input_ids
         self.output_id = output_id
@@ -54,15 +70,27 @@ class _TapeEntry:
 
 class _Tape:
     """Records differentiable operations for backward pass."""
+
     def __init__(self):
         self.ops: list[_TapeEntry] = []
 
-    def record(self, target: str, input_ids: list[int], output_id: int,
-               saved_data: list[torch.Tensor], kwargs: dict | None = None):
-        self.ops.append(_TapeEntry(
-            target=target, input_ids=input_ids, output_id=output_id,
-            saved_data=saved_data, kwargs=kwargs or {},
-        ))
+    def record(
+        self,
+        target: str,
+        input_ids: list[int],
+        output_id: int,
+        saved_data: list[torch.Tensor],
+        kwargs: dict | None = None,
+    ):
+        self.ops.append(
+            _TapeEntry(
+                target=target,
+                input_ids=input_ids,
+                output_id=output_id,
+                saved_data=saved_data,
+                kwargs=kwargs or {},
+            )
+        )
 
     def clear(self):
         self.ops.clear()
@@ -120,10 +148,22 @@ _enabled = _EnabledProxy()
 
 def enable():
     _local.enabled = True
+    try:
+        fn = getattr(_native, "autograd_enable", None)
+        if callable(fn):
+            fn()
+    except Exception:
+        pass
 
 
 def disable():
     _local.enabled = False
+    try:
+        fn = getattr(_native, "autograd_disable", None)
+        if callable(fn):
+            fn()
+    except Exception:
+        pass
 
 
 def is_enabled():
@@ -133,6 +173,18 @@ def is_enabled():
 def reset():
     _get_tape().clear()
     _local.enabled = False
+    try:
+        fn = getattr(_native, "autograd_reset", None)
+        if callable(fn):
+            fn()
+    except Exception:
+        pass
+    try:
+        fn = getattr(_native, "autograd_disable", None)
+        if callable(fn):
+            fn()
+    except Exception:
+        pass
     Tensor._registry.clear()
     # NOTE: do NOT reset _next_id — existing Tensor objects keep their IDs,
     # and new tensors must not collide with them.
@@ -140,6 +192,48 @@ def reset():
 
 def tape_len():
     return len(_get_tape())
+
+
+def active_recording_threads() -> int:
+    """Return the number of active recording threads from the native runtime."""
+    if hasattr(_native, "autograd_active_recording_threads"):
+        return _native.autograd_active_recording_threads()
+    return 1 if is_enabled() else 0
+
+
+class AutogradGuard:
+    """RAII guard and context manager for autograd recording."""
+
+    def __init__(self):
+        self._native_guard = None
+        if hasattr(_native, "AutogradGuard"):
+            self._native_guard = _native.AutogradGuard()
+        self._prev_enabled = is_enabled()
+        enable()
+
+    def disable(self):
+        if self._native_guard is not None:
+            self._native_guard.disable()
+            self._native_guard = None
+        if not self._prev_enabled:
+            disable()
+
+    def is_active(self) -> bool:
+        if self._native_guard is not None:
+            return self._native_guard.is_active()
+        return is_enabled()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.disable()
+
+    def __del__(self):
+        self.disable()
+
+
+record_guard = AutogradGuard
 
 
 class _RegistryProxy:
@@ -178,6 +272,7 @@ class _RegistryProxy:
 # Tensor wrapper
 # ---------------------------------------------------------------------------
 
+
 class Tensor:
     """Differentiable tensor wrapping a torch.Tensor."""
 
@@ -188,7 +283,11 @@ class Tensor:
     def __init__(self, data: torch.Tensor, requires_grad: bool = False):
         if isinstance(data, Tensor):
             data = data.data
-        self.data: torch.Tensor = data.detach().contiguous().float() if data.is_floating_point() else data.detach().contiguous()
+        self.data: torch.Tensor = (
+            data.detach().contiguous().float()
+            if data.is_floating_point()
+            else data.detach().contiguous()
+        )
         self.grad: Optional[torch.Tensor] = None
         self.requires_grad: bool = requires_grad
         with Tensor._lock:
@@ -218,6 +317,7 @@ class Tensor:
             grads = _backward_batch(grad_output, self._id)
         except Exception as e:
             import warnings as _w
+
             _w.warn(f"torchburn: batch backward failed ({e}), falling back to per-op", stacklevel=2)
             grads = _backward_single_loop(grad_output)
 
@@ -308,9 +408,10 @@ def _wrap(data: torch.Tensor, requires_grad: bool = False) -> Tensor:
 # Rust backward_single FFI bridge
 # ---------------------------------------------------------------------------
 
+
 def _reduce_to_shape(grad: torch.Tensor, target_shape: torch.Size) -> torch.Tensor:
     """Reduce a gradient tensor to match the target shape (broadcast fix).
-    
+
     When an op like add(a, b) was broadcast, Rust returns grad with the
     upstream shape, but the input may have a smaller shape.  We sum over
     the extra leading dimensions.
@@ -334,14 +435,33 @@ def _reduce_to_shape(grad: torch.Tensor, target_shape: torch.Size) -> torch.Tens
 
 
 # Ops whose Rust backward_single is reliable
-_RUST_NATIVE_OPS = frozenset({
-    "add", "sub", "mul", "div", "pow", "relu", "sigmoid", "tanh", "gelu",
-    "matmul", "linear", "layer_norm", "softmax", "sum", "mean", "mse_loss",
-    "nll_loss", "cross_entropy",
-})
+_RUST_NATIVE_OPS = frozenset(
+    {
+        "add",
+        "sub",
+        "mul",
+        "div",
+        "pow",
+        "relu",
+        "sigmoid",
+        "tanh",
+        "gelu",
+        "matmul",
+        "linear",
+        "layer_norm",
+        "softmax",
+        "sum",
+        "mean",
+        "mse_loss",
+        "nll_loss",
+        "cross_entropy",
+    }
+)
 
 
-def _backward_single(entry: _TapeEntry, upstream: torch.Tensor) -> Optional[list[Optional[torch.Tensor]]]:
+def _backward_single(
+    entry: _TapeEntry, upstream: torch.Tensor
+) -> Optional[list[Optional[torch.Tensor]]]:
     """Call Rust backward_single for a recorded op.
 
     Returns a list of gradient tensors (one per input_id), or None if the op
@@ -386,6 +506,7 @@ def _backward_single(entry: _TapeEntry, upstream: torch.Tensor) -> Optional[list
         return grads
     except Exception as e:
         import warnings as _w
+
         _w.warn(f"torchburn: backward_single failed for {entry.target}: {e}", stacklevel=2)
         return None
 
@@ -393,6 +514,7 @@ def _backward_single(entry: _TapeEntry, upstream: torch.Tensor) -> Optional[list
 # ---------------------------------------------------------------------------
 # Batch backward — single FFI call for entire tape
 # ---------------------------------------------------------------------------
+
 
 def _backward_batch(grad_output: torch.Tensor, output_id: int) -> dict[int, torch.Tensor]:
     """Process the entire tape in a single backward_batch FFI call.
@@ -455,13 +577,20 @@ def _backward_batch(grad_output: torch.Tensor, output_id: int) -> dict[int, torc
     up_cap = up.__dlpack__()
 
     # Convert saved_shapes to list of lists of ints for Rust
-    saved_shapes_lists = [[list(s) for s in entry_shapes]
-                          for entry_shapes in saved_shapes_per_entry]
+    saved_shapes_lists = [
+        [list(s) for s in entry_shapes] for entry_shapes in saved_shapes_per_entry
+    ]
 
     # Single FFI call
     raw_grads = _native.backward_batch(
-        targets, saved_capsules, all_kwargs, output_ids, input_ids_all,
-        saved_shapes_lists, up_cap, output_id,
+        targets,
+        saved_capsules,
+        all_kwargs,
+        output_ids,
+        input_ids_all,
+        saved_shapes_lists,
+        up_cap,
+        output_id,
     )
 
     # Convert results
@@ -476,6 +605,7 @@ def _backward_batch(grad_output: torch.Tensor, output_id: int) -> dict[int, torc
 # ---------------------------------------------------------------------------
 # Per-op fallback backward (for ops not in _RUST_NATIVE_OPS)
 # ---------------------------------------------------------------------------
+
 
 def _backward_single_loop(grad_output: torch.Tensor) -> dict[int, torch.Tensor]:
     """Fallback: walk tape in reverse, calling backward_single per-op."""
@@ -511,6 +641,7 @@ def _backward_single_loop(grad_output: torch.Tensor) -> dict[int, torch.Tensor]:
 # Forward ops that record on the tape
 # ---------------------------------------------------------------------------
 
+
 def _add(a: Tensor, b: Tensor) -> Tensor:
     out = _wrap(a.data + b.data, requires_grad=_needs_grad(a, b))
     if _enabled and out.requires_grad:
@@ -540,7 +671,7 @@ def _div(a: Tensor, b: Tensor) -> Tensor:
 
 
 def _pow(a: Tensor, b: Tensor) -> Tensor:
-    out = _wrap(a.data ** b.data, requires_grad=_needs_grad(a, b))
+    out = _wrap(a.data**b.data, requires_grad=_needs_grad(a, b))
     if _enabled and out.requires_grad:
         _tape.record("pow", [a._id, b._id], out._id, [a.data, b.data])
     return out
@@ -555,7 +686,8 @@ def _matmul(a: Tensor, b: Tensor) -> Tensor:
 
 def linear(input: Tensor, weight: Tensor, bias: Optional[Tensor] = None) -> Tensor:
     out_data = torch.nn.functional.linear(
-        input.data, weight.data, bias.data if bias is not None else None)
+        input.data, weight.data, bias.data if bias is not None else None
+    )
     needs_grad = _needs_grad(input, weight) or (bias is not None and bias.requires_grad)
     out = _wrap(out_data, requires_grad=needs_grad)
     if _enabled and needs_grad:
@@ -609,12 +741,14 @@ def softmax(a: Tensor, dim: int = -1) -> Tensor:
 
 def layer_norm(a: Tensor, weight: Tensor, bias: Tensor, eps: float = 1e-5) -> Tensor:
     out_data = torch.nn.functional.layer_norm(
-        a.data, weight.data.shape, weight.data, bias.data, eps)
+        a.data, weight.data.shape, weight.data, bias.data, eps
+    )
     needs_grad = _needs_grad(a, weight, bias)
     out = _wrap(out_data, requires_grad=needs_grad)
     if _enabled and needs_grad:
-        _tape.record("layer_norm", [a._id, weight._id, bias._id], out._id,
-                      [a.data, weight.data, bias.data])
+        _tape.record(
+            "layer_norm", [a._id, weight._id, bias._id], out._id, [a.data, weight.data, bias.data]
+        )
     return out
 
 
@@ -637,39 +771,58 @@ def sum_op(a: Tensor, dim=None, keepdim=False) -> Tensor:
 
 
 def mean_op(a: Tensor, dim=None, keepdim=False) -> Tensor:
-    out_data = torch.mean(a.data, dim=dim, keepdim=keepdim) if dim is not None else torch.mean(a.data)
+    out_data = (
+        torch.mean(a.data, dim=dim, keepdim=keepdim) if dim is not None else torch.mean(a.data)
+    )
     out = _wrap(out_data, requires_grad=a.requires_grad)
     if _enabled and a.requires_grad:
         _tape.record("mean", [a._id], out._id, [a.data])
     return out
 
 
-def mse_loss(input: Tensor, target: Tensor, reduction: str = 'mean') -> Tensor:
+def mse_loss(input: Tensor, target: Tensor, reduction: str = "mean") -> Tensor:
     out_data = torch.nn.functional.mse_loss(input.data, target.data, reduction=reduction)
     out = _wrap(out_data, requires_grad=input.requires_grad)
     if _enabled and input.requires_grad:
         # Rust mse_loss uses reduction as int: 0=none, 1=mean, 2=sum
         red_int = {"none": 0, "mean": 1, "sum": 2}.get(reduction, 1)
-        _tape.record("mse_loss", [input._id, target._id], out._id,
-                      [input.data, target.data], {"reduction": red_int})
+        _tape.record(
+            "mse_loss",
+            [input._id, target._id],
+            out._id,
+            [input.data, target.data],
+            {"reduction": red_int},
+        )
     return out
 
 
-def nll_loss(input: Tensor, target: Tensor, reduction: str = 'mean') -> Tensor:
+def nll_loss(input: Tensor, target: Tensor, reduction: str = "mean") -> Tensor:
     out_data = torch.nn.functional.nll_loss(input.data, target.data.long(), reduction=reduction)
     out = _wrap(out_data, requires_grad=input.requires_grad)
     if _enabled and input.requires_grad:
-        _tape.record("nll_loss", [input._id, target._id], out._id,
-                      [input.data, target.data.long()], {"reduction": reduction})
+        _tape.record(
+            "nll_loss",
+            [input._id, target._id],
+            out._id,
+            [input.data, target.data.long()],
+            {"reduction": reduction},
+        )
     return out
 
 
-def cross_entropy(input: Tensor, target: Tensor, reduction: str = 'mean') -> Tensor:
-    out_data = torch.nn.functional.cross_entropy(input.data, target.data.long(), reduction=reduction)
+def cross_entropy(input: Tensor, target: Tensor, reduction: str = "mean") -> Tensor:
+    out_data = torch.nn.functional.cross_entropy(
+        input.data, target.data.long(), reduction=reduction
+    )
     out = _wrap(out_data, requires_grad=input.requires_grad)
     if _enabled and input.requires_grad:
-        _tape.record("cross_entropy", [input._id, target._id], out._id,
-                      [input.data, target.data.long()], {"reduction": reduction})
+        _tape.record(
+            "cross_entropy",
+            [input._id, target._id],
+            out._id,
+            [input.data, target.data.long()],
+            {"reduction": reduction},
+        )
     return out
 
 
@@ -685,4 +838,3 @@ def backward_single(
     if res is None:
         raise RuntimeError(f"backward_single failed for {target}")
     return [r for r in res if r is not None]
-

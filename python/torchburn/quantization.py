@@ -7,9 +7,11 @@ quantization utilities.
 """
 
 from __future__ import annotations
+
 import gc
 import os
-from typing import Optional, Tuple, List, Any
+from typing import Any, List, Optional, Tuple
+
 import torch
 import torch.nn as nn
 
@@ -27,7 +29,7 @@ def _flattened_rows(shape: torch.Size) -> int:
 
 def quantize_weight_int8(w: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
     """Quantize 2D weight matrix (N, K) to symmetric INT8 with per-channel scale (N,).
-    
+
     Returns:
         w_q: torch.Tensor of dtype torch.int8 (1-byte storage), shape (N, K)
         scales: torch.Tensor of dtype torch.float32, shape (N,)
@@ -54,12 +56,12 @@ def quantize_weight_int4_grouped(
     chunk_size: int = 1024,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Quantize a 2D float weight matrix to signed 4-bit grouped format with bounded peak RAM.
-    
+
     Args:
         weight: (N, K) float tensor
         group_size: number of elements per quantization group (default 64)
         chunk_size: maximum number of rows to process at once to prevent OOM / RAM freezing
-        
+
     Returns:
         packed_weights: (N, (K + 1) // 2) uint8 tensor storing 2 nibbles per byte
         scales: (N, (K + group_size - 1) // group_size) float32 tensor
@@ -138,7 +140,9 @@ def quantize_weight_int4_grouped_v2(
         raise ValueError(f"K={K} must be divisible by group_size={group_size}")
     num_groups = K // group_size
 
-    packed, scales = quantize_weight_int4_grouped(weight, group_size=group_size, chunk_size=chunk_size)
+    packed, scales = quantize_weight_int4_grouped(
+        weight, group_size=group_size, chunk_size=chunk_size
+    )
     # packed: (N, K/2) uint8 = (N, num_groups*32) — already group-contiguous
     packed_g = packed.view(N, num_groups, 32)
     scale_bytes = (
@@ -319,16 +323,28 @@ def fused_swiglu_mlp(
     if gate.bits == 8:
         out_cap = _native.fused_swiglu_mlp_w8a32(
             x_cap,
-            gw_cap, gs_cap, gb_cap,
-            uw_cap, us_cap, ub_cap,
-            dw_cap, ds_cap, db_cap,
+            gw_cap,
+            gs_cap,
+            gb_cap,
+            uw_cap,
+            us_cap,
+            ub_cap,
+            dw_cap,
+            ds_cap,
+            db_cap,
         )
     elif gate.bits == 4:
         out_cap = _native.fused_swiglu_mlp_w4a32(
             x_cap,
-            gw_cap, gs_cap, gb_cap,
-            uw_cap, us_cap, ub_cap,
-            dw_cap, ds_cap, db_cap,
+            gw_cap,
+            gs_cap,
+            gb_cap,
+            uw_cap,
+            us_cap,
+            ub_cap,
+            dw_cap,
+            ds_cap,
+            db_cap,
             gate.group_size,
         )
     else:
@@ -373,9 +389,15 @@ def fused_swiglu_mlp_batched(
 
     out_cap = _native.fused_swiglu_mlp_batched_w4a32(
         x_cap,
-        gw_cap, gs_cap, gb_cap,
-        uw_cap, us_cap, ub_cap,
-        dw_cap, ds_cap, db_cap,
+        gw_cap,
+        gs_cap,
+        gb_cap,
+        uw_cap,
+        us_cap,
+        ub_cap,
+        dw_cap,
+        ds_cap,
+        db_cap,
         gate.group_size,
     )
     out_2d = torch.from_dlpack(out_cap)
@@ -422,10 +444,16 @@ def fused_attention_step(
     if qkv.bits == 8:
         out_cap = _native.fused_attention_step_w8a32(
             x_cap,
-            qkv_w_cap, qkv_s_cap, qkv_b_cap,
-            o_w_cap, o_s_cap, o_b_cap,
-            k_cache_cap, v_cache_cap,
-            cos_cap, sin_cap,
+            qkv_w_cap,
+            qkv_s_cap,
+            qkv_b_cap,
+            o_w_cap,
+            o_s_cap,
+            o_b_cap,
+            k_cache_cap,
+            v_cache_cap,
+            cos_cap,
+            sin_cap,
             offset,
             num_heads,
             num_kv_heads,
@@ -434,10 +462,16 @@ def fused_attention_step(
     elif qkv.bits == 4:
         out_cap = _native.fused_attention_step_w4a32(
             x_cap,
-            qkv_w_cap, qkv_s_cap, qkv_b_cap,
-            o_w_cap, o_s_cap, o_b_cap,
-            k_cache_cap, v_cache_cap,
-            cos_cap, sin_cap,
+            qkv_w_cap,
+            qkv_s_cap,
+            qkv_b_cap,
+            o_w_cap,
+            o_s_cap,
+            o_b_cap,
+            k_cache_cap,
+            v_cache_cap,
+            cos_cap,
+            sin_cap,
             offset,
             num_heads,
             num_kv_heads,
@@ -508,14 +542,26 @@ def fused_transformer_layer_step(
     _native.fused_transformer_layer_step_w4a32(
         x_cap,
         in_norm_cap,
-        qkv_w_cap, qkv_s_cap, qkv_b_cap,
-        o_w_cap, o_s_cap, o_b_cap,
+        qkv_w_cap,
+        qkv_s_cap,
+        qkv_b_cap,
+        o_w_cap,
+        o_s_cap,
+        o_b_cap,
         post_norm_cap,
-        gate_w_cap, gate_s_cap, gate_b_cap,
-        up_w_cap, up_s_cap, up_b_cap,
-        down_w_cap, down_s_cap, down_b_cap,
-        k_cache_cap, v_cache_cap,
-        cos_cap, sin_cap,
+        gate_w_cap,
+        gate_s_cap,
+        gate_b_cap,
+        up_w_cap,
+        up_s_cap,
+        up_b_cap,
+        down_w_cap,
+        down_s_cap,
+        down_b_cap,
+        k_cache_cap,
+        v_cache_cap,
+        cos_cap,
+        sin_cap,
         offset,
         num_heads,
         num_kv_heads,
@@ -530,7 +576,9 @@ def create_rust_qwen_decoder(model: Any, max_seq_len: int = 4096) -> Any:
     """Instantiate zero-Python end-to-end RustQwenDecoder from a quantized NoCudaModel."""
     from . import _torchburn as _native
 
-    embed_tokens_cap = torch.to_dlpack(model.embed_tokens.weight.detach().cpu().contiguous().float())
+    embed_tokens_cap = torch.to_dlpack(
+        model.embed_tokens.weight.detach().cpu().contiguous().float()
+    )
     final_norm_cap = torch.to_dlpack(model.norm.weight.detach().cpu().contiguous().float())
     lm_head_w_cap = torch.to_dlpack(model.lm_head.qweight.detach().cpu().contiguous())
     lm_head_s_cap = torch.to_dlpack(model.lm_head.scales.detach().cpu().contiguous().float())
@@ -542,7 +590,9 @@ def create_rust_qwen_decoder(model: Any, max_seq_len: int = 4096) -> Any:
         qkv_s = torch.to_dlpack(layer.self_attn.qkv_proj.scales.detach().cpu().contiguous().float())
         o_w = torch.to_dlpack(layer.self_attn.o_proj.qweight.detach().cpu().contiguous())
         o_s = torch.to_dlpack(layer.self_attn.o_proj.scales.detach().cpu().contiguous().float())
-        post_norm = torch.to_dlpack(layer.post_attention_layernorm.weight.detach().cpu().contiguous().float())
+        post_norm = torch.to_dlpack(
+            layer.post_attention_layernorm.weight.detach().cpu().contiguous().float()
+        )
         gate_w = torch.to_dlpack(layer.mlp.gate_proj.qweight.detach().cpu().contiguous())
         gate_s = torch.to_dlpack(layer.mlp.gate_proj.scales.detach().cpu().contiguous().float())
         up_w = torch.to_dlpack(layer.mlp.up_proj.qweight.detach().cpu().contiguous())
@@ -551,11 +601,23 @@ def create_rust_qwen_decoder(model: Any, max_seq_len: int = 4096) -> Any:
         down_s = torch.to_dlpack(layer.mlp.down_proj.scales.detach().cpu().contiguous().float())
 
         caps = [
-            in_norm, qkv_w, qkv_s, o_w, o_s, post_norm,
-            gate_w, gate_s, up_w, up_s, down_w, down_s,
+            in_norm,
+            qkv_w,
+            qkv_s,
+            o_w,
+            o_s,
+            post_norm,
+            gate_w,
+            gate_s,
+            up_w,
+            up_s,
+            down_w,
+            down_s,
         ]
         if hasattr(layer.self_attn.qkv_proj, "bias") and layer.self_attn.qkv_proj.bias is not None:
-            caps.append(torch.to_dlpack(layer.self_attn.qkv_proj.bias.detach().cpu().contiguous().float()))
+            caps.append(
+                torch.to_dlpack(layer.self_attn.qkv_proj.bias.detach().cpu().contiguous().float())
+            )
         layers_caps.append(caps)
 
     cfg = model.config
@@ -580,9 +642,7 @@ def create_rust_qwen_decoder(model: Any, max_seq_len: int = 4096) -> Any:
     except BaseException as e:
         msg = f"{type(e).__name__}: {e}"
         if "memory" in msg.lower() or "PanicException" in type(e).__name__:
-            raise MemoryError(
-                f"Rust decoder host RAM exhausted: {msg}"
-            ) from e
+            raise MemoryError(f"Rust decoder host RAM exhausted: {msg}") from e
         raise
     return decoder
 
@@ -599,10 +659,13 @@ def create_wgpu_qwen_decoder(
     to ``MemoryError`` with a CPU-fallback hint instead of ``PanicException``.
     """
     import os as _os
+
     from . import _torchburn as _native
 
     if not hasattr(_native, "WgpuQwenDecoder"):
-        raise RuntimeError("WgpuQwenDecoder requires torchburn compiled with the 'burn-wgpu' feature.")
+        raise RuntimeError(
+            "WgpuQwenDecoder requires torchburn compiled with the 'burn-wgpu' feature."
+        )
     # Default to CPU-side embeddings (540MB table blows D3D12/Vulkan staging).
     _os.environ.setdefault("TORCHBURN_WGPU_EMBED", "cpu")
     if max_seq_len > 4096:
@@ -611,7 +674,9 @@ def create_wgpu_qwen_decoder(
             "use max_seq_len<=2048 or the CPU Rust decoder."
         )
 
-    embed_tokens_cap = torch.to_dlpack(model.embed_tokens.weight.detach().cpu().contiguous().float())
+    embed_tokens_cap = torch.to_dlpack(
+        model.embed_tokens.weight.detach().cpu().contiguous().float()
+    )
     final_norm_cap = torch.to_dlpack(model.norm.weight.detach().cpu().contiguous().float())
     lm_head_w_cap = torch.to_dlpack(model.lm_head.qweight.detach().cpu().contiguous())
     lm_head_s_cap = torch.to_dlpack(model.lm_head.scales.detach().cpu().contiguous().float())
@@ -623,7 +688,9 @@ def create_wgpu_qwen_decoder(
         qkv_s = torch.to_dlpack(layer.self_attn.qkv_proj.scales.detach().cpu().contiguous().float())
         o_w = torch.to_dlpack(layer.self_attn.o_proj.qweight.detach().cpu().contiguous())
         o_s = torch.to_dlpack(layer.self_attn.o_proj.scales.detach().cpu().contiguous().float())
-        post_norm = torch.to_dlpack(layer.post_attention_layernorm.weight.detach().cpu().contiguous().float())
+        post_norm = torch.to_dlpack(
+            layer.post_attention_layernorm.weight.detach().cpu().contiguous().float()
+        )
         gate_w = torch.to_dlpack(layer.mlp.gate_proj.qweight.detach().cpu().contiguous())
         gate_s = torch.to_dlpack(layer.mlp.gate_proj.scales.detach().cpu().contiguous().float())
         up_w = torch.to_dlpack(layer.mlp.up_proj.qweight.detach().cpu().contiguous())
@@ -632,11 +699,23 @@ def create_wgpu_qwen_decoder(
         down_s = torch.to_dlpack(layer.mlp.down_proj.scales.detach().cpu().contiguous().float())
 
         caps = [
-            in_norm, qkv_w, qkv_s, o_w, o_s, post_norm,
-            gate_w, gate_s, up_w, up_s, down_w, down_s,
+            in_norm,
+            qkv_w,
+            qkv_s,
+            o_w,
+            o_s,
+            post_norm,
+            gate_w,
+            gate_s,
+            up_w,
+            up_s,
+            down_w,
+            down_s,
         ]
         if hasattr(layer.self_attn.qkv_proj, "bias") and layer.self_attn.qkv_proj.bias is not None:
-            caps.append(torch.to_dlpack(layer.self_attn.qkv_proj.bias.detach().cpu().contiguous().float()))
+            caps.append(
+                torch.to_dlpack(layer.self_attn.qkv_proj.bias.detach().cpu().contiguous().float())
+            )
         layers_caps.append(caps)
 
     cfg = model.config
@@ -674,9 +753,6 @@ def create_wgpu_qwen_decoder(
     return decoder
 
 
-
-
-
 class QuantizedLinear(nn.Module):
     """Drop-in replacement for `nn.Linear` using TorchBurn's native SIMD quantized kernels."""
 
@@ -701,12 +777,18 @@ class QuantizedLinear(nn.Module):
         self.backend = backend
 
         if bits == 8:
-            self.register_buffer("qweight", torch.zeros((out_features, in_features), dtype=torch.int8))
+            self.register_buffer(
+                "qweight", torch.zeros((out_features, in_features), dtype=torch.int8)
+            )
             self.register_buffer("scales", torch.ones(out_features, dtype=torch.float32))
         elif bits == 4:
-            self.register_buffer("qweight", torch.zeros((out_features, (in_features + 1) // 2), dtype=torch.uint8))
+            self.register_buffer(
+                "qweight", torch.zeros((out_features, (in_features + 1) // 2), dtype=torch.uint8)
+            )
             num_groups = (in_features + group_size - 1) // group_size
-            self.register_buffer("scales", torch.ones((out_features, num_groups), dtype=torch.float32))
+            self.register_buffer(
+                "scales", torch.ones((out_features, num_groups), dtype=torch.float32)
+            )
         else:
             raise ValueError(f"Supported quantization bits are 8 and 4, got {bits}")
 
@@ -716,10 +798,19 @@ class QuantizedLinear(nn.Module):
             self.register_parameter("bias", None)
 
     @classmethod
-    def from_float(cls, linear: nn.Linear, bits: int = 8, group_size: int = 64, backend: str = "cpu") -> QuantizedLinear:
+    def from_float(
+        cls, linear: nn.Linear, bits: int = 8, group_size: int = 64, backend: str = "cpu"
+    ) -> QuantizedLinear:
         """Create a QuantizedLinear module from a standard float nn.Linear."""
         has_bias = linear.bias is not None
-        ql = cls(linear.in_features, linear.out_features, bias=has_bias, bits=bits, group_size=group_size, backend=backend)
+        ql = cls(
+            linear.in_features,
+            linear.out_features,
+            bias=has_bias,
+            bits=bits,
+            group_size=group_size,
+            backend=backend,
+        )
         with torch.no_grad():
             if bits == 8:
                 qw, sc = quantize_weight_int8(linear.weight)
@@ -749,10 +840,16 @@ class QuantizedLinear(nn.Module):
         if dev_env in ("cpu", "native_cpu"):
             gpu_preferred = False
         else:
-            gpu_preferred = (
-                self.backend in ("gpu", "igpu", "dgpu", "wgpu", "burn-wgpu", "vulkan", "dx12", "metal")
-                or dev_env in ("gpu", "igpu", "dgpu", "wgpu", "burn-wgpu", "vulkan", "dx12", "metal")
-            )
+            gpu_preferred = self.backend in (
+                "gpu",
+                "igpu",
+                "dgpu",
+                "wgpu",
+                "burn-wgpu",
+                "vulkan",
+                "dx12",
+                "metal",
+            ) or dev_env in ("gpu", "igpu", "dgpu", "wgpu", "burn-wgpu", "vulkan", "dx12", "metal")
         m = 1 if x.dim() <= 1 else _flattened_rows(x.shape)
 
         if gpu_preferred and m == 1:
@@ -764,7 +861,9 @@ class QuantizedLinear(nn.Module):
                 # GPU adapter unavailable / driver error: fall through to the
                 # portable SIMD CPU kernel instead of crashing mid-decode.
                 pass
-        return w4a32_grouped_linear(x, self.qweight, self.scales, self.bias, group_size=self.group_size)
+        return w4a32_grouped_linear(
+            x, self.qweight, self.scales, self.bias, group_size=self.group_size
+        )
 
     def extra_repr(self) -> str:
         return f"in_features={self.in_features}, out_features={self.out_features}, bias={self.bias is not None}, bits={self.bits}, group_size={self.group_size}, backend={self.backend}"
@@ -786,7 +885,9 @@ def quantize_model(
             if isinstance(child, nn.Linear):
                 if name in exclude or full_name in exclude:
                     continue
-                qlinear = QuantizedLinear.from_float(child, bits=bits, group_size=group_size, backend=backend)
+                qlinear = QuantizedLinear.from_float(
+                    child, bits=bits, group_size=group_size, backend=backend
+                )
                 setattr(module, name, qlinear)
                 del child
             else:

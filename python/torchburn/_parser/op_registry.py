@@ -173,9 +173,7 @@ _FUNCTION_TO_OP: dict[str, str] = {
     "squeeze": "squeeze",
     "unsqueeze": "unsqueeze",
     "sort": "sort",
-
     "chunk": "chunk",
-
     "unbind": "unbind",
     "topk": "topk",
     # Tensor creation functions (call_function targets)
@@ -252,7 +250,7 @@ _FUNCTION_TO_OP: dict[str, str] = {
     "torch.masked_scatter": "masked_scatter",
     "torch.take": "take",
     "torch.put": "put",
-    "torch.masked_select": "masked_select",
+    "torch.masked_select": "masked_select_extra",
     "torch.index_fill": "index_fill",
     "torch.bincount": "bincount",
     "torch.unique": "unique",
@@ -523,7 +521,6 @@ _FUNCTION_TO_OP: dict[str, str] = {
     "torch.empty_strided": "empty_strided",
     "torch.Tensor.view_as": "view_as",
     "torch.Tensor.expand_as": "expand_as",
-    "torch.masked_select": "masked_select_extra",
     "torch.Tensor.masked_select": "masked_select_extra",
     "torch.istft": "istft",
     # In-place method targets (call_method)
@@ -707,8 +704,6 @@ _ATEN_TO_OP: dict[str, str] = {
     "aten.gather": "gather",
     "aten.gather.default": "gather",
     "aten.expand.default": "expand",
-    "aten.index_select.default": "index_select",
-    "aten.gather.default": "gather",
     "aten.where.self": "where",
     "aten.where.default": "where",
     "aten.masked_fill_.default": "masked_fill",
@@ -738,7 +733,6 @@ _ATEN_TO_OP: dict[str, str] = {
     # views emitted by dynamo/AOTAutograd (reshape alias)
     "aten._unsafe_view": "reshape",
     "aten._unsafe_view.default": "reshape",
-    "aten.reshape.default": "reshape",
     # contiguous() — layout-only, treated as reshape in the engine
     "aten.contiguous": "contiguous",
     "aten.contiguous.default": "contiguous",
@@ -910,7 +904,6 @@ _ATEN_TO_OP: dict[str, str] = {
     "aten.local_response_norm.default": "local_response_norm",
     "aten.adaptive_avg_pool1d.default": "adaptive_avg_pool1d",
     "aten.adaptive_max_pool1d.default": "adaptive_max_pool1d",
-    "aten.adaptive_avg_pool1d.default": "adaptive_avg_pool1d",
     "aten.lp_pool3d.default": "lp_pool3d",
     "aten.logsumexp.default": "logsumexp",
     "aten.randn_like.default": "randn_like",
@@ -920,11 +913,7 @@ _ATEN_TO_OP: dict[str, str] = {
     "aten.view_as.default": "view_as",
     "aten.expand_as.default": "expand_as",
     "aten.masked_select.default": "masked_select_extra",
-    "aten.isfinite.default": "isfinite",
     "aten.istft.default": "istft",
-    # Attention
-    "aten._scaled_dot_product_flash_attention.default": "scaled_dot_product_attention",
-    "aten._scaled_dot_product_efficient_attention.default": "scaled_dot_product_attention",
     # Batch norm fused variants return (out, running_mean, running_var); the
     # engine returns just the normalised output and getitem(0) aliases it.
     # Schema arg order is (input, weight, bias, running_mean, running_var, ...)
@@ -1016,9 +1005,6 @@ _METHOD_TO_OP: dict[str, str] = {
     "squeeze": "squeeze",
     "unsqueeze": "unsqueeze",
     "topk": "topk",
-    "sin": "sin",
-    "cos": "cos",
-    "round": "round",
     # Phase 10: in-place method aliases
     "relu_": "relu",
     "abs_": "abs",
@@ -1045,7 +1031,6 @@ _METHOD_TO_OP: dict[str, str] = {
     "isreal": "isreal",
     "is_complex": "is_complex",
     "is_nonzero": "is_nonzero",
-    "chunk": "chunk",
     "split": "split",
     "vsplit": "vsplit",
     "hsplit": "hsplit",
@@ -1085,13 +1070,45 @@ def canonical_op(node: torch.fx.Node) -> tuple[str, str] | None:
 # Engine ops whose aten counterpart returns a TUPLE (see the parser pre-pass):
 # the engine produces element 0 natively; getitem(0) aliases it, a consumed
 # getitem(1) forces eager.
-_TUPLE_OUTPUT_OPS = frozenset({
-    "max_reduce", "min_reduce", "nll_loss_forward", "scaled_dot_product_attention", "sort",
-    "var_mean", "std_mean", "linalg_cholesky_ex", "linalg_inv_ex", "linalg_solve_ex", "linalg_lu_factor",
-    "split", "vsplit", "hsplit", "dsplit", "tensor_split", "broadcast_tensors", "qr", "svd", "eig", "eigh", "lu",
-    "linalg_slogdet", "linalg_cholesky", "lstm_cell", "batch_norm", "layer_norm", "group_norm",
-    "topk", "mode", "kthvalue", "cummax", "cummin", "max_pool2d", "adaptive_max_pool2d",
-})
+_TUPLE_OUTPUT_OPS = frozenset(
+    {
+        "max_reduce",
+        "min_reduce",
+        "nll_loss_forward",
+        "scaled_dot_product_attention",
+        "sort",
+        "var_mean",
+        "std_mean",
+        "linalg_cholesky_ex",
+        "linalg_inv_ex",
+        "linalg_solve_ex",
+        "linalg_lu_factor",
+        "split",
+        "vsplit",
+        "hsplit",
+        "dsplit",
+        "tensor_split",
+        "broadcast_tensors",
+        "qr",
+        "svd",
+        "eig",
+        "eigh",
+        "lu",
+        "linalg_slogdet",
+        "linalg_cholesky",
+        "lstm_cell",
+        "batch_norm",
+        "layer_norm",
+        "group_norm",
+        "topk",
+        "mode",
+        "kthvalue",
+        "cummax",
+        "cummin",
+        "max_pool2d",
+        "adaptive_max_pool2d",
+    }
+)
 
 
 def _is_tuple_source(node: torch.fx.Node) -> bool:
@@ -1106,16 +1123,31 @@ def _is_tuple_source(node: torch.fx.Node) -> bool:
         key = _target_key(node.target)
         if key == "builtins.getattr":
             args = list(node.args)
-            if len(args) >= 2 and isinstance(args[1], str) and args[1] in ("shape", "device", "dtype", "layout"):
+            if (
+                len(args) >= 2
+                and isinstance(args[1], str)
+                and args[1] in ("shape", "device", "dtype", "layout")
+            ):
                 return True
             return False
-        if key in ("torch.Tensor.size", "torch.size", "torch.chunk", "torch.unbind", "_operator.getitem", "operator.getitem"):
+        if key in (
+            "torch.Tensor.size",
+            "torch.size",
+            "torch.chunk",
+            "torch.unbind",
+            "_operator.getitem",
+            "operator.getitem",
+        ):
             return True
         # aten ops producing a tuple
-        if "aten." in key and any(s in key for s in ("_shape_as_tensor", "max", "min", "sort", "topk", "unbind", "chunk")):
+        if "aten." in key and any(
+            s in key for s in ("_shape_as_tensor", "max", "min", "sort", "topk", "unbind", "chunk")
+        ):
             return True
         mapped = canonical_op(node)
-        if mapped is not None and (mapped[0] in _TUPLE_OUTPUT_OPS or mapped[0] in ("chunk", "unbind")):
+        if mapped is not None and (
+            mapped[0] in _TUPLE_OUTPUT_OPS or mapped[0] in ("chunk", "unbind")
+        ):
             return True
         return False
     if node.op == "call_method":

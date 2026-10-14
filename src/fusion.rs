@@ -439,10 +439,6 @@ pub struct ConvBnReluSpec {
     pub bn: usize,
     /// Payload index of the relu node.
     pub relu: usize,
-    /// Precomputed fused_weight[c] = bn_weight[c] / sqrt(running_var[c] + eps).
-    pub fused_scale: Vec<f32>,
-    /// Precomputed fused_bias[c] = bn_bias[c] - running_mean[c] * fused_scale[c].
-    pub fused_bias: Vec<f32>,
     /// Epsilon used in BN.
     pub eps: f32,
 }
@@ -812,8 +808,6 @@ fn build_conv_bn_relu_spec(
         conv: conv_idx,
         bn: bn_idx,
         relu: _relu_idx,
-        fused_scale: Vec::new(), // filled at runtime
-        fused_bias: Vec::new(),  // filled at runtime
         eps,
     })
 }
@@ -1225,185 +1219,6 @@ fn run_chunk_f32_lanes(
     // Tail group (<8 elements): exact scalar semantics.
     if off < chunk.len() {
         run_chunk_single_pass(rexprs, leaves, leaf_data, start + off, &mut chunk[off..]);
-    }
-}
-
-#[inline(always)]
-fn eval_unary_slice<T: Fp>(u: UnaryKind, src: &[T], dst: &mut [T], p: [f64; 2]) {
-    match u {
-        UnaryKind::Relu => {
-            for (s, d) in src.iter().zip(dst.iter_mut()) {
-                *d = if *s > T::ZERO { *s } else { T::ZERO };
-            }
-        }
-        UnaryKind::Abs => {
-            for (s, d) in src.iter().zip(dst.iter_mut()) {
-                *d = s.fp_abs();
-            }
-        }
-        UnaryKind::Neg => {
-            for (s, d) in src.iter().zip(dst.iter_mut()) {
-                *d = s.fp_neg();
-            }
-        }
-        UnaryKind::Sigmoid => {
-            let one = T::from_f64(1.0);
-            for (s, d) in src.iter().zip(dst.iter_mut()) {
-                *d = one / (one + s.fp_neg().fp_exp());
-            }
-        }
-        UnaryKind::Tanh => {
-            for (s, d) in src.iter().zip(dst.iter_mut()) {
-                *d = s.fp_tanh();
-            }
-        }
-        _ => {
-            for (s, d) in src.iter().zip(dst.iter_mut()) {
-                *d = apply_unary(u, *s, p);
-            }
-        }
-    }
-}
-
-#[inline(always)]
-fn eval_binary_slices<T: Fp>(b: BinaryKind, src_a: &[T], src_b: &[T], dst: &mut [T]) {
-    match b {
-        BinaryKind::Add => {
-            for ((a, b), d) in src_a.iter().zip(src_b.iter()).zip(dst.iter_mut()) {
-                *d = *a + *b;
-            }
-        }
-        BinaryKind::Sub => {
-            for ((a, b), d) in src_a.iter().zip(src_b.iter()).zip(dst.iter_mut()) {
-                *d = *a - *b;
-            }
-        }
-        BinaryKind::Mul => {
-            for ((a, b), d) in src_a.iter().zip(src_b.iter()).zip(dst.iter_mut()) {
-                *d = *a * *b;
-            }
-        }
-        BinaryKind::Div => {
-            for ((a, b), d) in src_a.iter().zip(src_b.iter()).zip(dst.iter_mut()) {
-                *d = *a / *b;
-            }
-        }
-    }
-}
-
-#[inline(always)]
-fn eval_binary_scalar_rhs<T: Fp>(b: BinaryKind, src_a: &[T], scalar: T, dst: &mut [T]) {
-    match b {
-        BinaryKind::Add => {
-            for (a, d) in src_a.iter().zip(dst.iter_mut()) {
-                *d = *a + scalar;
-            }
-        }
-        BinaryKind::Sub => {
-            for (a, d) in src_a.iter().zip(dst.iter_mut()) {
-                *d = *a - scalar;
-            }
-        }
-        BinaryKind::Mul => {
-            for (a, d) in src_a.iter().zip(dst.iter_mut()) {
-                *d = *a * scalar;
-            }
-        }
-        BinaryKind::Div => {
-            for (a, d) in src_a.iter().zip(dst.iter_mut()) {
-                *d = *a / scalar;
-            }
-        }
-    }
-}
-
-#[inline(always)]
-fn eval_binary_scalar_lhs<T: Fp>(b: BinaryKind, scalar: T, src_b: &[T], dst: &mut [T]) {
-    match b {
-        BinaryKind::Add => {
-            for (b_val, d) in src_b.iter().zip(dst.iter_mut()) {
-                *d = scalar + *b_val;
-            }
-        }
-        BinaryKind::Sub => {
-            for (b_val, d) in src_b.iter().zip(dst.iter_mut()) {
-                *d = scalar - *b_val;
-            }
-        }
-        BinaryKind::Mul => {
-            for (b_val, d) in src_b.iter().zip(dst.iter_mut()) {
-                *d = scalar * *b_val;
-            }
-        }
-        BinaryKind::Div => {
-            for (b_val, d) in src_b.iter().zip(dst.iter_mut()) {
-                *d = scalar / *b_val;
-            }
-        }
-    }
-}
-
-fn run_chunk_vectorized<T: Fp>(
-    rexprs: &[RExpr],
-    leaves: &[LeafInfo],
-    leaf_data: &[&[T]],
-    start: usize,
-    chunk: &mut [T],
-    scratch: &mut [Vec<T>],
-) {
-    let len = chunk.len();
-    for (k, e) in rexprs.iter().enumerate() {
-        let is_last = k == rexprs.len() - 1;
-        let (prior, rest) = scratch.split_at_mut(k);
-        let dst: &mut [T] = if is_last { chunk } else { &mut rest[0][..len] };
-
-        match e.op {
-            ChainOp::Unary(u) => {
-                let src: &[T] = match e.a {
-                    RArg::Chain(m) => &prior[m][..len],
-                    RArg::Leaf(li) => match leaves[li].map {
-                        LeafMap::Identity => &leaf_data[li][start..start + len],
-                        LeafMap::Scalar => {
-                            let scalar = leaf_data[li][0];
-                            let val = apply_unary(u, scalar, e.params);
-                            dst.fill(val);
-                            continue;
-                        }
-                        _ => unreachable!(),
-                    },
-                };
-                eval_unary_slice(u, src, dst, e.params);
-            }
-            ChainOp::Binary(b) => {
-                let (src_a_slice, scalar_a) = match e.a {
-                    RArg::Chain(m) => (Some(&prior[m][..len]), None),
-                    RArg::Leaf(li) => match leaves[li].map {
-                        LeafMap::Identity => (Some(&leaf_data[li][start..start + len]), None),
-                        LeafMap::Scalar => (None, Some(leaf_data[li][0])),
-                        _ => unreachable!(),
-                    },
-                };
-                let (src_b_slice, scalar_b) = match e.b.expect("binary has second operand") {
-                    RArg::Chain(m) => (Some(&prior[m][..len]), None),
-                    RArg::Leaf(li) => match leaves[li].map {
-                        LeafMap::Identity => (Some(&leaf_data[li][start..start + len]), None),
-                        LeafMap::Scalar => (None, Some(leaf_data[li][0])),
-                        _ => unreachable!(),
-                    },
-                };
-
-                if let (Some(sa), Some(sb)) = (src_a_slice, src_b_slice) {
-                    eval_binary_slices(b, sa, sb, dst);
-                } else if let (Some(sa), Some(sc_b)) = (src_a_slice, scalar_b) {
-                    eval_binary_scalar_rhs(b, sa, sc_b, dst);
-                } else if let (Some(sc_a), Some(sb)) = (scalar_a, src_b_slice) {
-                    eval_binary_scalar_lhs(b, sc_a, sb, dst);
-                } else if let (Some(sc_a), Some(sc_b)) = (scalar_a, scalar_b) {
-                    let res = apply_binary(b, sc_a, sc_b);
-                    dst.fill(res);
-                }
-            }
-        }
     }
 }
 

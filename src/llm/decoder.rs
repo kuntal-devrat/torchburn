@@ -167,7 +167,6 @@ pub struct RustQwenDecoder {
     o_out: Vec<f32>,
     h_buf: Vec<f32>,
     down_out: Vec<f32>,
-    scores: Vec<f32>,
     logits: Vec<f32>,
 }
 
@@ -420,7 +419,6 @@ impl RustQwenDecoder {
             o_out: vec![0.0f32; hidden_size],
             h_buf: vec![0.0f32; intermediate_size],
             down_out: vec![0.0f32; hidden_size],
-            scores: vec![0.0f32; max_seq_len],
             logits: vec![0.0f32; vocab_size],
         })
     }

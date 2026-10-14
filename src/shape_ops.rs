@@ -387,6 +387,7 @@ pub fn unsqueeze_view(a: &BorrowedTensor, dim: isize) -> PyResult<(Vec<i64>, Vec
 }
 
 /// Swap two dims (aten.transpose semantics), expressed as a full permute.
+#[allow(dead_code)]
 pub fn transpose(a: &BorrowedTensor, d0: isize, d1: isize) -> PyResult<OwnedTensor> {
     let rank = a.shape.len();
     let d0 = if d0 < 0 { rank as isize + d0 } else { d0 } as usize;
@@ -488,6 +489,7 @@ pub fn permute(a: &BorrowedTensor, dims: &[isize]) -> PyResult<OwnedTensor> {
 // t — transpose the last two dims (aten.t), 2D-only per torch semantics
 // ---------------------------------------------------------------------------
 
+#[allow(dead_code)]
 pub fn t(a: &BorrowedTensor) -> PyResult<OwnedTensor> {
     let rank = a.shape.len();
     if rank != 2 {
@@ -1182,6 +1184,7 @@ pub fn linspace(
 }
 
 /// Split a tensor into chunks along a dimension.
+#[allow(dead_code)]
 pub fn chunk(a: &BorrowedTensor, chunks: usize, dim: isize) -> PyResult<Vec<OwnedTensor>> {
     let d = if dim < 0 {
         (a.shape.len() as isize + dim) as usize
@@ -1231,6 +1234,7 @@ pub fn chunk(a: &BorrowedTensor, chunks: usize, dim: isize) -> PyResult<Vec<Owne
 // ---------------------------------------------------------------------------
 
 /// Remove a dimension of size 1.
+#[allow(dead_code)]
 pub fn squeeze(a: &BorrowedTensor, dim: isize) -> PyResult<OwnedTensor> {
     let rank = a.shape.len() as isize;
     let d = if dim < 0 { rank + dim } else { dim };
@@ -1256,6 +1260,7 @@ pub fn squeeze(a: &BorrowedTensor, dim: isize) -> PyResult<OwnedTensor> {
 }
 
 /// Add a dimension of size 1 at the given position.
+#[allow(dead_code)]
 pub fn unsqueeze(a: &BorrowedTensor, dim: isize) -> PyResult<OwnedTensor> {
     let rank = a.shape.len() as isize;
     let d = if dim < 0 { rank + dim + 1 } else { dim };

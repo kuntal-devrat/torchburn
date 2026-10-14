@@ -1,16 +1,19 @@
 """Universal Inference Engine for TorchBurn LLM."""
 
 from __future__ import annotations
+
 import logging
 import os
 import sys
 import time
-from typing import Optional, List, Dict, Any, Generator, Tuple, Union
+from typing import Any, Dict, Generator, List, Optional, Tuple, Union
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 import torchburn
+
 from .config import EngineConfig, GenerationConfig
 from .model import UniversalTransformer
 from .tokenizer import UniversalTokenizer
@@ -55,12 +58,20 @@ class UniversalEngine:
             # Auto-detect: Metal (macOS) > WGPU (Vulkan/DX12) > CPU
             try:
                 from .. import _torchburn as _native_check
-                if sys.platform == "darwin" and hasattr(_native_check, "MetalBackend"):
+
+                metal_avail = getattr(_native_check, "is_metal_available", lambda: False)() or (
+                    getattr(_native_check, "gpu_backend", lambda: "")() == "Metal"
+                )
+                if sys.platform == "darwin" and metal_avail:
                     target_device = "metal"
                 else:
                     try:
                         gpu_result = _native_check.gpu_info()
-                        available = gpu_result.get("available", False) if isinstance(gpu_result, dict) else gpu_result[0]
+                        available = (
+                            gpu_result.get("available", False)
+                            if isinstance(gpu_result, dict)
+                            else gpu_result[0]
+                        )
                         target_device = "gpu" if available else "cpu"
                     except Exception:
                         target_device = "cpu"
@@ -68,7 +79,11 @@ class UniversalEngine:
                 target_device = "cpu"
         elif target_device == "metal":
             from .. import _torchburn as _native_check
-            if sys.platform != "darwin" or not hasattr(_native_check, "MetalBackend"):
+
+            metal_avail = getattr(_native_check, "is_metal_available", lambda: False)() or (
+                getattr(_native_check, "gpu_backend", lambda: "")() == "Metal"
+            )
+            if sys.platform != "darwin" or not metal_avail:
                 raise RuntimeError(
                     "TORCHBURN_DEVICE=metal requires macOS/iOS and the `torchburn` "
                     "wheel compiled with the `metal-native` feature."
@@ -86,7 +101,11 @@ class UniversalEngine:
         )
         if quant in ("int4", "int8"):
             bits = 4 if quant == "int4" else 8
-            backend = "igpu" if target_device in ("igpu", "gpu", "wgpu", "dgpu", "vulkan", "dx12", "metal") else "cpu"
+            backend = (
+                "igpu"
+                if target_device in ("igpu", "gpu", "wgpu", "dgpu", "vulkan", "dx12", "metal")
+                else "cpu"
+            )
 
             # Check if model is already quantized (e.g. from streaming loader or disk cache)
             raw_layers: Any = getattr(self.raw_model, "layers", None)
@@ -107,19 +126,28 @@ class UniversalEngine:
                     fuse_fn()
 
                 _LOG.info("Quantizing model weights to INT%d SIMD [backend=%s]...", bits, backend)
-                torchburn.quantize_model(self.raw_model, bits=bits, exclude_modules=[], backend=backend)
+                torchburn.quantize_model(
+                    self.raw_model, bits=bits, exclude_modules=[], backend=backend
+                )
 
-
-
-
-            if self._rust_decoder is None and bits == 4 and native_decoder_supported and backend == "cpu":
+            if (
+                self._rust_decoder is None
+                and bits == 4
+                and native_decoder_supported
+                and backend == "cpu"
+            ):
                 try:
                     _LOG.info("Initializing Zero-Python Pure Rust Decoder (AVX-512 VNNI)...")
                     self._rust_decoder = torchburn.create_rust_qwen_decoder(self.raw_model)
                     _LOG.info("Pure Rust Decoder active (45-50+ tok/s).")
                 except Exception as dec_err:
                     _LOG.warning("Pure-Rust decoder init (%s), using fused layer SIMD.", dec_err)
-            elif self._rust_decoder is None and bits == 4 and native_decoder_supported and backend == "igpu":
+            elif (
+                self._rust_decoder is None
+                and bits == 4
+                and native_decoder_supported
+                and backend == "igpu"
+            ):
                 try:
                     _LOG.info("Initializing End-to-End WGPU GPU Graph Decoder (Vulkan)...")
                     self._wgpu_decoder = torchburn.create_wgpu_qwen_decoder(self.raw_model)
@@ -134,7 +162,9 @@ class UniversalEngine:
                     # layout the CPU kernels consume, so re-point every
                     # quantized layer at the portable SIMD CPU backend and hand
                     # decode to the zero-Python Rust decoder instead.
-                    _LOG.warning("WGPU decoder init failed (%s); falling back to CPU SIMD decode.", wgpu_err)
+                    _LOG.warning(
+                        "WGPU decoder init failed (%s); falling back to CPU SIMD decode.", wgpu_err
+                    )
                     self._wgpu_decoder = None  # Clear partially-initialized decoder
                     _set_quant_backend(self.raw_model, "cpu")
                     try:
@@ -142,7 +172,10 @@ class UniversalEngine:
                         self._rust_decoder = torchburn.create_rust_qwen_decoder(self.raw_model)
                         _LOG.info("Pure Rust Decoder active (CPU fallback).")
                     except Exception as dec_err:
-                        _LOG.warning("Pure-Rust decoder fallback failed (%s); using fused layer SIMD.", dec_err)
+                        _LOG.warning(
+                            "Pure-Rust decoder fallback failed (%s); using fused layer SIMD.",
+                            dec_err,
+                        )
 
             self.model = self.raw_model
             self._is_compiled = True
@@ -325,7 +358,9 @@ class UniversalEngine:
             if self.config.use_static_kv_cache and callable(create_static_fn):
                 max_len = max(seq_len + cfg.max_new_tokens + 64, 4096)
                 init_kv = create_static_fn(max_batch_size=1, max_seq_len=max_len)
-                logits, kv_caches, prefill_time = self.prefill(input_tensor, kv_caches=init_kv, offset=0)
+                logits, kv_caches, prefill_time = self.prefill(
+                    input_tensor, kv_caches=init_kv, offset=0
+                )
             else:
                 logits, kv_caches, prefill_time = self.prefill(input_tensor)
 
@@ -339,7 +374,9 @@ class UniversalEngine:
                 try:
                     last_t = torch.tensor([[input_ids_list[-1]]], dtype=torch.long)
                     if kv_caches_native is not None:
-                        logits, kv_caches, _ = self.prefill(last_t, kv_caches=kv_caches_native, offset=max(0, seq_len - 1))
+                        logits, kv_caches, _ = self.prefill(
+                            last_t, kv_caches=kv_caches_native, offset=max(0, seq_len - 1)
+                        )
                     else:
                         logits, kv_caches, _ = self.prefill(last_t)
                 except Exception as exc:
@@ -353,8 +390,12 @@ class UniversalEngine:
         # Skipped when native prefill already populated KV (no DLPack copies).
         if decoder is not None and kv_caches is not None and not native_prefilled:
             try:
-                k_list = [(c.k if hasattr(c, "k") else c[0]).detach().contiguous() for c in kv_caches]
-                v_list = [(c.v if hasattr(c, "v") else c[1]).detach().contiguous() for c in kv_caches]
+                k_list = [
+                    (c.k if hasattr(c, "k") else c[0]).detach().contiguous() for c in kv_caches
+                ]
+                v_list = [
+                    (c.v if hasattr(c, "v") else c[1]).detach().contiguous() for c in kv_caches
+                ]
                 k_caps = [torch.to_dlpack(k) for k in k_list]
                 v_caps = [torch.to_dlpack(v) for v in v_list]
                 decoder.copy_kv_cache_from_tensors(k_caps, v_caps, seq_len)
@@ -487,7 +528,9 @@ class UniversalEngine:
                 decode_times.append(step_time)
                 next_token = sampled_token
             else:
-                logits, kv_caches, step_time = self.decode_step(next_token, kv_caches, offset=offset)
+                logits, kv_caches, step_time = self.decode_step(
+                    next_token, kv_caches, offset=offset
+                )
                 decode_times.append(step_time)
                 next_token = self._sample(
                     logits,
@@ -509,7 +552,9 @@ class UniversalEngine:
 
         total_decode_time = sum(decode_times)
         num_decode_steps = len(decode_times)
-        avg_decode_ms = (total_decode_time / num_decode_steps * 1000.0) if num_decode_steps > 0 else 0.0
+        avg_decode_ms = (
+            (total_decode_time / num_decode_steps * 1000.0) if num_decode_steps > 0 else 0.0
+        )
         decode_tok_sec = (tokens_generated / total_decode_time) if total_decode_time > 0 else 0.0
 
         # 5. Multi-Turn State Synchronization Fix:
@@ -535,7 +580,9 @@ class UniversalEngine:
     ) -> str:
         """Non-streaming generation helper."""
         parts = []
-        for packet in self.generate_stream(prompt, config, kv_caches=kv_caches, cached_token_ids=cached_token_ids, stream=False):
+        for packet in self.generate_stream(
+            prompt, config, kv_caches=kv_caches, cached_token_ids=cached_token_ids, stream=False
+        ):
             if packet["type"] == "token":
                 parts.append(packet["text"])
         return "".join(parts)
@@ -549,4 +596,4 @@ def _set_quant_backend(model: nn.Module, backend: str) -> None:
     re-quantization or data movement is needed."""
     for module in model.modules():
         if hasattr(module, "backend") and hasattr(module, "qweight"):
-            setattr(module, "backend", backend)
+            setattr(module, "backend", backend)  # noqa: B010

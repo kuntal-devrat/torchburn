@@ -25,7 +25,7 @@ pub(crate) struct WgpuPipelines {
     /// Persistent embed-table lookup: avoids 3.5 KB host write_buffer per token.
     pub(crate) embed_lookup_pipeline: wgpu::ComputePipeline,
     pub(crate) embed_lookup_bgl: wgpu::BindGroupLayout,
-    pub(crate) rows_per_wg: u32,
+    pub(crate) _rows_per_wg: u32,
 }
 
 /// Best-effort pipeline cache (Vulkan/DX12/Metal): empty cache enables
@@ -786,7 +786,7 @@ impl WgpuPipelines {
             fused_add_rmsnorm_bgl,
             embed_lookup_pipeline,
             embed_lookup_bgl,
-            rows_per_wg,
+            _rows_per_wg: rows_per_wg,
         }
     }
 }

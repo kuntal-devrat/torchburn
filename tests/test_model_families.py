@@ -6,7 +6,6 @@ exercised through the real model/quantization pipeline — no stubs.
 
 import pytest
 import torch
-
 from torchburn import quantize_model
 from torchburn.llm.config import ModelConfig
 from torchburn.llm.model import UniversalTransformer
@@ -28,7 +27,6 @@ def _base(**overrides):
     )
     defaults.update(overrides)
     return ModelConfig.from_dict(defaults)
-
 
 
 FAMILIES = {
@@ -108,7 +106,7 @@ def test_family_forward_prefill_and_decode(family):
 
     next_ids = torch.randint(0, cfg.vocab_size, (1, 1))
     with torch.no_grad():
-        next_logits, next_caches = model(next_ids, kv_caches=caches, offset=5)
+        next_logits, _ = model(next_ids, kv_caches=caches, offset=5)
     assert next_logits.shape == (1, 1, cfg.vocab_size)
     assert not torch.isnan(next_logits).any()
 

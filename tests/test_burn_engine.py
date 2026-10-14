@@ -14,10 +14,9 @@ Run under any engine:
 
 from __future__ import annotations
 
+import pytest
 import torch
 import torch.nn.functional as F
-import pytest
-
 from torchburn import _torchburn as _native
 from torchburn._parser import payload_json
 
@@ -87,9 +86,27 @@ class TestBurnLinalg:
         payload = {
             "inputs": [_spec(t) for t in tensors],
             "nodes": [
-                {"id": 0, "target": "linear", "args": [{"kind": "slot", "index": 0}, {"kind": "slot", "index": 1}, {"kind": "slot", "index": 2}], "kwargs": {}},
+                {
+                    "id": 0,
+                    "target": "linear",
+                    "args": [
+                        {"kind": "slot", "index": 0},
+                        {"kind": "slot", "index": 1},
+                        {"kind": "slot", "index": 2},
+                    ],
+                    "kwargs": {},
+                },
                 {"id": 1, "target": "relu", "args": [{"kind": "slot", "index": 5}], "kwargs": {}},
-                {"id": 2, "target": "linear", "args": [{"kind": "slot", "index": 6}, {"kind": "slot", "index": 3}, {"kind": "slot", "index": 4}], "kwargs": {}},
+                {
+                    "id": 2,
+                    "target": "linear",
+                    "args": [
+                        {"kind": "slot", "index": 6},
+                        {"kind": "slot", "index": 3},
+                        {"kind": "slot", "index": 4},
+                    ],
+                    "kwargs": {},
+                },
             ],
             "outputs": [2],
         }
@@ -116,12 +133,23 @@ class TestBurnLinalg:
         b = torch.randn(4)
         payload = {
             "inputs": [_spec(x), _spec(w), _spec(b)],
-            "nodes": [{
-                "id": 0,
-                "target": "conv2d",
-                "args": [{"kind": "slot", "index": 0}, {"kind": "slot", "index": 1}, {"kind": "slot", "index": 2}],
-                "kwargs": {"stride": [1, 1], "padding": [1, 1], "dilation": [1, 1], "groups": 1},
-            }],
+            "nodes": [
+                {
+                    "id": 0,
+                    "target": "conv2d",
+                    "args": [
+                        {"kind": "slot", "index": 0},
+                        {"kind": "slot", "index": 1},
+                        {"kind": "slot", "index": 2},
+                    ],
+                    "kwargs": {
+                        "stride": [1, 1],
+                        "padding": [1, 1],
+                        "dilation": [1, 1],
+                        "groups": 1,
+                    },
+                }
+            ],
             "outputs": [0],
         }
         got = _run(payload, [x, w, b])[0]
@@ -134,12 +162,24 @@ class TestBurnLinalg:
         b = torch.randn(8)
         payload = {
             "inputs": [_spec(x), _spec(w), _spec(b)],
-            "nodes": [{
-                "id": 0,
-                "target": "conv_transpose2d",
-                "args": [{"kind": "slot", "index": 0}, {"kind": "slot", "index": 1}, {"kind": "slot", "index": 2}],
-                "kwargs": {"stride": [2, 2], "padding": [1, 1], "output_padding": [1, 1], "dilation": [1, 1], "groups": 1},
-            }],
+            "nodes": [
+                {
+                    "id": 0,
+                    "target": "conv_transpose2d",
+                    "args": [
+                        {"kind": "slot", "index": 0},
+                        {"kind": "slot", "index": 1},
+                        {"kind": "slot", "index": 2},
+                    ],
+                    "kwargs": {
+                        "stride": [2, 2],
+                        "padding": [1, 1],
+                        "output_padding": [1, 1],
+                        "dilation": [1, 1],
+                        "groups": 1,
+                    },
+                }
+            ],
             "outputs": [0],
         }
         got = _run(payload, [x, w, b])[0]
@@ -150,12 +190,19 @@ class TestBurnLinalg:
         x = torch.randn(2, 3, 8, 8)
         payload = {
             "inputs": [_spec(x)],
-            "nodes": [{
-                "id": 0,
-                "target": "max_pool2d",
-                "args": [{"kind": "slot", "index": 0}],
-                "kwargs": {"kernel_size": [2, 2], "stride": [2, 2], "padding": [0, 0], "dilation": [1, 1]},
-            }],
+            "nodes": [
+                {
+                    "id": 0,
+                    "target": "max_pool2d",
+                    "args": [{"kind": "slot", "index": 0}],
+                    "kwargs": {
+                        "kernel_size": [2, 2],
+                        "stride": [2, 2],
+                        "padding": [0, 0],
+                        "dilation": [1, 1],
+                    },
+                }
+            ],
             "outputs": [0],
         }
         got = _run(payload, [x])[0]
@@ -166,12 +213,19 @@ class TestBurnLinalg:
         x = torch.randn(2, 3, 8, 8)
         payload = {
             "inputs": [_spec(x)],
-            "nodes": [{
-                "id": 0,
-                "target": "avg_pool2d",
-                "args": [{"kind": "slot", "index": 0}],
-                "kwargs": {"kernel_size": [2, 2], "stride": [2, 2], "padding": [0, 0], "count_include_pad": True},
-            }],
+            "nodes": [
+                {
+                    "id": 0,
+                    "target": "avg_pool2d",
+                    "args": [{"kind": "slot", "index": 0}],
+                    "kwargs": {
+                        "kernel_size": [2, 2],
+                        "stride": [2, 2],
+                        "padding": [0, 0],
+                        "count_include_pad": True,
+                    },
+                }
+            ],
             "outputs": [0],
         }
         got = _run(payload, [x])[0]
@@ -182,12 +236,14 @@ class TestBurnLinalg:
         x = torch.randn(2, 3, 8, 8)
         payload = {
             "inputs": [_spec(x)],
-            "nodes": [{
-                "id": 0,
-                "target": "adaptive_avg_pool2d",
-                "args": [{"kind": "slot", "index": 0}],
-                "kwargs": {"output_size": [1, 1]},
-            }],
+            "nodes": [
+                {
+                    "id": 0,
+                    "target": "adaptive_avg_pool2d",
+                    "args": [{"kind": "slot", "index": 0}],
+                    "kwargs": {"output_size": [1, 1]},
+                }
+            ],
             "outputs": [0],
         }
         got = _run(payload, [x])[0]
@@ -199,12 +255,14 @@ class TestBurnLinalg:
         w = torch.randn(16)
         payload = {
             "inputs": [_spec(x), _spec(w)],
-            "nodes": [{
-                "id": 0,
-                "target": "rms_norm",
-                "args": [{"kind": "slot", "index": 0}, {"kind": "slot", "index": 1}],
-                "kwargs": {"eps": 1e-5},
-            }],
+            "nodes": [
+                {
+                    "id": 0,
+                    "target": "rms_norm",
+                    "args": [{"kind": "slot", "index": 0}, {"kind": "slot", "index": 1}],
+                    "kwargs": {"eps": 1e-5},
+                }
+            ],
             "outputs": [0],
         }
         got = _run(payload, [x, w])[0]
@@ -218,12 +276,18 @@ class TestBurnLinalg:
         b = torch.randn(16)
         payload = {
             "inputs": [_spec(x), _spec(w), _spec(b)],
-            "nodes": [{
-                "id": 0,
-                "target": "layer_norm",
-                "args": [{"kind": "slot", "index": 0}, {"kind": "slot", "index": 1}, {"kind": "slot", "index": 2}],
-                "kwargs": {"eps": 1e-5},
-            }],
+            "nodes": [
+                {
+                    "id": 0,
+                    "target": "layer_norm",
+                    "args": [
+                        {"kind": "slot", "index": 0},
+                        {"kind": "slot", "index": 1},
+                        {"kind": "slot", "index": 2},
+                    ],
+                    "kwargs": {"eps": 1e-5},
+                }
+            ],
             "outputs": [0],
         }
         got = _run(payload, [x, w, b])[0]
@@ -234,12 +298,14 @@ class TestBurnLinalg:
         x = torch.randn(4, 8)
         payload = {
             "inputs": [_spec(x)],
-            "nodes": [{
-                "id": 0,
-                "target": "tan",
-                "args": [{"kind": "slot", "index": 0}],
-                "kwargs": {},
-            }],
+            "nodes": [
+                {
+                    "id": 0,
+                    "target": "tan",
+                    "args": [{"kind": "slot", "index": 0}],
+                    "kwargs": {},
+                }
+            ],
             "outputs": [0],
         }
         got = _run(payload, [x])[0]

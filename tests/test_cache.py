@@ -5,12 +5,10 @@ from __future__ import annotations
 import json
 
 import torch
-
 import torchburn
 from torchburn import _torchburn as tb
 from torchburn._compiled import BurnCompiledCallable
-from torchburn._parser import payload_json, parse_graph
-
+from torchburn._parser import parse_graph, payload_json
 
 _REGISTERED = False
 _CALLABLES: list[BurnCompiledCallable] = []
@@ -89,7 +87,11 @@ def test_signature_changes_with_shape():
 def test_rust_cache_lookup_roundtrip():
     torchburn.cache_clear()
     payload = json.dumps(
-        {"inputs": [{"shape": [2], "dtype": "f32"}], "nodes": [{"id": 0, "target": "relu", "args": []}], "outputs": [0]},
+        {
+            "inputs": [{"shape": [2], "dtype": "f32"}],
+            "nodes": [{"id": 0, "target": "relu", "args": []}],
+            "outputs": [0],
+        },
         sort_keys=True,
     )
     sig = tb.signature(payload)
@@ -121,12 +123,17 @@ def test_cache_stats_structure():
 
     # Populate cache
     payload = json.dumps(
-        {"inputs": [{"shape": [2], "dtype": "f32"}], "nodes": [{"id": 0, "target": "relu", "args": []}], "outputs": [0]},
+        {
+            "inputs": [{"shape": [2], "dtype": "f32"}],
+            "nodes": [{"id": 0, "target": "relu", "args": []}],
+            "outputs": [0],
+        },
         sort_keys=True,
     )
     sig = tb.signature(payload)
 
     from torchburn._cache import store
+
     store(sig, {"test": "data"})
 
     stats2 = torchburn.cache_stats()

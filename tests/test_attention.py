@@ -11,12 +11,11 @@ import warnings
 
 import torch
 import torch.nn.functional as F
-
-from torchburn import ops
+from torch.fx.experimental.proxy_tensor import make_fx
 from torchburn import _torchburn as _native
+from torchburn import ops
 from torchburn._compiled import BurnCompiledCallable
 from torchburn._parser import payload_json
-from torch.fx.experimental.proxy_tensor import make_fx
 
 torch.manual_seed(0)
 
@@ -59,7 +58,9 @@ class TestScaledDotProductAttention:
         k = torch.randn(1, 4, 32, 64)
         v = torch.randn(1, 4, 32, 64)
         got = _run(_sdpa_payload([q, k, v], is_causal=True), [q, k, v])[0]
-        assert torch.allclose(got, F.scaled_dot_product_attention(q, k, v, is_causal=True), atol=1e-4)
+        assert torch.allclose(
+            got, F.scaled_dot_product_attention(q, k, v, is_causal=True), atol=1e-4
+        )
 
     def test_bool_mask(self):
         T = 16
@@ -68,7 +69,9 @@ class TestScaledDotProductAttention:
         v = torch.randn(2, 4, T, 32)
         mask = torch.triu(torch.ones(T, T, dtype=torch.bool), diagonal=1)
         got = _run(_sdpa_payload([q, k, v, mask]), [q, k, v, mask])[0]
-        assert torch.allclose(got, F.scaled_dot_product_attention(q, k, v, attn_mask=mask), atol=1e-4)
+        assert torch.allclose(
+            got, F.scaled_dot_product_attention(q, k, v, attn_mask=mask), atol=1e-4
+        )
 
     def test_float_mask(self):
         B, H, T, D = 2, 4, 8, 16
@@ -77,7 +80,9 @@ class TestScaledDotProductAttention:
         v = torch.randn(B, H, T, D)
         mask = torch.randn(B, H, T, T)
         got = _run(_sdpa_payload([q, k, v, mask]), [q, k, v, mask])[0]
-        assert torch.allclose(got, F.scaled_dot_product_attention(q, k, v, attn_mask=mask), atol=1e-4)
+        assert torch.allclose(
+            got, F.scaled_dot_product_attention(q, k, v, attn_mask=mask), atol=1e-4
+        )
 
     def test_float_mask_tt_broadcast(self):
         T = 12
@@ -86,13 +91,19 @@ class TestScaledDotProductAttention:
         v = torch.randn(2, 2, T, 24)
         mask = torch.randn(T, T)
         got = _run(_sdpa_payload([q, k, v, mask]), [q, k, v, mask])[0]
-        assert torch.allclose(got, F.scaled_dot_product_attention(q, k, v, attn_mask=mask), atol=1e-4)
+        assert torch.allclose(
+            got, F.scaled_dot_product_attention(q, k, v, attn_mask=mask), atol=1e-4
+        )
 
     def test_ops_api(self):
         q = torch.randn(1, 4, 8, 16)
         k = torch.randn(1, 4, 8, 16)
         v = torch.randn(1, 4, 8, 16)
-        assert torch.allclose(ops.scaled_dot_product_attention(q, k, v), F.scaled_dot_product_attention(q, k, v), atol=1e-4)
+        assert torch.allclose(
+            ops.scaled_dot_product_attention(q, k, v),
+            F.scaled_dot_product_attention(q, k, v),
+            atol=1e-4,
+        )
 
     def test_large_parallel_path(self):
         """Regression: the SIMD+rayon kernel (>= 1M MACs, B*H blocks) must
@@ -108,7 +119,9 @@ class TestScaledDotProductAttention:
         k = torch.randn(4, 4, 64, 32)
         v = torch.randn(4, 4, 64, 32)
         got = _run(_sdpa_payload([q, k, v], is_causal=True), [q, k, v])[0]
-        assert torch.allclose(got, F.scaled_dot_product_attention(q, k, v, is_causal=True), atol=1e-4)
+        assert torch.allclose(
+            got, F.scaled_dot_product_attention(q, k, v, is_causal=True), atol=1e-4
+        )
 
     def test_large_parallel_bool_mask(self):
         """Parallel path + broadcast bool mask (fully/partially masked rows)."""
@@ -118,7 +131,9 @@ class TestScaledDotProductAttention:
         v = torch.randn(4, 4, T, 32)
         mask = torch.triu(torch.ones(T, T, dtype=torch.bool), diagonal=1)
         got = _run(_sdpa_payload([q, k, v, mask]), [q, k, v, mask])[0]
-        assert torch.allclose(got, F.scaled_dot_product_attention(q, k, v, attn_mask=mask), atol=1e-4)
+        assert torch.allclose(
+            got, F.scaled_dot_product_attention(q, k, v, attn_mask=mask), atol=1e-4
+        )
 
     def test_export_path(self):
         """Full parser/interpreter path — must be fully native (no fallback)."""
@@ -256,8 +271,12 @@ class TestFusedQKVExportPath:
         payload = {
             "inputs": [_spec(x)],
             "nodes": [
-                {"id": 0, "target": "select", "args": [{"kind": "slot", "index": 0}],
-                 "kwargs": {"dim": 0, "index": 1}},
+                {
+                    "id": 0,
+                    "target": "select",
+                    "args": [{"kind": "slot", "index": 0}],
+                    "kwargs": {"dim": 0, "index": 1},
+                },
             ],
             "outputs": [0],
         }
@@ -271,9 +290,12 @@ class TestFusedQKVExportPath:
         payload = {
             "inputs": [_spec(a), _spec(b)],
             "nodes": [
-                {"id": 0, "target": "cat",
-                 "args": [{"kind": "slot", "value": [0, 1]}],
-                 "kwargs": {"dim": 1}},
+                {
+                    "id": 0,
+                    "target": "cat",
+                    "args": [{"kind": "slot", "value": [0, 1]}],
+                    "kwargs": {"dim": 1},
+                },
             ],
             "outputs": [0],
         }

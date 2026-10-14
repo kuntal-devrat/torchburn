@@ -1,8 +1,9 @@
 """Configuration classes for TorchBurn LLM Inference Engine."""
 
 from __future__ import annotations
+
 from dataclasses import dataclass, field
-from typing import Optional, List, Dict, Any
+from typing import Any, Dict, List, Optional
 
 
 @dataclass
@@ -60,12 +61,26 @@ class ModelConfig:
 
         # Check if family is recognized
         known_family_keywords = [
-            "qwen", "llama", "mistral", "gemma", "gpt2", "gpt_neox", "gpt-neox", "pythia",
-            "stablelm", "phi", "starcoder", "mixtral", "deepseek", "olmoe", "grok"
+            "qwen",
+            "llama",
+            "mistral",
+            "gemma",
+            "gpt2",
+            "gpt_neox",
+            "gpt-neox",
+            "pythia",
+            "stablelm",
+            "phi",
+            "starcoder",
+            "mixtral",
+            "deepseek",
+            "olmoe",
+            "grok",
         ]
         is_known = any(k in model_type or k in arch_lower for k in known_family_keywords)
         if (model_type or arch) and not is_known:
             import warnings
+
             warnings.warn(
                 f"Model architecture '{arch or model_type}' is not an explicitly verified TorchBurn family. "
                 "Verified families include: Qwen, Llama, Mistral, Gemma, GPT-2, GPT-NeoX, StableLM, Mixtral, DeepSeek. "
@@ -77,14 +92,32 @@ class ModelConfig:
         is_qwen = "qwen" in arch_lower or "qwen" in model_type
         is_gemma = "gemma" in arch_lower or "gemma" in model_type
         is_gpt2 = "gpt2" in arch_lower or "gpt2" in model_type
-        is_gpt_neox = "gpt_neox" in arch_lower or "gpt-neox" in model_type or "gpt_neox" in model_type
-        is_moe = bool(data.get("num_experts", 0) or data.get("n_routed_experts", 0) or data.get("num_local_experts", 0))
+        is_gpt_neox = (
+            "gpt_neox" in arch_lower or "gpt-neox" in model_type or "gpt_neox" in model_type
+        )
+        is_moe = bool(
+            data.get("num_experts", 0)
+            or data.get("n_routed_experts", 0)
+            or data.get("num_local_experts", 0)
+        )
         if is_moe:
-            exp_val = data.get("num_experts") or data.get("n_routed_experts") or data.get("num_local_experts") or 0
+            exp_val = (
+                data.get("num_experts")
+                or data.get("n_routed_experts")
+                or data.get("num_local_experts")
+                or 0
+            )
             num_experts = int(exp_val)
             tok_val = data.get("num_experts_per_tok") or data.get("num_experts_per_token") or 2
             num_experts_per_tok = int(tok_val)
-            supported_moe_types = {"mixtral", "deepseek_v2", "deepseek_v3", "qwen3_moe", "olmoe", "grok1"}
+            supported_moe_types = {
+                "mixtral",
+                "deepseek_v2",
+                "deepseek_v3",
+                "qwen3_moe",
+                "olmoe",
+                "grok1",
+            }
             if model_type not in supported_moe_types:
                 raise ValueError(
                     f"Unsupported MoE architecture '{model_type}'. Supported: "
@@ -97,9 +130,17 @@ class ModelConfig:
         norm_type = "gemma_offset" if is_gemma else data.get("norm_type", "standard")
         scale_embeddings = is_gemma or data.get("scale_embeddings", False)
         qkv_bias = data.get("qkv_bias", data.get("attention_bias", is_qwen))
-        hidden_act = str(data.get("hidden_act", "gelu_pytorch_tanh" if (is_gemma or is_gpt2) else "silu"))
+        hidden_act = str(
+            data.get("hidden_act", "gelu_pytorch_tanh" if (is_gemma or is_gpt2) else "silu")
+        )
         if hidden_act.lower() not in {
-            "silu", "swish", "gelu", "gelu_new", "gelu_pytorch_tanh", "relu", "relu2"
+            "silu",
+            "swish",
+            "gelu",
+            "gelu_new",
+            "gelu_pytorch_tanh",
+            "relu",
+            "relu2",
         }:
             raise ValueError(
                 f"Unsupported decoder activation '{hidden_act}'. "
@@ -112,7 +153,9 @@ class ModelConfig:
             intermediate_size=data.get("intermediate_size", hidden_size * 4),
             num_hidden_layers=data.get("num_hidden_layers", 24),
             num_attention_heads=num_heads,
-            num_key_value_heads=data.get("num_key_value_heads", data.get("num_kv_heads", num_heads)),
+            num_key_value_heads=data.get(
+                "num_key_value_heads", data.get("num_kv_heads", num_heads)
+            ),
             head_dim=head_dim,
             max_position_embeddings=data.get("max_position_embeddings", 32768),
             rms_norm_eps=data.get("rms_norm_eps", 1e-6),

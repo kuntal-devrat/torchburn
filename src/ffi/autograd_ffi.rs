@@ -20,6 +20,50 @@ pub fn autograd_is_enabled() -> bool {
     crate::autograd::is_enabled()
 }
 
+#[pyfunction]
+pub fn autograd_active_recording_threads() -> usize {
+    crate::autograd::active_recording_threads()
+}
+
+/// RAII guard exposed to Python as a context manager (`with torchburn._torchburn.AutogradGuard():`).
+#[pyclass(name = "AutogradGuard")]
+pub struct PyAutogradGuard {
+    guard: Option<crate::autograd::AutogradGuard>,
+}
+
+#[pymethods]
+impl PyAutogradGuard {
+    #[new]
+    pub fn new() -> Self {
+        Self {
+            guard: Some(crate::autograd::AutogradGuard::new()),
+        }
+    }
+
+    pub fn disable(&mut self) {
+        if let Some(mut g) = self.guard.take() {
+            g.disable();
+        }
+    }
+
+    pub fn is_active(&self) -> bool {
+        self.guard.is_some()
+    }
+
+    pub fn __enter__(slf: Bound<'_, Self>) -> Bound<'_, Self> {
+        slf
+    }
+
+    pub fn __exit__(
+        &mut self,
+        _exc_type: Option<&Bound<'_, pyo3::types::PyAny>>,
+        _exc_val: Option<&Bound<'_, pyo3::types::PyAny>>,
+        _exc_tb: Option<&Bound<'_, pyo3::types::PyAny>>,
+    ) {
+        self.disable();
+    }
+}
+
 /// Execute backward on the autograd tape.  `grad_output` is a DLPack capsule
 /// of the upstream gradient.  Returns a dict mapping tensor_id → capsule of
 /// the accumulated gradient for each leaf tensor.

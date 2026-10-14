@@ -83,3 +83,16 @@ pub fn wgpu_clear_buffer_pool() {
         crate::wgpu::backend::wgpu_clear_buffer_pool();
     }
 }
+
+/// Check if Metal native acceleration is available (macOS/iOS with metal-native feature).
+#[pyfunction]
+pub fn is_metal_available() -> bool {
+    #[cfg(all(any(target_os = "macos", target_os = "ios"), feature = "metal-native"))]
+    {
+        crate::metal::MetalBackend::is_available()
+    }
+    #[cfg(not(all(any(target_os = "macos", target_os = "ios"), feature = "metal-native")))]
+    {
+        false
+    }
+}

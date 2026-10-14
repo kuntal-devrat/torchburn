@@ -10,7 +10,6 @@ import json
 
 import pytest
 import torch
-
 from torchburn import _torchburn as tb
 
 
@@ -44,7 +43,13 @@ def test_output_is_a_fresh_allocation():
     """Engine outputs are new Rust allocations, not aliases of the inputs."""
     a = torch.randn(4, 4)
     payload = _payload(
-        [{"id": 0, "target": "add", "args": [{"kind": "slot", "index": 0}, {"kind": "slot", "index": 1}]}],
+        [
+            {
+                "id": 0,
+                "target": "add",
+                "args": [{"kind": "slot", "index": 0}, {"kind": "slot", "index": 1}],
+            }
+        ],
         [{"shape": [4, 4], "dtype": "f32"}, {"shape": [4, 4], "dtype": "f32"}],
         [0],
     )
@@ -58,7 +63,13 @@ def test_output_capsule_gc_no_double_free():
     """An unconsumed output capsule must free its buffer exactly once."""
     a = torch.randn(8, 8)
     payload = _payload(
-        [{"id": 0, "target": "mul", "args": [{"kind": "slot", "index": 0}, {"kind": "slot", "index": 0}]}],
+        [
+            {
+                "id": 0,
+                "target": "mul",
+                "args": [{"kind": "slot", "index": 0}, {"kind": "slot", "index": 0}],
+            }
+        ],
         [{"shape": [8, 8], "dtype": "f32"}],
         [0],
     )
@@ -87,7 +98,13 @@ def test_input_capsule_consumed_by_torch_still_safe():
 def test_non_cpu_tensor_rejected_with_marker():
     """Non-CPU or unsupported-dtype inputs produce TB_UNSUPPORTED errors."""
     payload = _payload(
-        [{"id": 0, "target": "add", "args": [{"kind": "slot", "index": 0}, {"kind": "slot", "index": 1}]}],
+        [
+            {
+                "id": 0,
+                "target": "add",
+                "args": [{"kind": "slot", "index": 0}, {"kind": "slot", "index": 1}],
+            }
+        ],
         [{"shape": [2], "dtype": "f32"}, {"shape": [2], "dtype": "f32"}],
         [0],
     )
@@ -98,10 +115,30 @@ def test_non_cpu_tensor_rejected_with_marker():
 
 def test_shape_spec_mismatch_rejected():
     payload = _payload(
-        [{"id": 0, "target": "add", "args": [{"kind": "slot", "index": 0}, {"kind": "slot", "index": 1}]}],
+        [
+            {
+                "id": 0,
+                "target": "add",
+                "args": [{"kind": "slot", "index": 0}, {"kind": "slot", "index": 1}],
+            }
+        ],
         [{"shape": [2, 3], "dtype": "f32"}, {"shape": [2, 3], "dtype": "f32"}],
         [0],
     )
     a = torch.randn(5, 5)
     with pytest.raises(RuntimeError, match="TB_UNSUPPORTED"):
         tb.execute(payload, [a.__dlpack__(), a.__dlpack__()])
+
+
+def test_negative_strided_tensor_rejected_safely():
+    """Negative strides (e.g. from reversed NumPy arrays) produce TB_UNSUPPORTED safely."""
+    import numpy as np
+
+    payload = _payload(
+        [{"id": 0, "target": "relu", "args": [{"kind": "slot", "index": 0}]}],
+        [{"shape": [4, 4], "dtype": "f32"}],
+        [0],
+    )
+    arr = np.ones((4, 4), dtype=np.float32)[::-1]
+    with pytest.raises(RuntimeError, match="TB_UNSUPPORTED"):
+        tb.execute(payload, [arr.__dlpack__()])
