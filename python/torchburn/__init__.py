@@ -63,16 +63,29 @@ from . import _torchburn
 
 _native = _torchburn
 
-# Default RAYON_NUM_THREADS to physical core count if not set to prevent hyperthread contention
-if "RAYON_NUM_THREADS" not in os.environ:
+
+def configure_rayon_threads() -> None:
+    """Default ``RAYON_NUM_THREADS`` to the physical core count, if unset.
+
+    Previously this happened as an import-time side effect of ``import
+    torchburn``, which surprised users embedding the library in larger
+    applications (a library should not mutate process-wide environment).
+    It is now explicit: the LLM CLI and ``LLM.from_pretrained`` call it
+    automatically, and ``torch.compile`` users can call it themselves
+    **before** the first TorchBurn kernel runs (Rayon reads the value when its
+    global pool is first created and ignores later changes). If the user has
+    already set ``RAYON_NUM_THREADS``, it is left untouched.
+    """
+    if "RAYON_NUM_THREADS" in os.environ:
+        return
     try:
         import psutil
 
-        _phys_cores = psutil.cpu_count(logical=False) or max((os.cpu_count() or 8) // 2, 1)
+        phys_cores = psutil.cpu_count(logical=False) or max((os.cpu_count() or 8) // 2, 1)
     except (ImportError, AttributeError, OSError):
         # psutil unavailable: estimate physical cores as half of logical (hyperthreading)
-        _phys_cores = max((os.cpu_count() or 8) // 2, 1)
-    os.environ["RAYON_NUM_THREADS"] = str(_phys_cores)
+        phys_cores = max((os.cpu_count() or 8) // 2, 1)
+    os.environ["RAYON_NUM_THREADS"] = str(phys_cores)
 
 from . import ops, quantization
 from ._backend import register, torchburn_backend
@@ -132,7 +145,9 @@ except AttributeError:
 
         __version__ = _pkg_version("torchburn")
     except Exception:
-        __version__ = "1.0.0"
+        # Never fabricate a real-looking version (the old fallback claimed
+        # "1.0.0", which misreported the installed distribution).
+        __version__ = "0+unknown"
 
 
 def gpu_info():
@@ -196,6 +211,7 @@ __all__ = [
     "rayon_threads",
     "capture",
     "compile",
+    "configure_rayon_threads",
     "gpu_available",
     "gpu_backend",
     "is_metal_available",

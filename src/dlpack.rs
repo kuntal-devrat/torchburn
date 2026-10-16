@@ -535,13 +535,11 @@ impl OwnedTensor {
             }
         };
         let words = bytes.div_ceil(8);
-        if data.capacity() >= words {
-            unsafe {
-                data.set_len(words);
-            }
-        } else {
-            data.resize(words, 0u64);
-        }
+        // `resize` (not `set_len`): a caller-supplied `Vec` may have spare
+        // capacity whose bytes were never initialised — extending the length
+        // over them with `set_len` would be UB when the elements are read.
+        // `resize` zero-initialises any gap, keeping the buffer always valid.
+        data.resize(words, 0u64);
         OwnedTensor { data, shape, dtype }
     }
 

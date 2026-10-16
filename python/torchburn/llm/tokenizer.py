@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 from typing import Any, Dict, List, Optional
 
 from ._registry import fallback_eos_id, repo_snapshot_dir, resolve_repo_id
+
+_LOG = logging.getLogger("torchburn")
 
 
 class UniversalTokenizer:
@@ -36,8 +39,16 @@ class UniversalTokenizer:
         token: Optional[str] = None,
         cache_dir: Optional[str] = None,
         local_files_only: bool = False,
+        trust_remote_code: bool = False,
     ) -> UniversalTokenizer:
-        """Loads a tokenizer from local directory or HuggingFace Hub."""
+        """Loads a tokenizer from local directory or HuggingFace Hub.
+
+        Args:
+            trust_remote_code: Opt-in to executing custom code bundled with the
+                model repo (HuggingFace ``trust_remote_code``). Defaults to
+                ``False`` because enabling it executes arbitrary code from the
+                model repository. Only enable for repositories you trust.
+        """
         # 1. Fast path: check for local tokenizer files in model_id_or_path or HF cache
         cand_dirs = []
         if os.path.isdir(model_id_or_path):
@@ -56,13 +67,15 @@ class UniversalTokenizer:
                     from transformers import AutoTokenizer
 
                     hf_tok = AutoTokenizer.from_pretrained(
-                        cand_dir, local_files_only=True, trust_remote_code=True
+                        cand_dir,
+                        local_files_only=True,
+                        trust_remote_code=trust_remote_code,
                     )
                     eos_id = hf_tok.eos_token_id or 151643
                     pad_id = hf_tok.pad_token_id or eos_id
                     return cls(hf_tok, eos_token_id=eos_id, pad_token_id=pad_id)
-                except Exception:
-                    pass
+                except Exception as exc:
+                    _LOG.debug("AutoTokenizer load failed for %s: %s", cand_dir, exc)
 
                 # Fallback to fast tokenizers.Tokenizer
                 try:
@@ -84,8 +97,8 @@ class UniversalTokenizer:
                             except (TypeError, ValueError):
                                 eos_id = fallback_eos_id(cand_dir)
                     return cls(tok_fast, eos_token_id=eos_id)
-                except Exception:
-                    pass
+                except Exception as exc:
+                    _LOG.debug("tokenizers.Tokenizer load failed for %s: %s", cand_dir, exc)
 
         # 2. Online HuggingFace Hub resolution if not found locally
         try:
@@ -99,13 +112,13 @@ class UniversalTokenizer:
                 token=auth_token,
                 cache_dir=cache_dir,
                 local_files_only=local_files_only,
-                trust_remote_code=True,
+                trust_remote_code=trust_remote_code,
             )
             eos_id = hf_tok.eos_token_id or 151643
             pad_id = hf_tok.pad_token_id or eos_id
             return cls(hf_tok, eos_token_id=eos_id, pad_token_id=pad_id)
-        except Exception:
-            pass
+        except Exception as exc:
+            _LOG.debug("AutoTokenizer Hub resolution failed for %s: %s", model_id_or_path, exc)
 
         if local_files_only:
             raise FileNotFoundError(

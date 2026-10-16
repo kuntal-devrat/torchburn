@@ -96,7 +96,10 @@ with parity tests green in all feature tiers; two wheel variants build in CI.
 
 ### 1.3 Threading
 - Rayon scaling is near-linear (18→53 tok/s, 1→8 threads). Add: `RAYON_NUM_THREADS` default =
-  physical cores (not logical), P-core pinning hint via `core_affinity` crate where E-cores exist,
+  physical cores (not logical) — landed as the explicit
+  `torchburn.configure_rayon_threads()` helper (the LLM CLI and
+  `LLM.from_pretrained` call it; `import torchburn` itself no longer mutates
+  process-wide env) — P-core pinning hint via `core_affinity` crate where E-cores exist,
   and a size-based cutoff (the `m <= 8` pattern at `src/linalg.rs:343-361`) generalized so tiny
   GEMVs skip the pool entirely.
 - Bench gate: no regression at 1/2 threads; ≥ 70 tok/s at 8 threads; latency of a single

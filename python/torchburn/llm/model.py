@@ -165,7 +165,7 @@ class UniversalAttention(nn.Module):
             self.qkv_proj = QuantizedLinear(
                 self.hidden_size, total_dim, bias=bias, bits=bits, group_size=64
             )
-            self.o_proj = QuantizedLinear(
+            self.o_proj: Union[nn.Linear, QuantizedLinear] = QuantizedLinear(
                 self.num_heads * self.head_dim,
                 self.hidden_size,
                 bias=False,
@@ -261,7 +261,7 @@ class UniversalAttention(nn.Module):
         if kv_cache is not None:
             if isinstance(kv_cache, StaticKVCache):
                 k, v = kv_cache.update(k, v, offset=offset)
-                new_kv_cache = kv_cache
+                new_kv_cache: Union[StaticKVCache, Tuple[torch.Tensor, torch.Tensor]] = kv_cache
             else:
                 prev_k, prev_v = kv_cache
                 k = torch.cat([prev_k, k], dim=2)
@@ -311,13 +311,13 @@ class UniversalMLP(nn.Module):
             from torchburn.quantization import QuantizedLinear
 
             bits = 4 if quant == "int4" else 8
-            self.gate_proj = QuantizedLinear(
+            self.gate_proj: Union[nn.Linear, QuantizedLinear] = QuantizedLinear(
                 config.hidden_size, config.intermediate_size, bias=False, bits=bits, group_size=64
             )
-            self.up_proj = QuantizedLinear(
+            self.up_proj: Union[nn.Linear, QuantizedLinear] = QuantizedLinear(
                 config.hidden_size, config.intermediate_size, bias=False, bits=bits, group_size=64
             )
-            self.down_proj = QuantizedLinear(
+            self.down_proj: Union[nn.Linear, QuantizedLinear] = QuantizedLinear(
                 config.intermediate_size, config.hidden_size, bias=False, bits=bits, group_size=64
             )
         else:
@@ -419,8 +419,8 @@ class UniversalTransformerBlock(nn.Module):
             config.hidden_size, eps=config.rms_norm_eps, norm_type=config.norm_type
         )
         if config.num_experts > 0:
-            self.moe = UniversalMoE(config, quant=quant)
-            self.mlp = None
+            self.moe: Optional[UniversalMoE] = UniversalMoE(config, quant=quant)
+            self.mlp: Optional[UniversalMLP] = None
         else:
             self.moe = None
             self.mlp = UniversalMLP(config, quant=quant)
@@ -478,8 +478,8 @@ class UniversalTransformer(nn.Module):
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps, norm_type=config.norm_type)
         self.position_encoding = config.position_encoding
         if self.position_encoding == "learned":
-            self.position_embedding = LearnedPositionEmbedding(
-                config.max_position_embeddings, config.hidden_size
+            self.position_embedding: Optional[LearnedPositionEmbedding] = (
+                LearnedPositionEmbedding(config.max_position_embeddings, config.hidden_size)
             )
         else:
             self.position_embedding = None
@@ -493,7 +493,7 @@ class UniversalTransformer(nn.Module):
             from torchburn.quantization import QuantizedLinear
 
             bits = 4 if quant == "int4" else 8
-            self.lm_head = QuantizedLinear(
+            self.lm_head: Union[nn.Linear, QuantizedLinear] = QuantizedLinear(
                 config.hidden_size, config.vocab_size, bias=False, bits=bits, group_size=64
             )
         else:

@@ -2,6 +2,10 @@
 name = "torchburn"
 version = "1.0.2"
 edition = "2021"
+# Verified MSRV: builds clean on 1.89 (1.85 fails: AVX-512 intrinsics require
+# `stdarch_x86_avx512` stable since 1.89; 1.80 fails: edition2024 dependencies).
+# Enforced by the `msrv` job in .github/workflows/ci.yml.
+rust-version = "1.89"
 description = "Hardware-agnostic PyTorch compilation backend: PyO3 + DLPack zero-copy FFI bridge to a Rust execution engine with BLAKE3 structural graph caching"
 license = "Apache-2.0"
 keywords = ["pytorch", "dlpack", "burn", "compile", "ffi"]

@@ -100,3 +100,36 @@ def test_backend_returns_compiled_callable():
     x = torch.randn(2, 2)
     out = compiled(x)
     assert torch.allclose(out, model(x))
+
+
+def test_call_module_graphs_count_as_unsupported():
+    """``torch.fx.symbolic_trace`` produces ``call_module`` nodes, which the
+    native engine cannot execute — they must count as unsupported so the graph
+    gets partitioned.
+
+    Regression test: ``_has_unsupported_nodes`` previously inspected only
+    ``call_function``/``call_method`` nodes, so module-call graphs were compiled
+    whole and degraded to a per-node eager fallback loop on every forward.
+    """
+    from torchburn._backend import _has_unsupported_nodes
+
+    net = torch.nn.Sequential(torch.nn.Linear(8, 8), torch.nn.ReLU()).eval()
+    gm = torch.fx.symbolic_trace(net)
+    assert any(n.op == "call_module" for n in gm.graph.nodes), (
+        "expected symbolic_trace to emit call_module nodes"
+    )
+    assert _has_unsupported_nodes(gm)
+
+
+def test_call_module_graph_executes_correctly_via_backend():
+    """End-to-end: a symbolic_trace'd module-call graph routed through
+    ``torchburn_backend`` must produce eager-correct results (it is partitioned
+    to the eager path instead of being compiled whole)."""
+    from torchburn._backend import torchburn_backend
+
+    net = torch.nn.Sequential(torch.nn.Linear(8, 4), torch.nn.ReLU()).eval()
+    gm = torch.fx.symbolic_trace(net)
+    fn = torchburn_backend(gm, [torch.randn(2, 8)])
+    x = torch.randn(2, 8)
+    out = fn(x)
+    assert torch.allclose(out, net(x), atol=1e-6)

@@ -81,12 +81,17 @@ pub fn rayon_threads() -> usize {
 
 /// Dropout forward pass: apply dropout mask and return output capsule.
 /// If training=false, returns input unchanged (still a copy for capsule ownership).
+///
+/// `seed` (optional): when provided, the mask is fully deterministic for a
+/// given input shape (independent of thread scheduling), enabling reproducible
+/// training runs. When `None`, a random seed is drawn per call.
 #[pyfunction]
 pub fn dropout_forward(
     py: Python<'_>,
     input: &Bound<'_, PyCapsule>,
     p: f64,
     training: bool,
+    seed: Option<u64>,
 ) -> PyResult<Py<PyCapsule>> {
     use dlpack::DType;
     if !training || p <= 0.0 {
@@ -130,7 +135,8 @@ pub fn dropout_forward(
         let n = dlpack::elem_count(&shape);
         let mut out = dlpack::OwnedTensor::new(dtype, shape);
         let scale = 1.0 / (1.0 - p);
-        let seed: u64 = rand::Rng::gen(&mut rand::thread_rng());
+        // Explicit seed wins; otherwise draw fresh entropy per call.
+        let seed: u64 = seed.unwrap_or_else(|| rand::Rng::gen(&mut rand::thread_rng()));
         match dtype {
             DType::F32 => {
                 let src =

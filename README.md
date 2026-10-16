@@ -290,14 +290,14 @@ See [`docs/ops_coverage.md`](docs/ops_coverage.md) for full signatures and test 
 | `TORCHBURN_CACHE_SIZE` | `1024` | Integer | Maximum entries in the structural BLAKE3 graph cache. |
 | `TORCHBURN_PREPARED_CACHE_SIZE` | `1024` | Integer | Maximum entries in the prepared graph execution cache. |
 | `TORCHBURN_DEBUG` | `0` | `0`, `1` | Enables verbose diagnostics and post-mortem shutdown logging. |
-| `RAYON_NUM_THREADS` | Physical cores | Integer | Worker thread count for Rayon compute pools. |
+| `RAYON_NUM_THREADS` | Unset | Integer | Worker thread count for Rayon compute pools. If unset, the LLM CLI and `LLM.from_pretrained` default it to the physical core count via `torchburn.configure_rayon_threads()`; plain `torch.compile` users can call that helper themselves **before** the first kernel runs. |
 
 ---
 
 ## 🛠️ Building From Source
 
 ### Prerequisites
-* Rust 1.75+ (`rustup default stable`)
+* Rust 1.89+ (verified MSRV, enforced by the `msrv` CI job; `rustup default stable`)
 * Python 3.9+ with `pip`
 * `maturin` (`pip install maturin`)
 

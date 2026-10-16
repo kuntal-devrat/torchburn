@@ -208,7 +208,7 @@ class _BaseInterpreter:
         self._phases = []
         self._combined_input_keys = []
         self._combined_output_ids = []
-        self._node_phase = {}
+        self._node_phase: dict[int, int] = {}
         self._needed_cache: dict[tuple, set[int]] = {}
         self._needed_lock = threading.Lock()
         self._graph_handle = None
@@ -276,9 +276,9 @@ class _BaseInterpreter:
 
         node_base = len(all_input_keys)
 
-        payload_nodes = []
+        payload_nodes: list[dict[str, Any]] = []
         for node in native_nodes:
-            pargs = []
+            pargs: list[dict[str, Any]] = []
             for arg in node["args"]:
                 kind = arg.get("kind", "")
                 if kind == "seq":
@@ -651,9 +651,9 @@ class _BaseInterpreter:
                 _add(arg, node)
 
         base = len(run_inputs)
-        payload_nodes = []
+        payload_nodes: list[dict[str, Any]] = []
         for node in nodes:
-            pargs = []
+            pargs: list[dict[str, Any]] = []
             for arg in node["args"]:
                 kind = arg.get("kind", "")
                 if kind == "seq":
@@ -846,7 +846,23 @@ class _BaseInterpreter:
                 return args[0].reshape(*args[1:], **kwargs)
             return getattr(args[0], node["fx_target"])(*args[1:], **kwargs)
         if op == "call_module":
-            return getattr(self.gm, node["fx_target"])(*args, **kwargs)
+            target = str(node["fx_target"])
+            module: Any = self.gm
+            try:
+                # Resolve dotted module paths (e.g. "layers.0"). ``getattr``
+                # works for numeric names too via nn.Module.__getattr__.
+                for part in target.split("."):
+                    module = getattr(module, part)
+            except AttributeError:
+                # A cached plan referencing a module name that does not exist on
+                # this GraphModule instance (e.g. after graph splitting). Raise
+                # a clear error instead of a bare AttributeError.
+                raise RuntimeError(
+                    f"torchburn: cannot resolve call_module target {target!r} on "
+                    f"GraphModule {type(self.gm).__name__}; the cached plan may not "
+                    f"match this graph module"
+                ) from None
+            return module(*args, **kwargs)
         if op == "get_attr":
             return getattr(self.gm, node["fx_target"])
         raise RuntimeError(f"torchburn: cannot execute node with fx_op {op!r}")

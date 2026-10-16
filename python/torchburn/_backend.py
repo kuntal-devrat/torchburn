@@ -65,9 +65,17 @@ def _is_node_supported(node: torch.fx.Node) -> bool:
 
 
 def _has_unsupported_nodes(gm: torch.fx.GraphModule) -> bool:
-    """Check if a graph module contains any nodes unsupported by TorchBurn."""
+    """Check if a graph module contains any nodes unsupported by TorchBurn.
+
+    Covers ``call_function``, ``call_method`` **and** ``call_module``: a
+    ``call_module`` node (e.g. produced by ``torch.fx.symbolic_trace``) resolves
+    to a submodule that the native engine cannot execute, so it must count as
+    unsupported. Previously only function/method calls were checked, which let
+    whole module-call graphs skip partitioning and degrade to a per-node eager
+    fallback loop at every forward.
+    """
     for node in gm.graph.nodes:
-        if node.op in ("call_function", "call_method"):
+        if node.op in ("call_function", "call_method", "call_module"):
             if not _is_node_supported(node):
                 return True
     return False
@@ -184,7 +192,9 @@ def _partition_graph(gm: torch.fx.GraphModule, example_inputs: list[torch.Tensor
 
 
 def _compile_boxed(gm: torch.fx.GraphModule, example_inputs: Any):
-    make_boxed_func = None
+    # ``Any`` so the fallback imports below (which resolve to callables) and
+    # the ``None`` sentinel share one compatible declared type for mypy.
+    make_boxed_func: Any = None
     try:
         from torch._functorch.aot_autograd import make_boxed_func  # type: ignore[import-untyped]
     except (ImportError, AttributeError):
