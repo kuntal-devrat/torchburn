@@ -675,8 +675,10 @@ def _extract_kwargs(fx_kwargs: Any, node_id: dict) -> dict[str, Any]:
             out[k] = v
         elif isinstance(v, (list, tuple)):
             # e.g. dims=[0, 1], normalized_shape=(16,)
-            serialized = []
+            serialized: list[int | float] | None = []
             for item in v:
+                if serialized is None:
+                    break  # already marked unserialisable (mypy flow guard)
                 if isinstance(item, (bool, int, float)):
                     serialized.append(item)
                 else:

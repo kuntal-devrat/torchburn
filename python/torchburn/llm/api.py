@@ -40,6 +40,11 @@ class LLM:
         tokenizer: UniversalTokenizer,
         config: Optional[EngineConfig] = None,
     ):
+        # Apply the physical-core Rayon default before any kernel runs
+        # (explicit replacement for the removed import-time env mutation).
+        from torchburn import configure_rayon_threads
+
+        configure_rayon_threads()
         self.model = model
         self.tokenizer = tokenizer
         self.engine_config = config or EngineConfig()
@@ -63,6 +68,7 @@ class LLM:
         cache_dir: Optional[str] = None,
         num_threads: Optional[int] = None,
         local_files_only: bool = False,
+        trust_remote_code: bool = False,
     ) -> LLM:
         """Loads any model from Hugging Face Hub, local trained directory, or weight file.
 
@@ -74,6 +80,9 @@ class LLM:
             cache_dir: Custom directory for caching downloaded weights.
             num_threads: Number of CPU threads to utilize.
             local_files_only: Whether to exclusively look for local files without internet access.
+            trust_remote_code: Opt-in to executing custom tokenizer code bundled
+                with the model repo. Defaults to ``False`` (recommended); only
+                enable for repositories you trust.
         """
         engine_cfg = EngineConfig(device=device, quantization=quant, num_threads=num_threads)
         model, _config, root_path = ModelLoader.load(
@@ -96,6 +105,7 @@ class LLM:
             token=token,
             cache_dir=cache_dir,
             local_files_only=local_files_only,
+            trust_remote_code=trust_remote_code,
         )
         return cls(model, tokenizer, engine_cfg)
 

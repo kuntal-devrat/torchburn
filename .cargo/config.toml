@@ -10,8 +10,13 @@
 #   neoverse-n1 (ARMv8.2+dotprod, Graviton2+/Ampere)          — portable aarch64 Linux
 #   apple-m1    (ARMv8.4, Apple Silicon macOS)                — portable macOS arm64
 #   apple-a14   (ARMv8.4, iPhone 12+)                         — iOS baseline
-[build]
-rustflags = ["-C", "overflow-checks=off", "-C", "debug-assertions=off"]
+#
+# NB: overflow-checks / debug-assertions are intentionally NOT disabled here.
+# A previous `[build]` section turned them off for every profile — including
+# `cargo test` — which meant the test suite could never catch an integer
+# overflow in index arithmetic. Debug/test builds now keep the Rust defaults
+# (checks ON); the release profile disables them for throughput in
+# [profile.release] in Cargo.toml only, where the decision belongs.
 
 [target.x86_64-unknown-linux-gnu]
 rustflags = ["-C", "target-cpu=x86-64-v2", "-C", "link-arg=-Wl,-z,relro,-z,now"]

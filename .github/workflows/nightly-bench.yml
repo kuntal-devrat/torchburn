@@ -4,6 +4,11 @@ name: nightly-bench
 # `perf-history` branch and opens an issue if any tracked tok/s regressed
 # >10% vs the previous baseline.
 #
+# Triage SLA: opened regression issues get the `bench-regression` label and
+# must be triaged (confirmed real / explained as noise) within one week;
+# untriaged regressions older than 14 days are escalated to a maintainer.
+# Create the label once: `gh label create bench-regression --color FBCA04`.
+#
 # Requires a self-hosted runner labeled `bench` with the model available at
 # TORCHBURN_TEST_MODEL (or pass `model` via workflow_dispatch). On the first
 # run the workflow records a baseline and exits 0 (no prior result to compare).

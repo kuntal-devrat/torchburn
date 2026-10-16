@@ -50,19 +50,55 @@ jobs:
         run: cargo fmt -- --check
 
       - name: Install cargo-audit
-        run: cargo install cargo-audit --locked || true
+        run: cargo install cargo-audit --locked
 
+      # Blocking security audit (previously `|| true`, which made the gate
+      # decorative — the job stayed green regardless of advisories).
+      #
+      # Verified clean today (exit 0) with exactly the two ignores below.
+      # They are the only remaining *vulnerabilities* and both live in pyo3
+      # 0.25, our direct FFI dependency; the upstream fix needs pyo3 >= 0.29,
+      # which is a major-version migration tracked separately, not something a
+      # security-gate PR should smuggle in. Neither is reachable from this
+      # crate's code today:
+      #   RUSTSEC-2026-0176 — OOB read in `nth`/`nth_back` on PyList/PyTuple
+      #     iterators. This crate has zero `.nth()`/`.nth_back()` call sites; the
+      #     only PyList traversal is `for item in list.iter()`
+      #     (src/engine/payload.rs), which uses `next()` and never the buggy
+      #     `nth` fast path.
+      #   RUSTSEC-2026-0177 — missing `Sync` bound on
+      #     `PyCFunction::new_closure`: `new_closure` is never used.
+      # Add a new ignore only with a linked issue explaining why it cannot
+      # possibly apply to this crate. Unmaintained/yanked *warnings*
+      # (bincode, paste, zip) are not vulnerabilities and do not fail the run.
       - name: Cargo audit
-        run: cargo audit --ignore RUSTSEC-2026-0176 --ignore RUSTSEC-2026-0177 --ignore RUSTSEC-2025-0141 --ignore RUSTSEC-2020-0040 || true
+        run: cargo audit --ignore RUSTSEC-2026-0176 --ignore RUSTSEC-2026-0177
 
-      - name: Install pip-audit and mypy
-        run: pip install pip-audit mypy
+      - name: Install pip-audit
+        run: pip install pip-audit
 
-      - name: pip-audit
-        run: pip-audit --skip-editable || true
+      # Blocking dependency vulnerability scan over the project's DECLARED
+      # dependency surface (runtime + llm extras, from pyproject.toml).
+      # Auditing the ambient environment instead would make the gate fail on
+      # runner bootstrap tooling (pip/setuptools advisories churn weekly and
+      # are not shipped to users) — verified: the requirements audit is clean
+      # today, so the gate is meaningful without being born-red.
+      - name: pip-audit (declared dependency surface)
+        run: |
+          printf 'torch>=2.0
+          numpy
+          psutil>=5.8
+          huggingface-hub>=0.20
+          safetensors>=0.4
+          tokenizers>=0.15
+          transformers>=4.40
+          ' > /tmp/audit-reqs.txt
+          pip-audit --requirement /tmp/audit-reqs.txt
 
+      # Type gate: verified clean (0 errors) — keep blocking so regressions
+      # cannot land silently.
       - name: mypy (strict)
-        run: mypy python/torchburn --ignore-missing-imports --no-implicit-optional || true
+        run: mypy python/torchburn --ignore-missing-imports --no-implicit-optional
 
       - name: Pyright type check
         run: npx --yes pyright python/torchburn
@@ -89,6 +125,61 @@ jobs:
               )
           print(f'version sync ok: {cargo_version}')
           EOF
+
+  # ── Rust test suite ────────────────────────────────────────────────
+  # Previously `cargo test` never ran in CI: the 22 unit tests plus the
+  # tests/parity.rs + tests/avx512 integration tests were never exercised
+  # on any push or PR.
+  test-rust:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "test-rust"
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      # Dev profile keeps Rust's default overflow checks + debug assertions.
+      - name: Cargo test (dev, overflow checks ON)
+        run: cargo test --no-default-features --features matrixmultiply
+
+      # The release profile disables overflow checks for throughput; force
+      # them back on for one run so integer-overflow bugs in hot index/pointer
+      # arithmetic still surface before release builds ship. Uses the
+      # project's `release-fast` profile (thin LTO) to keep CI time sane.
+      # NOTE: an explicit `RUSTFLAGS` env var *replaces* `.cargo/config.toml`
+      # target rustflags, so the portable `x86-64-v2` baseline is repeated
+      # here — without it this step would silently build at the bare
+      # `x86_64` baseline, unlike every other job.
+      - name: Cargo test (release, overflow checks forced ON)
+        run: cargo test --profile release-fast --no-default-features --features matrixmultiply
+        env:
+          RUSTFLAGS: "-C target-cpu=x86-64-v2 -C overflow-checks=on -C debug-assertions=on"
+
+  # ── MSRV (rust-version in Cargo.toml) ───────────────────────────────
+  # Docs used to claim Rust 1.75+ while the code requires 1.89 (AVX-512
+  # intrinsics). Keep the declared MSRV honest.
+  msrv:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.89"
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "msrv-1.89"
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: cargo check on MSRV
+        run: cargo check --no-default-features --features matrixmultiply,extension-module
 
   # ── Test Matrix ────────────────────────────────────────────────────
   # Optimized: 9 jobs in parallel (max 8) vs 19 before — 50% faster, Swatinem cache
@@ -169,6 +260,21 @@ jobs:
           fi
         env:
           TORCHBURN_ENGINE: ${{ matrix.feature || 'native_cpu' }}
+          RUST_BACKTRACE: 1
+
+      # Test isolation: each file must pass in its own process. A hidden
+      # ordering dependency (e.g. a test file forgetting `import torchburn`
+      # and relying on a previously collected file having done so) only shows
+      # up when files run alone — the full-suite run masks it.
+      - name: Test isolation (per-file runs)
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.11' && matrix.feature == ''
+        shell: bash
+        run: |
+          for f in test_fallback.py test_backend.py test_ops.py test_cache.py; do
+            python -m pytest "tests/$f" -q --timeout=300 -p no:cacheprovider
+          done
+        env:
+          TORCHBURN_ENGINE: native_cpu
           RUST_BACKTRACE: 1
 
   # ── Build Wheels (all platforms) ───────────────────────────────────
@@ -281,7 +387,7 @@ jobs:
 
   # ── Publish to TestPyPI (on PR) ───────────────────────────────────
   publish-testpypi:
-    needs: [lint, test, build-wheels, build-sdist]
+    needs: [lint, test-rust, msrv, test, build-wheels, build-sdist]
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request'
     permissions:
@@ -317,7 +423,7 @@ jobs:
 
   # ── Publish to PyPI (on tag) ──────────────────────────────────────
   publish-pypi:
-    needs: [lint, test, build-wheels, build-sdist]
+    needs: [lint, test-rust, msrv, test, build-wheels, build-sdist]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v')
     permissions:
@@ -347,9 +453,13 @@ jobs:
           name: sdist
           path: dist
       - name: Publish to PyPI
+        # OIDC trusted publishing only (id-token: write above). The previous
+        # long-lived `PYPI_API_TOKEN` secret has been removed: rotating/expired
+        # tokens silently break releases, while OIDC grants a short-lived token
+        # per run. Requires the `pypi` environment to be registered as a
+        # Trusted Publisher for this repo/workflow on pypi.org.
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
-          password: ${{ secrets.PYPI_API_TOKEN }}
           skip-existing: true
 
   # ── GitHub Release assets (llama.cpp-style) ───────────────────────

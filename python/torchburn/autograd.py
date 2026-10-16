@@ -497,7 +497,7 @@ def _backward_single(
         grad_caps = _native.backward_single(entry.target, up_cap, saved_caps, kwargs_json)
 
         # Convert result capsules back to torch tensors, reshape to original saved shapes
-        grads = []
+        grads: list[Optional[torch.Tensor]] = []
         for c, orig_shape in zip(grad_caps, saved_shapes):
             g = torch.from_dlpack(c)
             if g.dim() > 0 and len(orig_shape) == 0:

@@ -2,6 +2,11 @@
 
 Thank you for your interest in contributing to TorchBurn! We welcome contributions from the community to help make portable, high-efficiency deep learning inference and training accessible everywhere without CUDA lock-in.
 
+> **Canonical guide**: the detailed development workflow, coding conventions,
+> and PR procedures live in [`docs/contributing.md`](docs/contributing.md).
+> This file is the GitHub-facing summary — if the two ever disagree, the
+> `docs/` version wins; please update both in the same PR.
+
 ---
 
 ## Code of Conduct
@@ -44,7 +49,7 @@ TorchBurn is organized into three synergistic layers:
 
 ### Prerequisites
 
-1. **Rust toolchain** (1.75+ recommended):
+1. **Rust toolchain** (1.89+ required — the MSRV declared in `Cargo.toml` and enforced by the `msrv` CI job):
    ```bash
    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
    rustup component add clippy rustfmt

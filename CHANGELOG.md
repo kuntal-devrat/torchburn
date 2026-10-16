@@ -5,6 +5,78 @@ All notable changes to TorchBurn will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Security
+- **Tokenizer remote code is opt-in**: `UniversalTokenizer.from_pretrained` and
+  `LLM.from_pretrained` no longer pass `trust_remote_code=True` implicitly;
+  both expose `trust_remote_code: bool = False` so custom model-repo code must
+  be explicitly enabled.
+- **CI supply-chain gates are blocking**: `cargo audit`, `pip-audit`, and
+  `mypy` previously ran with `|| true` (always green). They now fail the build;
+  `cargo audit` ignores must stay justified in the workflow.
+- **Vulnerable transitive `rustls` bumped to 0.23.46**: `cargo audit`
+  (now blocking) flagged 4 advisories in the `rustls` version pulled in via
+  `ureq`; the lockfile was updated so the gate verifies clean. The only
+  remaining ignores are the two pyo3 0.25 advisories whose fixes require a
+  pyo3 >= 0.29 major migration and neither of which is reachable from this
+  crate's code (justification is inline in `.github/workflows/ci.yml`).
+- **PyPI publish uses OIDC trusted publishing only**: the long-lived
+  `PYPI_API_TOKEN` secret was removed from the release workflow.
+
+### Fixed
+- **`call_module` graphs were never partitioned**:
+  `_has_unsupported_nodes` only inspected `call_function`/`call_method` nodes,
+  so FX graphs produced by `torch.fx.symbolic_trace` (as used by
+  `torchburn.capture`) with unsupported submodule calls were compiled whole and
+  degraded to a per-node eager fallback loop on every forward. `_run_eager`'s
+  `call_module` branch now also resolves dotted module paths and raises a clear
+  error instead of a bare `AttributeError` on plan/graph mismatches.
+- **Test suite isolation**: `tests/conftest.py` (previously empty) now imports
+  `torchburn` so the Dynamo backend is registered for every test module;
+  `test_fallback.py` no longer depends on import ordering (it failed with
+  `InvalidBackend` when run alone). CI gained a per-file isolation job.
+- **Flaky Rust unit tests (~13% failure rate)**:
+  `test_peak_cached_words_tracking` asserted a process-wide peak counter equal
+  to zero while parallel tests held live thread-local caches, and
+  `test_dtype_isolation` compared the process-wide hit counter (bumped by
+  parallel tests). Both now use deterministic, thread-local checks (peak
+  baseline + buffer-pointer identity), and test locks survive sibling
+  panics instead of cascading via mutex poisoning (verified 0/30 failures,
+  previously 4/30).
+- **Integer gradient accumulation**: `autograd::add_in_place` silently
+  dropped gradients for non-float dtypes (`_ => {}`). Integer dtypes (i8/u8/
+  i32/i64) now accumulate with wrapping semantics; bool accumulation refuses
+  loudly instead of silently.
+- **Multi-root autograd tapes now warn**: `backward()` seeds only the last
+  recorded tape entry; when additional unclaimed graph roots are detected a
+  diagnostic warning is emitted instead of silently skipping their gradients
+  (documented single-loss semantics).
+- **`OwnedTensor::from_pool` no longer calls `set_len` over potentially
+  uninitialised spare capacity** (UB if ever fed a `Vec::with_capacity`);
+  it uses `resize`, which zero-fills the gap.
+- **Version fallback never lies**: a failed metadata lookup now yields
+  `0+unknown` instead of fabricating `1.0.0`.
+
+### Changed
+- **Overflow checks restored for dev/test profiles**: the global
+  `[build] rustflags` override in `.cargo/config.toml` disabled
+  `overflow-checks`/`debug-assertions` for every profile (including
+  `cargo test`, defeating the point of the test suite). Checks are now on for
+  dev/test and disabled only in `[profile.release]`, with a CI release test
+  run that forces them back on.
+- **MSRV is real and enforced**: `rust-version = "1.89"` in `Cargo.toml`
+  (verified: 1.85 fails on AVX-512 intrinsics, 1.80 fails on edition2024
+  dependencies); docs no longer claim 1.75+; a `msrv` CI job pins it.
+- **`cargo test` now runs in CI** (unit + `tests/parity.rs` + AVX-512
+  integration tests were previously never executed on any push or PR).
+- **No import-time env mutation**: `import torchburn` no longer sets
+  `RAYON_NUM_THREADS`; the explicit `torchburn.configure_rayon_threads()`
+  helper is called by the LLM CLI and `LLM.from_pretrained` instead.
+- **Reproducible dropout**: `dropout_forward` accepts an optional `seed`;
+  when provided the mask is deterministic for a given shape (thread-scheduling
+  independent), enabling reproducible training runs.
+
 ## [1.0.2] - 2026-10-14
 
 ### Fixed

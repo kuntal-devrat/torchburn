@@ -10,6 +10,7 @@ from __future__ import annotations
 import warnings
 
 import torch
+import torchburn  # noqa: F401  (registers the "torchburn" Dynamo backend)
 
 
 def _assert_fallback_warns(call):

@@ -248,6 +248,15 @@ unsafe fn owned_from_borrowed(b: &BorrowedTensor) -> OwnedTensor {
 /// `leaf_grads` is a mutable reference to a map from tensor ID → gradient.
 /// Leaf tensors (parameters) accumulate into this map; intermediate
 /// gradients are consumed and freed after each op.
+///
+/// ## Single-loss semantics
+///
+/// `grad_output` is seeded into the **last recorded tape entry only**. This is
+/// correct for the standard single-loss training loop (one final loss node).
+/// For multi-root graphs — e.g. a model with several independent outputs —
+/// only the last root is differentiated; a diagnostic warning is emitted when
+/// additional unclaimed roots are detected. Passing per-output gradients is
+/// not supported by this API.
 pub fn backward(grad_output: &OwnedTensor, leaf_grads: &mut HashMap<usize, OwnedTensor>) {
     if !is_enabled() && ACTIVE_RECORDING_THREADS.load(std::sync::atomic::Ordering::Relaxed) > 0 {
         eprintln!(
@@ -258,6 +267,34 @@ pub fn backward(grad_output: &OwnedTensor, leaf_grads: &mut HashMap<usize, Owned
     }
     // Map to accumulate intermediate gradients by tensor ID across branches.
     let mut node_grads: HashMap<usize, OwnedTensor> = HashMap::new();
+
+    // Diagnose multi-root tapes (see the `backward` docs): any earlier entry
+    // whose outputs are not consumed by a later entry is an additional graph
+    // root that will silently receive no gradient. Warn instead of staying
+    // silent — this is the classic "one output trained, the rest quietly
+    // ignored" training bug.
+    TAPE_META.with(|m| {
+        let meta = m.borrow();
+        if meta.len() > 1 {
+            let consumed: std::collections::HashSet<usize> = meta
+                .iter()
+                .flat_map(|e| e.input_ids.iter().copied())
+                .collect();
+            let extra_roots = meta[..meta.len() - 1]
+                .iter()
+                .filter(|e| e.output_ids.iter().any(|id| !consumed.contains(id)))
+                .count();
+            if extra_roots > 0 {
+                eprintln!(
+                    "torchburn: autograd: backward() received a single grad_output but the \
+                     tape has {extra_roots} additional unclaimed graph root(s). Only the last \
+                     recorded output is differentiated; per-output gradients are not supported. \
+                     Sum losses into a single scalar output before backward() for full-graph \
+                     gradient flow."
+                );
+            }
+        }
+    });
 
     // Seed the initial gradient by the last op's output tensor ID.
     // This correctly handles DAG-shaped graphs (multiple roots, branching)
@@ -431,7 +468,47 @@ fn add_in_place(a: &mut OwnedTensor, b: &OwnedTensor) {
                 }
             }
         }
-        _ => {}
+        DType::I8 => {
+            let a_data =
+                unsafe { std::slice::from_raw_parts_mut(a.data.as_mut_ptr() as *mut i8, n) };
+            let b_data = unsafe { std::slice::from_raw_parts(b.data.as_ptr() as *const i8, n) };
+            for (x, y) in a_data.iter_mut().zip(b_data.iter()) {
+                *x = x.wrapping_add(*y);
+            }
+        }
+        DType::U8 => {
+            let a_data =
+                unsafe { std::slice::from_raw_parts_mut(a.data.as_mut_ptr() as *mut u8, n) };
+            let b_data = unsafe { std::slice::from_raw_parts(b.data.as_ptr() as *const u8, n) };
+            for (x, y) in a_data.iter_mut().zip(b_data.iter()) {
+                *x = x.wrapping_add(*y);
+            }
+        }
+        DType::I32 => {
+            let a_data =
+                unsafe { std::slice::from_raw_parts_mut(a.data.as_mut_ptr() as *mut i32, n) };
+            let b_data = unsafe { std::slice::from_raw_parts(b.data.as_ptr() as *const i32, n) };
+            for (x, y) in a_data.iter_mut().zip(b_data.iter()) {
+                *x = x.wrapping_add(*y);
+            }
+        }
+        DType::I64 => {
+            let a_data =
+                unsafe { std::slice::from_raw_parts_mut(a.data.as_mut_ptr() as *mut i64, n) };
+            let b_data = unsafe { std::slice::from_raw_parts(b.data.as_ptr() as *const i64, n) };
+            for (x, y) in a_data.iter_mut().zip(b_data.iter()) {
+                *x = x.wrapping_add(*y);
+            }
+        }
+        DType::Bool => {
+            // Boolean "gradients" are not meaningful; refuse loudly rather
+            // than silently dropping the accumulation (the old `_ => {}`
+            // behavior) or panicking across the FFI boundary.
+            eprintln!(
+                "torchburn: autograd: gradient accumulation for bool tensors is not supported; \
+                 the accumulation was skipped"
+            );
+        }
     }
 }
 
@@ -459,7 +536,7 @@ mod tests {
 
     #[test]
     fn test_enable_disable_lifecycle() {
-        let _guard = TEST_LOCK.lock().unwrap();
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner()); // survive poisoned lock from a sibling failure
         let initial = active_recording_threads();
         enable();
         assert!(is_enabled());
@@ -472,7 +549,7 @@ mod tests {
 
     #[test]
     fn test_thread_exit_cleans_up_active_recording_threads() {
-        let _guard = TEST_LOCK.lock().unwrap();
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner()); // survive poisoned lock from a sibling failure
         let initial = active_recording_threads();
         let handle = std::thread::spawn(move || {
             enable();
@@ -487,7 +564,7 @@ mod tests {
 
     #[test]
     fn test_autograd_guard_raii() {
-        let _guard = TEST_LOCK.lock().unwrap();
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner()); // survive poisoned lock from a sibling failure
         let initial = active_recording_threads();
         {
             let guard = AutogradGuard::new();
@@ -501,8 +578,40 @@ mod tests {
     }
 
     #[test]
+    fn test_add_in_place_integer_dtypes_accumulate() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        fn fill<T: Copy>(t: &mut OwnedTensor, vals: &[T]) {
+            unsafe {
+                let v = std::slice::from_raw_parts_mut(t.data.as_mut_ptr() as *mut T, vals.len());
+                v.copy_from_slice(vals);
+            }
+        }
+        fn read<T: Copy>(t: &OwnedTensor, n: usize) -> Vec<T> {
+            unsafe { std::slice::from_raw_parts(t.data.as_ptr() as *const T, n).to_vec() }
+        }
+
+        // Regression: integer gradients used to be SILENTLY DROPPED by the
+        // old `_ => {}` catch-all in add_in_place.
+        let mut a = OwnedTensor::new(DType::I32, vec![3]);
+        let mut b = OwnedTensor::new(DType::I32, vec![3]);
+        fill(&mut a, &[1i32, -2, 3]);
+        fill(&mut b, &[10i32, 20, -30]);
+        add_in_place(&mut a, &b);
+        assert_eq!(read::<i32>(&a, 3), vec![11, 18, -27]);
+
+        // Overflowing integer gradients wrap (no panic across the FFI).
+        let mut x = OwnedTensor::new(DType::I64, vec![2]);
+        let mut y = OwnedTensor::new(DType::I64, vec![2]);
+        fill(&mut x, &[i64::MAX, 5i64]);
+        fill(&mut y, &[1i64, -5i64]);
+        add_in_place(&mut x, &y);
+        assert_eq!(read::<i64>(&x, 2), vec![i64::MIN, 0]);
+    }
+
+    #[test]
     fn test_concurrent_threads_active_count() {
-        let _guard = TEST_LOCK.lock().unwrap();
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner()); // survive poisoned lock from a sibling failure
         let initial = active_recording_threads();
         let barrier = std::sync::Arc::new(std::sync::Barrier::new(5));
         let mut handles = Vec::new();

@@ -2,11 +2,15 @@
 
 Thank you for your interest in contributing to TorchBurn! This guide will help you get started.
 
+> **Note**: this is the canonical, detailed contributing guide (the GitHub
+> landing file [`CONTRIBUTING.md`](../CONTRIBUTING.md) is a summary). If the
+> two disagree, this file wins — please update both in the same PR.
+
 ## Development Setup
 
 ### Prerequisites
 
-- **Rust**: 1.75+ (install via [rustup](https://rustup.rs/))
+- **Rust**: 1.89+ (MSRV declared as `rust-version` in `Cargo.toml`, enforced by the `msrv` CI job; install via [rustup](https://rustup.rs/))
 - **Python**: 3.9+ with pip
 - **maturin**: Build tool for Rust extensions (`pip install maturin`)
 

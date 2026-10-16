@@ -12,10 +12,10 @@
 //!   (the steady-state inference loop) then hit the free list instead of
 //!   paying a fresh malloc + zero-fill per call.
 //!
-//! Reused buffers are **not** re-zeroed: every kernel is expected to fully
-//! overwrite its output (the same contract the thread pool has always used;
-//! `u64` has no trap representations, and the memory was initialised when the
-//! buffer was first allocated).
+//! Recycled buffers are zero-filled in `take_buffer` (`buf.fill(0)`) to
+//! prevent stale-data leaks across thread/process reuse. Kernels are still
+//! expected to fully overwrite their outputs; the zeroing is a defense-in-depth
+//! guarantee, not a substitute for that contract.
 
 use crate::dlpack::{DType, OwnedTensor};
 use std::cell::RefCell;
@@ -105,7 +105,8 @@ fn bucket_index(words: usize) -> usize {
 /// their full output, see the module docs).
 pub fn take_buffer(dtype: DType, words: usize) -> Vec<u64> {
     GLOBAL_ALLOC_COUNT.fetch_add(1, Ordering::Relaxed);
-    // Avoid pooling extremely large buffers (>64MB) to prevent memory bloat
+    // Avoid pooling extremely large buffers (>16M words ≈ 128MB for f32) to
+    // prevent memory bloat.
     if !poolable(words) {
         return vec![0u64; words];
     }
@@ -192,6 +193,9 @@ fn take_buffer_global(dtype: DType, words: usize) -> Vec<u64> {
 /// cap was global, so one shape could evict all others and steady-state
 /// inference with 2-3 live shapes thrashed the allocator). Buffers whose
 /// capacity exceeds 4x the bucket floor are dropped to bound waste.
+///
+/// Buffers are stored as-is (not cleared); `take_buffer` zero-fills on the
+/// way out, so a pooled buffer never exposes stale data to a new consumer.
 pub fn give_buffer(dtype: DType, capacity: usize, buf: Vec<u64>) {
     GLOBAL_RECYCLE_COUNT.fetch_add(1, Ordering::Relaxed);
     // Use actual Vec capacity (caller may pass stale capacity after set_len).
@@ -213,8 +217,9 @@ pub fn give_buffer(dtype: DType, capacity: usize, buf: Vec<u64>) {
         if bucket.len() >= MAX_FREE_PER_BUCKET {
             return;
         }
-        // Don't clear: kernels must fully overwrite output (pool contract).
-        // The buffer keeps its capacity for reuse; set_len restores it in take_buffer.
+        // Stored without clearing: `take_buffer` zero-fills on the way out.
+        // The buffer keeps its capacity for reuse; set_len/resize restores the
+        // requested length in take_buffer.
         bucket.push((capacity, buf));
         pool.cached_words += capacity;
         let total = TOTAL_CACHED_WORDS.fetch_add(capacity, Ordering::Relaxed) + capacity;
@@ -233,7 +238,7 @@ pub fn give_buffer_global(dtype: DType, buf: Vec<u64>) {
     }
     let mut global = GLOBAL_POOL.lock().unwrap_or_else(|e| e.into_inner());
     if global.len() < MAX_GLOBAL_FREE {
-        // Don't clear: kernels must fully overwrite output (pool contract).
+        // Stored without clearing: `take_buffer` zero-fills on the way out.
         global.push((dtype, capacity, buf));
         let total = TOTAL_CACHED_WORDS.fetch_add(capacity, Ordering::Relaxed) + capacity;
         GLOBAL_PEAK_CACHED_WORDS.fetch_max(total, Ordering::Relaxed);
@@ -323,7 +328,7 @@ mod tests {
 
     #[test]
     fn test_take_and_recycle_buffer() {
-        let _guard = TEST_LOCK.lock().unwrap();
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner()); // survive poisoned lock from a sibling failure
         clear_pool();
         reset_pool_stats();
 
@@ -350,7 +355,7 @@ mod tests {
 
     #[test]
     fn test_clear_pool() {
-        let _guard = TEST_LOCK.lock().unwrap();
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner()); // survive poisoned lock from a sibling failure
         clear_pool();
         let buf = take_buffer(DType::F32, 64);
         let cap = buf.capacity();
@@ -367,26 +372,31 @@ mod tests {
 
     #[test]
     fn test_dtype_isolation() {
-        let _guard = TEST_LOCK.lock().unwrap();
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_pool();
         let buf_f32 = take_buffer(DType::F32, 50);
+        let f32_ptr = buf_f32.as_ptr();
         let cap = buf_f32.capacity();
         give_buffer(DType::F32, cap, buf_f32);
 
-        // Asking for F64 should not take from F32 pool bucket
-        let hits_before = GLOBAL_HIT_COUNT.load(Ordering::Relaxed);
+        // Asking for F64 must not take from the F32 bucket. Compare buffer
+        // pointers instead of the process-wide hit counter: parallel tests
+        // also bump that counter, which made the old `hits_before ==
+        // hits_after` equality racy. The F32 buffer is still resident in this
+        // thread's F32 bucket, so a legitimately fresh F64 allocation cannot
+        // share its address.
         let buf_f64 = take_buffer(DType::F64, 50);
-        let hits_after = GLOBAL_HIT_COUNT.load(Ordering::Relaxed);
-        assert_eq!(
-            hits_before, hits_after,
-            "F64 request must not hit F32 bucket"
-        );
         assert_eq!(buf_f64.len(), 50);
+        assert_ne!(
+            buf_f64.as_ptr(),
+            f32_ptr,
+            "F64 request must not take from F32 bucket"
+        );
     }
 
     #[test]
     fn test_edge_case_sizes() {
-        let _guard = TEST_LOCK.lock().unwrap();
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner()); // survive poisoned lock from a sibling failure
         clear_pool();
         // 0 words
         let buf0 = take_buffer(DType::F32, 0);
@@ -409,7 +419,7 @@ mod tests {
 
     #[test]
     fn test_pooled_tensor_roundtrip() {
-        let _guard = TEST_LOCK.lock().unwrap();
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner()); // survive poisoned lock from a sibling failure
         clear_pool();
         let tensor = pooled_tensor(DType::F32, vec![2, 3, 4]);
         assert_eq!(tensor.shape, vec![2, 3, 4]);
@@ -421,7 +431,7 @@ mod tests {
 
     #[test]
     fn test_buffer_zeroing_on_recycle() {
-        let _guard = TEST_LOCK.lock().unwrap();
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner()); // survive poisoned lock from a sibling failure
         clear_pool();
 
         // 1. Thread pool zeroing verification
@@ -462,13 +472,20 @@ mod tests {
 
     #[test]
     fn test_peak_cached_words_tracking() {
-        let _guard = TEST_LOCK.lock().unwrap();
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner()); // survive poisoned lock from a sibling failure
         clear_pool();
         reset_pool_stats();
 
         let initial_stats = get_pool_stats();
+        // Own thread-local pool + global list were just cleared under the
+        // TEST_LOCK, so this is deterministic (only locked tests feed the
+        // global list).
         assert_eq!(initial_stats.cached_words, 0);
-        assert_eq!(initial_stats.peak_cached_words, 0);
+        // `peak_cached_words` is a PROCESS-WIDE high-water mark derived from
+        // `TOTAL_CACHED_WORDS`, which also counts other tests' live
+        // thread-local caches — tests run in parallel, so an absolute `== 0`
+        // here is racy (observed ~13% flake). Capture it as a baseline instead.
+        let baseline_peak = initial_stats.peak_cached_words;
 
         let buf1 = take_buffer(DType::F32, 100);
         let cap1 = buf1.capacity();
@@ -476,6 +493,7 @@ mod tests {
 
         let stats1 = get_pool_stats();
         assert_eq!(stats1.cached_words, cap1);
+        assert!(stats1.peak_cached_words >= baseline_peak);
         assert!(stats1.peak_cached_words >= cap1);
 
         let buf2 = take_buffer(DType::F32, 200);
@@ -485,6 +503,8 @@ mod tests {
         let stats2 = get_pool_stats();
         let expected_total = cap1 + cap2;
         assert_eq!(stats2.cached_words, expected_total);
+        assert!(stats2.peak_cached_words >= baseline_peak);
+        // Both buffers are live in *our* pool, so TOTAL reached at least this.
         assert!(stats2.peak_cached_words >= expected_total);
 
         // Clear pool - cached_words should drop to 0, but peak_cached_words remains high-water mark
@@ -499,7 +519,7 @@ mod tests {
 
     #[test]
     fn test_concurrent_multithread_memory_pool() {
-        let _guard = TEST_LOCK.lock().unwrap();
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner()); // survive poisoned lock from a sibling failure
         clear_pool();
         reset_pool_stats();
 
